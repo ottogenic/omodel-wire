@@ -46,6 +46,29 @@ MODES = {"primary", "subagent", "all"}
 FULL_CAPS = {"reasoning": True, "can_disable": True, "effort_ok": True,
              "graded": True, "reason": "probe: enable_thinking + reasoning_effort"}
 
+# Self-contained declared-config fixture matching the FakeProbes model (no live
+# probing anymore; capabilities come from configs). CI-safe: no sibling repo needed.
+FIXTURE_DIR = tempfile.mkdtemp(prefix="omw-cfg-")
+with open(os.path.join(FIXTURE_DIR, "qwen3.6-27b-nvfp4.toml"), "w", encoding="utf-8") as _f:
+    _f.write(
+        'match = ["Qwen3.6-27B-NVFP4", "qwen3.6-27b-nvfp4", "Qwen3.6-27B", '
+        '"Qwen3.6-35B-A3B-NVFP4", "Qwen3.6-35B"]\n'
+        '[capabilities]\n'
+        'vision = false\nreasoning = true\ntool_call = true\nthinking_control = "enable_thinking"\n'
+        '[presets.reason]\nthinking = true\n[presets.reason.sampling]\n'
+        'temperature = 1.0\ntop_p = 0.95\ntop_k = 20\n'
+        '[presets.code]\nthinking = true\n[presets.code.sampling]\n'
+        'temperature = 0.6\ntop_p = 0.95\ntop_k = 20\n'
+        '[presets.agent]\nthinking = true\n'
+        'options.chat_template_kwargs = { preserve_thinking = true }\n'
+        '[presets.agent.sampling]\ntemperature = 0.6\ntop_p = 0.95\ntop_k = 20\n'
+        '[presets.instruct]\nthinking = false\n[presets.instruct.sampling]\n'
+        'temperature = 0.7\ntop_p = 0.80\ntop_k = 20\npresence_penalty = 1.5\n')
+FIXTURE_CONFIGS = m.load_configs(FIXTURE_DIR)
+FIXTURE_VISION = {"recipes": [{"_file": "vis.toml", "match": ["Qwen3.6-27B-NVFP4"],
+                  "capabilities": {"vision": {"input": ["text", "image"], "output": ["text"]},
+                                   "reasoning": False, "tool_call": True}}]}
+
 
 @contextlib.contextmanager
 def quiet():
@@ -68,7 +91,7 @@ def make_args(tmpdir, **over):
         mcp_env=None, mcp_header=None,
         keep_builtins=False, default_agent="code",
         team_model=None, team_reasoning=None, team_task_budget=None,
-        recipes=None, no_recipes=False, dry_run=False,
+        configs=FIXTURE_DIR, recipes=None, no_recipes=False, dry_run=False,
         sampling="server-default", temperature=None, top_p=None, top_k=None,
         presence_penalty=None, frequency_penalty=None,
     )
@@ -366,7 +389,7 @@ class TestProviders(unittest.TestCase):
         with FakeProbes():
             providers, refs, caps = m.oc_build_providers(
                 ["192.168.50.101"], [8000], 1.0, self.SD,
-                vision_probe=False, profiles=False, reasoning_probe=False, verbose=False)
+                profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["tool_call"])
         self.assertEqual(refs, ["dgx-n1-8000/Qwen3.6-27B-NVFP4"])
@@ -375,8 +398,7 @@ class TestProviders(unittest.TestCase):
         with FakeProbes():
             providers, _, _ = m.oc_build_providers(
                 ["192.168.50.101"], [8000], 1.0, self.SD,
-                vision_probe=False, profiles=False, reasoning_probe=False,
-                tool_call=False, verbose=False)
+                profiles=False, tool_call=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertNotIn("tool_call", entry)
 
@@ -384,7 +406,7 @@ class TestProviders(unittest.TestCase):
         with FakeProbes():
             providers, _, _ = m.oc_build_providers(
                 ["192.168.50.101"], [8000], 1.0, self.SD,
-                vision_probe=False, profiles=False, reasoning_probe=False, verbose=False)
+                profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertIs(entry["temperature"], False)
 
@@ -392,7 +414,7 @@ class TestProviders(unittest.TestCase):
         with FakeProbes():
             providers, _, caps = m.oc_build_providers(
                 ["192.168.50.101"], [8000], 1.0, self.SD,
-                vision_probe=False, profiles=True, reasoning_probe=True, verbose=False)
+                profiles=True, recipes=FIXTURE_CONFIGS, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertIs(entry["temperature"], True)
         self.assertTrue(entry["reasoning"])
@@ -400,11 +422,10 @@ class TestProviders(unittest.TestCase):
         self.assertIn("dgx-n1-8000/Qwen3.6-27B-NVFP4", caps)
 
     def test_vision_writes_attachment_and_modalities(self):
-        with FakeProbes(vision=True):
+        with FakeProbes():
             providers, _, _ = m.oc_build_providers(
                 ["192.168.50.101"], [8000], 1.0, self.SD,
-                vision_probe=True, probe_all=True, profiles=False,
-                reasoning_probe=False, verbose=False)
+                profiles=False, recipes=FIXTURE_VISION, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["attachment"])
         self.assertEqual(entry["modalities"]["input"], ["text", "image"])
