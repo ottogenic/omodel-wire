@@ -1011,13 +1011,14 @@ export const DgxSampling = async () => {{
 # ============================================================================
 # OpenCode configurator
 # ============================================================================
-def oc_build_providers(hosts, ports, timeout, sampling, vision_probe=True,
-                       probe_all=False, profiles=False, reasoning_probe=True,
-                       tool_call=True, verbose=True):
+def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
+                       tool_call=True, recipes=None, verbose=True):
     """Discover endpoints; return (providers dict, flat refs list, reasoning_caps).
 
-    reasoning_caps maps a model ref -> its probe caps dict (only for models that
-    emit chain-of-thought), so the caller can build matching agents."""
+    Capabilities (reasoning / thinking-knob / vision) are DECLARED in the matched
+    per-model config (omodel-manager's configs/*.toml) -- no live probing here.
+    reasoning_caps maps a model ref -> its synthesized caps dict, so the caller
+    can build matching agents."""
     providers = {}
     refs = []
     reasoning_caps = {}
@@ -1036,6 +1037,7 @@ def oc_build_providers(hosts, ports, timeout, sampling, vision_probe=True,
                     "name": f"{m['id']} ({host_label(host)}:{port})",
                     "limit": {"context": ctx, "output": out},
                 }
+                rec = match_recipe(m["id"], recipes) if recipes else None
 
                 # ---- FIX #3: declare tool-call capability --------------------
                 # OpenCode does NOT send tool definitions to a custom
@@ -1059,31 +1061,27 @@ def oc_build_providers(hosts, ports, timeout, sampling, vision_probe=True,
                         # keep the capability on; the plugin pins the value
                         entry["temperature"] = True
 
-                # ---- PROFILES: detect reasoning + build thinking variants ----
-                if profiles and reasoning_probe:
-                    caps = probe_reasoning(host, port, m["id"], REASONING_TIMEOUT)
-                    if caps["reasoning"]:
-                        entry["reasoning"] = True
-                        entry["temperature"] = True   # let agent/variant temps apply
-                        entry["variants"] = oc_build_variants(caps)
-                        reasoning_caps[f"{key}/{m['id']}"] = caps
-                        if verbose:
-                            print(f"    reasoning: {m['id']} -> ENABLED  [{caps['reason']}]")
-                    elif verbose:
-                        print(f"    reasoning: {m['id']} -> none ({caps['reason']})")
+                # ---- PROFILES: declared reasoning + thinking variants (config) ----
+                if profiles and rec and (rec.get("capabilities") or {}).get("reasoning"):
+                    caps = caps_from_capabilities(rec)
+                    entry["reasoning"] = True
+                    entry["temperature"] = True   # let agent/variant temps apply
+                    entry["variants"] = oc_build_variants(caps)
+                    reasoning_caps[f"{key}/{m['id']}"] = caps
+                    if verbose:
+                        print(f"    reasoning: {m['id']} -> declared ({rec['_file']})")
+                elif profiles and verbose:
+                    print(f"    reasoning: {m['id']} -> skipped "
+                          f"({'config: non-reasoning' if rec else 'no config match'})")
 
-                # ---- FIX #1: vision detection (modalities + attachment) ------
-                if (vision_probe and (probe_all or looks_visual(m["id"]))):
-                    vis, answer, reason = probe_vision(host, port, m["id"], VISION_TIMEOUT)
-                    if vis:
-                        entry["attachment"] = True
-                        entry["modalities"] = {"input": ["text", "image"],
-                                               "output": ["text"]}
-                        if verbose:
-                            print(f"    vision: {m['id']} -> ENABLED  [{reason}]")
-                    elif verbose:
-                        print(f"    vision: {m['id']} -> not enabled (text-only / unverified)")
-                        print(f"            reason: {reason}")
+                # ---- vision: declared in the config (no probing) -------------
+                vis = (rec.get("capabilities") or {}).get("vision") if rec else None
+                if vis:
+                    entry["attachment"] = True
+                    entry["modalities"] = vis if isinstance(vis, dict) else \
+                        {"input": ["text", "image"], "output": ["text"]}
+                    if verbose:
+                        print(f"    vision: {m['id']} -> ENABLED (declared)")
 
                 model_entries[m["id"]] = entry
                 refs.append(f"{key}/{m['id']}")
@@ -1312,12 +1310,11 @@ def oc_sync(args, sampling, detected_installed):
     """Run the OpenCode sync. Returns exit code (0 ok, 2 nothing found)."""
     config_path = os.path.expanduser(args.config)
 
+    configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
     print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
     providers, refs, reasoning_caps = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling,
-        vision_probe=not args.no_vision_probe, probe_all=args.vision_probe_all,
-        profiles=args.profiles, reasoning_probe=not args.no_reasoning_probe,
-        tool_call=not args.no_tool_call)
+        profiles=args.profiles, tool_call=not args.no_tool_call, recipes=configs)
 
     if not providers:
         print("  (no live endpoints found)")
@@ -1363,8 +1360,7 @@ def oc_sync(args, sampling, detected_installed):
         agent_model_ref = cur if cur in reasoning_caps else sorted(reasoning_caps)[0]
         caps = reasoning_caps[agent_model_ref]
         model_id = agent_model_ref.split("/", 1)[1] if "/" in agent_model_ref else agent_model_ref
-        if not args.no_recipes:
-            matched_recipe = match_recipe(model_id, load_recipes(args.recipes))
+        matched_recipe = match_recipe(model_id, configs)
         if matched_recipe:
             agents, agent_sampling = oc_build_recipe_agents(agent_model_ref, matched_recipe, caps)
             try:
@@ -1728,10 +1724,13 @@ def main():
     ap.add_argument("--team-reasoning", choices=["low", "medium", "high"], dest="team_reasoning",
                     help="(Anthropic team model) set extended-thinking budget: low=10000, "
                          "medium=24000, high=32000 budgetTokens. Preserved across re-syncs.")
-    ap.add_argument("--recipes", metavar="PATH",
-                    help="path to the model_recipes.json knowledge base (default: next to script)")
+    ap.add_argument("--configs", metavar="PATH",
+                    help="omodel-manager's generic per-model configs dir (default: "
+                         "$OMODEL_CONFIGS, else sibling ../omodel-manager/configs)")
+    ap.add_argument("--recipes", metavar="PATH", help=argparse.SUPPRESS)  # legacy alias, unused
     ap.add_argument("--no-recipes", action="store_true",
-                    help="(with --profiles) ignore curated recipes; always use generic code/reason")
+                    help="(with --profiles) ignore configs; capabilities probing is off, so this "
+                         "yields generic behavior")
 
     ap.add_argument("--dry-run", action="store_true", help="print result, do not write")
     ap.add_argument("--allow-empty", action="store_true",
