@@ -41,6 +41,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib   # stdlib (Python 3.11+); reads the generic per-model configs
 import urllib.error
 import urllib.request
 
@@ -301,13 +302,10 @@ def _configs_dir(path=None):
     return os.path.normpath(os.path.join(here, "..", "omodel-manager", "configs"))
 
 
-_JSON_BLOCK = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
-
-
 def load_configs(configs_dir=None):
-    """Load declared per-model configs from configs/*.md (each carries one fenced
-    ```json block). Returns {"recipes": [...]} compatible with match_recipe().
-    README.md is skipped. Files failing to parse are warned and skipped."""
+    """Load the generic per-model configs from <manager>/configs/*.toml (owned by
+    omodel-manager). Returns {"recipes": [...]} compatible with match_recipe().
+    Non-.toml files are ignored; files that fail to parse are warned and skipped."""
     d = _configs_dir(configs_dir)
     recipes = []
     if not os.path.isdir(d):
@@ -316,23 +314,14 @@ def load_configs(configs_dir=None):
               f"(omodel-manager's configs/).")
         return {"recipes": recipes}
     for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".md") or fn.lower() == "readme.md":
+        if not fn.endswith(".toml"):
             continue
         p = os.path.join(d, fn)
         try:
-            with open(p, encoding="utf-8") as f:
-                text = f.read()
-        except OSError as e:
-            print(f"  warning: could not read config {fn}: {e}")
-            continue
-        m = _JSON_BLOCK.search(text)
-        if not m:
-            print(f"  warning: {fn} has no ```json block; skipping")
-            continue
-        try:
-            recipe = json.loads(m.group(1))
-        except json.JSONDecodeError as e:
-            print(f"  warning: {fn} json block is invalid: {e}; skipping")
+            with open(p, "rb") as f:
+                recipe = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, OSError) as e:
+            print(f"  warning: {fn} did not parse: {e}; skipping")
             continue
         recipe.setdefault("_file", fn)
         recipes.append(recipe)
