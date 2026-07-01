@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Capabilities are now DECLARED, not probed.** `--profiles` reads vision / reasoning /
+  thinking-knob and per-mode sampling from omodel-manager's `configs/*.toml` (consumed
+  via `--configs` / `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`). Removes the
+  slow per-model vision/reasoning warmups on every sync.
+
+### Added
+- `--verify`: opt-in — probe live endpoints and diff their real capabilities against the
+  declared configs (writes nothing). The probe functions now run only here.
+
+### Removed
+- `model_recipes.json` + `DEFAULT_RECIPES` + `load_recipes()` (+ `--recipes` /
+  `$OMODEL_WIRE_RECIPES`). Curated model configs now live in and are owned by
+  omodel-manager (this tool is a consuming adapter).
+
 ### Fixed
 - Reasoning probe no longer misdetects reasoning models (e.g. Qwen3.6-35B-A3B) as
   non-reasoning. When a qwen3-style `--reasoning-parser` is configured and the model is

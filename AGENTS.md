@@ -8,14 +8,15 @@ built and the invariants you must not break.
 
 A single-file, stdlib-only Python CLI (`omodel-wire.py`) that (1) detects installed
 agentic-dev tools and (2) syncs OpenAI-compatible model endpoints into their configs.
-OpenCode is the only wired-up target today. Curated model settings live in
-`model_recipes.json` beside the script.
+OpenCode is the only wired-up target today. Curated model settings (capabilities +
+per-mode sampling) live in **omodel-manager**'s `configs/*.toml`; this tool consumes
+them — it does not own them.
 
 **Constraints (do not violate):**
-- **Standard library only.** No third-party imports, ever. It must run with a bare
-  `python3`.
-- **Single script.** Keep the tool in `omodel-wire.py`. `model_recipes.json` is the
-  one companion data file.
+- **Standard library only.** No third-party imports (uses `tomllib`, stdlib 3.11+).
+  Runs with a bare `python3` (3.11+).
+- **Single script, no config data.** The tool is `omodel-wire.py`; the generic model
+  configs live in omodel-manager, read via `--configs` / `$OMODEL_CONFIGS` / sibling.
 - **Idempotent & non-destructive.** Every run merges into existing config and prunes
   only what it manages. Never clobber user-authored agents/providers or preserved
   cloud settings.
@@ -28,10 +29,12 @@ Top-to-bottom, the meaningful sections:
 
 - **Discovery defaults** — `DEFAULT_HOSTS`, `DEFAULT_PORTS`, `HOST_LABELS`, probe
   timeouts/limits. Edit here if the DGX layout changes.
-- **Recipes** — `_recipes_path()` (resolves `--recipes` / `$OMODEL_WIRE_RECIPES` /
-  sibling file), `DEFAULT_RECIPES` (a Python mirror of `model_recipes.json`),
-  `load_recipes()`, `match_recipe()`. **Invariant:** `DEFAULT_RECIPES` must stay equal
-  to `model_recipes.json` (there is a seed==file expectation). If you edit one, edit both.
+- **Configs (consumed, not owned)** — `_configs_dir()` (resolves `--configs` /
+  `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`), `load_configs()` (reads
+  `omodel-manager`'s `configs/*.toml` via `tomllib`), `caps_from_capabilities()`
+  (synthesizes the probe-style caps dict from a config's DECLARED capabilities),
+  `match_recipe()`. **omodel-manager owns and validates these configs**; this tool is
+  an adapter. There is NO live probing on the sync path — capabilities are declared.
 - **Agent model** —
   - `PERM`: permission tiers `readonly` / `ask` / `full` (edit/bash/task/web policy).
   - `AGENT_SPECS`: list of `(key, preset_role, mode, is_worker, perm_profile, color, desc)`.
@@ -47,8 +50,11 @@ Top-to-bottom, the meaningful sections:
 - **Tool registry** — `TOOLS` list + `detect_tools()` / `print_detection()`. This is the
   extension point for new tools: add a `TOOLS` entry with a `sync` key and a matching
   configurator.
-- **Probes** — `probe()` (/v1/models), `probe_vision()` (blue-image verification),
-  `probe_reasoning()` (reasoning + thinking-knob detection), with `_chat()` helper.
+- **Probes (verify-only)** — `probe()` (/v1/models, still used for discovery),
+  `probe_vision()` (blue-image), `probe_reasoning()` (reasoning + thinking-knob),
+  `_chat()` helper. These are NO LONGER on the sync path (capabilities are declared);
+  they run only under `--verify` (`oc_verify()`), which compares a live endpoint to
+  its declared config.
   `_reasoning_len()` measures chain-of-thought from the structured `reasoning`/
   `reasoning_content` field **and** inline `<think>...</think>` in `content` (endpoints
   without a reasoning parser); `_finish_reason()` lets `probe_reasoning` treat a
@@ -169,8 +175,9 @@ Source-derived or undocumented mechanisms — confirm before relying on them:
 
 ## How to extend
 
-- **New model:** add a recipe object to `model_recipes.json` (match patterns, source,
-  context, thinking control, per-role presets) and mirror it into `DEFAULT_RECIPES`.
+- **New model:** add a `configs/<key>.toml` **in omodel-manager** (match patterns,
+  capabilities, context, per-mode presets). This adapter just consumes it. Confirm the
+  declaration with `omodel-wire --verify` against the live endpoint.
 - **New role/agent:** add a row to `AGENT_SPECS`; if it should be prunable, add its key
   to `MANAGED_AGENTS`; wire delegation via `TEAM_TARGETS` if it's a worker.
 - **New target tool (pi.dev, Claude Code):** add a `TOOLS` entry and a configurator
@@ -187,7 +194,7 @@ python3 omodel-wire.py --profiles --dry-run
 
 `test_omodel_wire.py` is the regression suite — run it after ANY change. It monkeypatches
 the network probes, so it runs offline and writes only to a temp dir. It asserts roster
-integrity, `DEFAULT_RECIPES == model_recipes.json`, recipe matching, agent/plugin
+integrity, config loading (`test_configs.py`), recipe matching, agent/plugin
 construction, provider capability flags, the plugin directory (`plugins/`, plural, per
 docs) + stale-`plugin/` cleanup, and a full `oc_sync` round-trip (roster written,
 build/plan disabled, `default_agent` set, frontier team model preserved across re-syncs).

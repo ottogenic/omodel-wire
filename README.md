@@ -12,8 +12,10 @@ layers are pluggable so other tools (pi.dev, Claude Code, …) can be added late
 - **Stdlib only.** No `pip install`, no dependencies — just Python 3.
 - **Idempotent.** Re-run any time; it merges into your existing config and preserves
   the settings it shouldn't touch (see [Safety](#safety)).
-- **Config-driven.** Curated, non-discoverable model settings live in an editable
-  `model_recipes.json` next to the script.
+- **Config-driven, no probing.** Model capabilities + per-mode sampling are DECLARED
+  in **omodel-manager**'s `configs/*.toml` (read via `--configs` / `$OMODEL_CONFIGS` /
+  sibling `../omodel-manager/configs`). No slow per-model vision/reasoning probes on the
+  sync path — use `--verify` to check a declaration against a live endpoint.
 
 ---
 
@@ -57,7 +59,7 @@ By default the tool probes `192.168.50.101` and `192.168.50.102` on ports
 
 ### The agent roster (`--profiles`)
 
-Built from `AGENT_SPECS` and driven by `model_recipes.json`:
+Built from `AGENT_SPECS`, with per-mode sampling from omodel-manager's configs:
 
 | Agent           | Visibility | Role     | Permissions            |
 | --------------- | ---------- | -------- | ---------------------- |
@@ -85,14 +87,15 @@ Put the `team` orchestrator on a frontier model with `--team-model`
 (`low`/`medium`/`high` → 10000/24000/32000 thinking-budget tokens) and
 `--team-task-budget N` are preserved across re-syncs.
 
-### Model recipes
+### Model configs
 
-`model_recipes.json` holds curated, non-discoverable settings pulled from model cards
-(sampling numbers, thinking control, context/output limits) keyed by name-match. When
-a discovered model matches a recipe, its per-role presets become the agents above with
-sampling enforced by the plugin. No match → generic `code`/`reason`. Add a model by
-editing the JSON; `--no-recipes` opts out entirely. Recipes ship for Qwen3.6-27B,
-Qwen3.6-35B-A3B, NVIDIA-Nemotron-3-Super, and GLM-4.7-Flash.
+Curated capabilities + per-mode sampling live in **omodel-manager**'s `configs/*.toml`
+(one commented, `cat`/`vi`-friendly file per model, keyed by name-match). When a
+discovered model matches, its per-mode presets become the agents above with sampling
+enforced by the plugin. No match → generic `code`/`reason`. **Add a model by dropping a
+`.toml` in omodel-manager's `configs/`** — see that repo's `configs/README.md`.
+`--no-recipes` opts out. Configs ship for Qwen3.6-27B, Qwen3.6-35B-A3B,
+NVIDIA-Nemotron-3-Super, and GLM-4.7-Flash. `--verify` checks a live model against its config.
 
 ---
 
@@ -113,8 +116,9 @@ Qwen3.6-35B-A3B, NVIDIA-Nemotron-3-Super, and GLM-4.7-Flash.
 | `--team-task-budget N` | Cap delegation calls per session. |
 | `--default-agent NAME` | Startup agent when native build/plan are disabled (default `code`). |
 | `--keep-builtins` | Keep native build/plan instead of replacing them. |
-| `--recipes PATH` | Alternate `model_recipes.json` (or set `$OMODEL_WIRE_RECIPES`). |
-| `--no-recipes` | Ignore curated recipes. |
+| `--configs PATH` | omodel-manager's configs dir (or set `$OMODEL_CONFIGS`; default sibling). |
+| `--no-recipes` | Ignore the configs (generic behavior). |
+| `--verify` | Probe live endpoints and compare to the declared configs; writes nothing. |
 | `--install-aliases` | Add the `omw` shell alias, then exit. |
 | `--write-shell-env` | Append needed OpenCode env vars (Exa, >32k output) to your shell rc. |
 | `--version` | Print version and exit. |

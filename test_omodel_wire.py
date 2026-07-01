@@ -12,7 +12,7 @@ offline and touches nothing outside a temp dir.
 
 What it covers:
   * roster integrity  -- AGENT_SPECS / PERM / colors / modes / MANAGED_AGENTS
-  * recipes           -- DEFAULT_RECIPES == model_recipes.json, shape, name-matching
+  * config loader     -- see test_configs.py (declared per-model configs)
   * agent building    -- recipe -> agents + per-agent sampling, thinking knobs, team
   * providers         -- tool_call / temperature / vision / reasoning on model entries
   * end-to-end sync   -- oc_sync writes a config with the right agents, disables
@@ -33,7 +33,6 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULE_PATH = os.path.join(HERE, "omodel-wire.py")
-RECIPES_PATH = os.path.join(HERE, "model_recipes.json")
 
 _spec = importlib.util.spec_from_file_location("omodel-wire", MODULE_PATH)
 m = importlib.util.module_from_spec(_spec)
@@ -64,6 +63,25 @@ with open(os.path.join(FIXTURE_DIR, "qwen3.6-27b-nvfp4.toml"), "w", encoding="ut
         '[presets.agent.sampling]\ntemperature = 0.6\ntop_p = 0.95\ntop_k = 20\n'
         '[presets.instruct]\nthinking = false\n[presets.instruct.sampling]\n'
         'temperature = 0.7\ntop_p = 0.80\ntop_k = 20\npresence_penalty = 1.5\n')
+# a thinking_control="none" model (Nemotron) whose presets carry explicit knobs
+with open(os.path.join(FIXTURE_DIR, "nemotron-3-super.toml"), "w", encoding="utf-8") as _f:
+    _f.write(
+        'match = ["NVIDIA-Nemotron-3-Super-120B", "nemotron-3-super", "Nemotron-3-Super"]\n'
+        'thinking_control = "none"\n'
+        '[capabilities]\nvision = false\nreasoning = true\ntool_call = true\n'
+        'thinking_control = "enable_thinking"\n'
+        '[presets.reason]\nthinking = true\n'
+        'options.chat_template_kwargs = { enable_thinking = true }\n'
+        '[presets.reason.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
+        '[presets.code]\nthinking = true\n'
+        'options.chat_template_kwargs = { enable_thinking = true }\n'
+        '[presets.code.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
+        '[presets.agent]\nthinking = true\n'
+        'options.chat_template_kwargs = { enable_thinking = true }\n'
+        '[presets.agent.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
+        '[presets.instruct]\nthinking = false\n'
+        'options.chat_template_kwargs = { enable_thinking = false }\n'
+        '[presets.instruct.sampling]\ntemperature = 1.0\ntop_p = 0.95\n')
 FIXTURE_CONFIGS = m.load_configs(FIXTURE_DIR)
 FIXTURE_VISION = {"recipes": [{"_file": "vis.toml", "match": ["Qwen3.6-27B-NVFP4"],
                   "capabilities": {"vision": {"input": ["text", "image"], "output": ["text"]},
@@ -183,46 +201,13 @@ class TestRosterIntegrity(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Recipes
-# --------------------------------------------------------------------------- #
-class TestRecipes(unittest.TestCase):
-    def test_default_recipes_match_json_file(self):
-        with open(RECIPES_PATH, encoding="utf-8") as f:
-            disk = json.load(f)
-        self.assertEqual(m.DEFAULT_RECIPES, disk,
-                         "DEFAULT_RECIPES (in script) must equal model_recipes.json")
-
-    def test_recipe_shape(self):
-        for r in m.DEFAULT_RECIPES["recipes"]:
-            self.assertIn("match", r)
-            self.assertTrue(r["match"], "empty match patterns")
-            self.assertIn("presets", r)
-            for role, preset in r["presets"].items():
-                self.assertIn(role, ROLE_NAMES, f"unknown role {role}")
-                self.assertIn("thinking", preset)
-                self.assertIn("sampling", preset)
-
-    def test_match_recipe(self):
-        recs = m.DEFAULT_RECIPES
-        self.assertIn("27B", m.match_recipe("Qwen3.6-27B-NVFP4", recs)["source"])
-        self.assertIn("35B", m.match_recipe("Qwen3.6-35B-A3B-NVFP4", recs)["source"])
-        self.assertIn("Nemotron",
-                      m.match_recipe("NVIDIA-Nemotron-3-Super-120B-A12B", recs)["source"])
-        self.assertIn("GLM", m.match_recipe("GLM-4.7-Flash", recs)["source"])
-        self.assertIsNone(m.match_recipe("totally-unknown-model", recs))
-
-    def test_match_is_case_insensitive(self):
-        self.assertIsNotNone(m.match_recipe("qwen3.6-27b-nvfp4", m.DEFAULT_RECIPES))
-
-
-# --------------------------------------------------------------------------- #
 # Agent building from recipes
 # --------------------------------------------------------------------------- #
 class TestAgentBuilding(unittest.TestCase):
     REF = "dgx-n1-8000/Qwen3.6-27B-NVFP4"
 
     def _recipe(self, name_frag):
-        return m.match_recipe(name_frag, m.DEFAULT_RECIPES)
+        return m.match_recipe(name_frag, FIXTURE_CONFIGS)
 
     def test_recipe_roster_and_permissions(self):
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
