@@ -289,10 +289,16 @@ def match_recipe(model_id, recipes):
 
 
 def _configs_dir(path=None):
-    """Directory of declared per-model configs (default: ./configs next to script)."""
+    """Directory of GENERIC per-model configs. omodel-manager OWNS these; this tool
+    is an adapter that consumes them. Resolution order:
+      --configs PATH  >  $OMODEL_CONFIGS  >  sibling ../omodel-manager/configs."""
     if path:
         return os.path.expanduser(path)
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+    env = os.environ.get("OMODEL_CONFIGS")
+    if env:
+        return os.path.expanduser(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, "..", "omodel-manager", "configs"))
 
 
 _JSON_BLOCK = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
@@ -305,6 +311,9 @@ def load_configs(configs_dir=None):
     d = _configs_dir(configs_dir)
     recipes = []
     if not os.path.isdir(d):
+        print(f"  note: model configs dir not found: {d}\n"
+              f"        point it with --configs PATH or $OMODEL_CONFIGS "
+              f"(omodel-manager's configs/).")
         return {"recipes": recipes}
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".md") or fn.lower() == "readme.md":

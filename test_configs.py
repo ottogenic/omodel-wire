@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Offline tests for the declared per-model configs (configs/*.md) and their loader.
+Offline tests for the config LOADER (the generic configs themselves live in
+omodel-manager and are validated there). CI-safe: uses a temp fixture, so it does
+not depend on the sibling omodel-manager checkout being present.
 
 Run:  python3 -m unittest test_configs   (or the whole suite: python3 -m unittest)
-
-No network, no probing, no $HOME writes.
 """
 
+import os
 import pathlib
+import shutil
+import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 
@@ -15,65 +18,59 @@ from importlib.machinery import SourceFileLoader
 _path = pathlib.Path(__file__).resolve().parent / "omodel-wire.py"
 mw = SourceFileLoader("omodel_wire", str(_path)).load_module()
 
-REQUIRED_PRESETS = {"reason", "code", "agent", "instruct"}
-KNOWN_THINKING_CONTROL = {"enable_thinking", "reasoning_effort", "soft_switch", "none"}
+FIXTURE = """# fixture-model — tuning notes
+
+```json
+{
+  "match": ["fixture-model", "org/Fixture"],
+  "capabilities": {"vision": false, "reasoning": true, "tool_call": true,
+                   "thinking_control": "enable_thinking"},
+  "presets": {
+    "reason":   {"thinking": true,  "sampling": {"temperature": 0.6, "top_p": 0.95}},
+    "code":     {"thinking": true,  "sampling": {"temperature": 0.6}},
+    "agent":    {"thinking": true,  "sampling": {"temperature": 0.6}},
+    "instruct": {"thinking": false, "sampling": {"temperature": 0.7}}
+  }
+}
+```
+"""
 
 
-class ConfigLoaderTests(unittest.TestCase):
+class LoaderTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = mw.load_configs()
-        self.recipes = self.cfg["recipes"]
+        self.tmp = tempfile.mkdtemp()
+        (pathlib.Path(self.tmp) / "fixture-model.md").write_text(FIXTURE, encoding="utf-8")
+        # a README with its own json block must NOT be loaded as a recipe
+        (pathlib.Path(self.tmp) / "README.md").write_text(
+            "```json\n{\"match\": [\"should-not-load\"]}\n```\n", encoding="utf-8")
 
-    def test_configs_load(self):
-        self.assertTrue(self.recipes, "no configs loaded from configs/")
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_readme_not_loaded_as_recipe(self):
-        # README.md has an example ```json block; it must be skipped.
-        files = [r.get("_file", "") for r in self.recipes]
+    def test_loads_and_skips_readme(self):
+        cfg = mw.load_configs(self.tmp)
+        files = [r["_file"] for r in cfg["recipes"]]
+        self.assertIn("fixture-model.md", files)
         self.assertNotIn("README.md", files)
 
-    def test_every_config_is_valid(self):
-        for r in self.recipes:
-            with self.subTest(config=r.get("_file")):
-                match = r.get("match")
-                self.assertTrue(match, "match required")
-                self.assertIsInstance(match if isinstance(match, list) else [match], list)
-                caps = r.get("capabilities", {})
-                self.assertIn("reasoning", caps)
-                self.assertIn("tool_call", caps)
-                tc = caps.get("thinking_control", r.get("thinking_control"))
-                if tc is not None:
-                    self.assertIn(tc, KNOWN_THINKING_CONTROL)
-                presets = r.get("presets", {})
-                self.assertTrue(REQUIRED_PRESETS.issubset(presets),
-                                f"missing presets: {REQUIRED_PRESETS - set(presets)}")
-                for pk, preset in presets.items():
-                    self.assertIn("sampling", preset, f"{pk} needs sampling")
-                    self.assertIn("thinking", preset, f"{pk} needs thinking flag")
-
-
-class MatchAndCapsTests(unittest.TestCase):
-    def setUp(self):
-        self.cfg = mw.load_configs()
-
-    def test_match_by_served_id(self):
-        # a discovered served-model-id should resolve to the qwen 35b config
-        r = mw.match_recipe("nvidia/Qwen3.6-35B-A3B-NVFP4", self.cfg)
+    def test_match_resolves_config(self):
+        cfg = mw.load_configs(self.tmp)
+        r = mw.match_recipe("org/Fixture", cfg)
         self.assertIsNotNone(r)
-        self.assertEqual(r["_file"], "qwen3.6-35b-nvfp4.md")
-
-    def test_match_by_manager_key(self):
-        r = mw.match_recipe("qwen3.6-35b-nvfp4", self.cfg)
-        self.assertIsNotNone(r)
+        self.assertEqual(r["_file"], "fixture-model.md")
 
     def test_caps_from_capabilities(self):
-        r = mw.match_recipe("qwen3.6-35b-nvfp4", self.cfg)
-        caps = mw.caps_from_capabilities(r)
+        cfg = mw.load_configs(self.tmp)
+        caps = mw.caps_from_capabilities(mw.match_recipe("fixture-model", cfg))
         self.assertTrue(caps["reasoning"])
-        self.assertTrue(caps["can_disable"])      # enable_thinking supports off
-        self.assertFalse(caps["effort_ok"])       # not reasoning_effort
-        # keys must mirror probe_reasoning's shape (consumed by oc_build_recipe_agents)
-        self.assertEqual(set(caps), {"reasoning", "can_disable", "effort_ok", "graded", "reason"})
+        self.assertTrue(caps["can_disable"])   # enable_thinking supports off
+        self.assertFalse(caps["effort_ok"])
+        self.assertEqual(set(caps),
+                         {"reasoning", "can_disable", "effort_ok", "graded", "reason"})
+
+    def test_missing_dir_is_empty(self):
+        cfg = mw.load_configs(os.path.join(self.tmp, "nope"))
+        self.assertEqual(cfg["recipes"], [])
 
 
 if __name__ == "__main__":
