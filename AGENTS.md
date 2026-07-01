@@ -49,6 +49,13 @@ Top-to-bottom, the meaningful sections:
   configurator.
 - **Probes** — `probe()` (/v1/models), `probe_vision()` (blue-image verification),
   `probe_reasoning()` (reasoning + thinking-knob detection), with `_chat()` helper.
+  `_reasoning_len()` measures chain-of-thought from the structured `reasoning`/
+  `reasoning_content` field **and** inline `<think>...</think>` in `content` (endpoints
+  without a reasoning parser); `_finish_reason()` lets `probe_reasoning` treat a
+  `finish_reason=length` cutoff as "still thinking" — this is how a qwen3-`--reasoning-parser`
+  model truncated before `</think>` (vLLM #35221 dumps partial reasoning into `content`
+  with `reasoning=null`) is still detected. `REASONING_MAXTOKENS` must stay generous
+  enough for a trivial prompt to reach `</think>`.
 - **OpenCode config builders** — `oc_build_variants()`, `oc_build_agents()`,
   `oc_build_recipe_agents()` (recipe → per-role agents + synthesized `team`),
   `oc_build_providers()`, the two `chat.params` plugin emitters

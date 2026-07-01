@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Reasoning probe no longer misdetects reasoning models (e.g. Qwen3.6-35B-A3B) as
+  non-reasoning. When a qwen3-style `--reasoning-parser` is configured and the model is
+  cut off before closing `</think>`, vLLM returns the partial thinking in `content` with
+  `reasoning: null` (vLLM #35221); the probe now treats a `finish_reason=length` cutoff
+  on the trivial probe prompt as the tell that the model was still thinking. Also detects
+  inline `<think>...</think>` chain-of-thought for endpoints served without a reasoning
+  parser.
+- Reasoning models no longer get cut off mid-thought during real use. OpenCode caps
+  per-step output at 32k unless `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` is raised; the
+  tool now raises it based on the model's actual `limit.output` (not only when a recipe
+  preset declared `max_output > 32000`), so a reasoning model whose recipe carries no
+  curated output length (e.g. Qwen3.6-35B-A3B) still gets the cap lifted.
+
+### Changed
+- Probe budgets sized realistically instead of just-enough: `REASONING_MAXTOKENS`
+  384 -> 8192, `VISION_MAXTOKENS` 512 -> 2048, `REASONING_TIMEOUT` 30s -> 45s. These are
+  ceilings (a model stops on its own well before them on the trivial probe prompts), so
+  the extra headroom costs nothing on normal responses but removes truncation traps.
+
 ## [0.1.0] - 2026-06-30
 
 Initial packaged release. Extracted from the `otools` suite and renamed to
