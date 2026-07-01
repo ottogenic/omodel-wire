@@ -298,6 +298,64 @@ class TestVariantsAndPlugin(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Reasoning capability probe
+# --------------------------------------------------------------------------- #
+def _resp(content="", reasoning="", finish="stop"):
+    """A canned /v1/chat/completions response as the probe helpers parse it."""
+    msg = {"content": content}
+    if reasoning:
+        msg["reasoning"] = reasoning
+    return {"choices": [{"message": msg, "finish_reason": finish}]}
+
+
+class TestReasoningProbe(unittest.TestCase):
+    def test_reasoning_len_structured_field(self):
+        self.assertEqual(m._reasoning_len(_resp(reasoning="let me think...")), 15)
+
+    def test_reasoning_len_inline_closed_block(self):
+        # No reasoning parser -> the model emits <think>...</think> in content.
+        j = _resp(content="<think>reasoning here</think>391")
+        self.assertEqual(m._reasoning_len(j), len("reasoning here"))
+
+    def test_reasoning_len_inline_unclosed_block(self):
+        # Cut off before </think>, but the open tag is still present.
+        j = _resp(content="<think>still thinking about it", finish="length")
+        self.assertEqual(m._reasoning_len(j), len("still thinking about it"))
+
+    def test_reasoning_len_plain_content_is_zero(self):
+        self.assertEqual(m._reasoning_len(_resp(content="391")), 0)
+
+    def test_probe_detects_truncated_mid_think(self):
+        # qwen3 reasoning-parser + no </think> reached: partial, UNTAGGED reasoning
+        # lands in content with reasoning=null and finish_reason=length (vLLM #35221).
+        def fake_chat(host, port, mid, extra, timeout, prompt):
+            if not extra:  # default request -> truncated mid-think
+                return 200, _resp(content="Thinking Process:\n\n1", finish="length"), ""
+            # enable_thinking=false disables it -> clean short answer
+            return 200, _resp(content="391", finish="stop"), ""
+        saved = m._chat
+        m._chat = fake_chat
+        try:
+            caps = m.probe_reasoning("h", 8000, "qwen/qwen3.6-35b", 1.0)
+        finally:
+            m._chat = saved
+        self.assertTrue(caps["reasoning"])
+        self.assertTrue(caps["can_disable"])
+
+    def test_probe_treats_non_reasoning_as_non_reasoning(self):
+        # Answers the trivial prompt and stops on its own -> not a reasoning model.
+        def fake_chat(host, port, mid, extra, timeout, prompt):
+            return 200, _resp(content="391", finish="stop"), ""
+        saved = m._chat
+        m._chat = fake_chat
+        try:
+            caps = m.probe_reasoning("h", 8000, "some-instruct-model", 1.0)
+        finally:
+            m._chat = saved
+        self.assertFalse(caps["reasoning"])
+
+
+# --------------------------------------------------------------------------- #
 # Provider / model-entry construction
 # --------------------------------------------------------------------------- #
 class TestProviders(unittest.TestCase):
@@ -396,6 +454,25 @@ class TestSyncEndToEnd(unittest.TestCase):
             cfg = self._sync(tmp, keep_builtins=True)
             self.assertNotIn("build", cfg["agent"])  # not written as a disabled stub
             self.assertNotIn("default_agent", cfg)
+
+    def test_output_cap_lifted_for_recipe_without_max_output(self):
+        # Qwen3.6-35B-A3B declares NO recipe max_output, but a reasoning model still
+        # spends output tokens thinking, so OpenCode's 32k per-step cap must be lifted.
+        # The model's output limit must exceed 32k AND the sync must raise
+        # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX (else long turns get cut off mid-think).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+            sampling = m.build_sampling(args)
+            buf = io.StringIO()
+            with FakeProbes(model="Qwen3.6-35B-A3B-NVFP4"), \
+                    contextlib.redirect_stdout(buf):
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(args.config, encoding="utf-8") as f:
+                cfg = json.load(f)
+            entry = cfg["provider"]["dgx-n1-8000"]["models"]["Qwen3.6-35B-A3B-NVFP4"]
+            self.assertGreater(entry["limit"]["output"], 32000)
+            self.assertIn("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", buf.getvalue())
 
     def test_anthropic_team_model_thinking_and_temp(self):
         with tempfile.TemporaryDirectory() as tmp:
