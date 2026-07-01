@@ -36,6 +36,7 @@ __version__ = "0.1.0"
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -55,10 +56,18 @@ HOST_LABELS = {                       # friendly short labels for provider keys
 }
 PROBE_TIMEOUT = 2.0                    # seconds per /v1/models probe
 VISION_TIMEOUT = 30.0                  # seconds for the image probe (first call is slow)
-VISION_MAXTOKENS = 512                 # generous: reasoning models burn tokens thinking
-                                        # before emitting the answer; too low -> empty content
-REASONING_TIMEOUT = 30.0               # seconds per reasoning-capability probe call
-REASONING_MAXTOKENS = 384              # enough to let a model actually think
+VISION_MAXTOKENS = 2048                # a vision *reasoning* model can burn a lot of tokens
+                                        # thinking before it emits the answer; too low ->
+                                        # truncated mid-think -> empty content -> false negative.
+REASONING_TIMEOUT = 45.0               # seconds per reasoning-capability probe call (a generous
+                                        # budget can take longer to generate on a busy server)
+REASONING_MAXTOKENS = 8192             # max_tokens is only a CEILING -- a model stops on its own
+                                        # (finish_reason=stop) long before this on a trivial prompt,
+                                        # so a generous cap costs nothing but removes the truncation
+                                        # trap: too small and a reasoning model is cut off mid-think,
+                                        # and with a qwen3-style --reasoning-parser vLLM then drops
+                                        # the partial thinking into `content` with reasoning=null
+                                        # (vLLM issue #35221) -- see probe_reasoning's length tell.
 
 # Qwen's own per-mode sampling recommendations (qwen.readthedocs.io quickstart):
 #   thinking      -> temperature 0.6, top_p 0.95, top_k 20
@@ -627,13 +636,49 @@ def _chat(host, port, model_id, extra_body, timeout, prompt):
         return None, None, str(e)
 
 
+# Inline chain-of-thought, for endpoints served WITHOUT a reasoning parser (the
+# model emits the tags itself). A closed <think>...</think> block, or an unclosed
+# <think>... run when the model was cut off before finishing its thought.
+_THINK_BLOCK = re.compile(r"<think\s*>(.*?)</\s*think\s*>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"<think\s*>(.*)$", re.DOTALL | re.IGNORECASE)
+
+
 def _reasoning_len(j):
-    """Length of the model's chain-of-thought in a response (0 if none)."""
+    """Length of the model's chain-of-thought in a response (0 if none).
+
+    Handles the server layouts we see in the wild:
+      * reasoning parser configured  -> chain-of-thought in `message.reasoning`
+        (or `reasoning_content`), final answer in `message.content`;
+      * no reasoning parser          -> the model emits `<think>...</think>`
+        (or an unclosed `<think>...`) inline in `message.content`.
+    The remaining case -- a qwen3-style parser that runs out of tokens before the
+    closing `</think>` and drops partial, *untagged* reasoning into `content` with
+    `reasoning=null` (vLLM #35221) -- leaves nothing to measure here; probe_reasoning
+    catches it via the `finish_reason=length` tell instead."""
     try:
         msg = (j.get("choices") or [{}])[0].get("message", {}) or {}
-        return len((msg.get("reasoning") or msg.get("reasoning_content") or "").strip())
+        structured = (msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
+        if structured:
+            return len(structured)
+        content = msg.get("content") or ""
+        blocks = _THINK_BLOCK.findall(content)
+        if blocks:
+            return sum(len(b.strip()) for b in blocks)
+        opened = _THINK_OPEN.search(content)
+        if opened:
+            return len(opened.group(1).strip())
     except Exception:
-        return 0
+        pass
+    return 0
+
+
+def _finish_reason(j):
+    """The response's finish_reason ('' if absent). 'length' means the model was
+    cut off at max_tokens rather than stopping on its own."""
+    try:
+        return (j.get("choices") or [{}])[0].get("finish_reason") or ""
+    except Exception:
+        return ""
 
 
 def probe_reasoning(host, port, model_id, timeout):
@@ -656,8 +701,14 @@ def probe_reasoning(host, port, model_id, timeout):
         caps["reason"] = f"default request failed: {err[:160]}"
         return caps
     if _reasoning_len(j) == 0:
-        caps["reason"] = "no `reasoning` field by default -> treat as non-reasoning model"
-        return caps
+        # A model with a qwen3-style --reasoning-parser that runs out of tokens BEFORE
+        # closing </think> returns its partial thinking in `content` with reasoning=null
+        # (vLLM #35221), so _reasoning_len sees nothing. But a non-reasoning model
+        # answers this trivial prompt in a few tokens and stops on its own, so a
+        # `length` cutoff here is itself the tell that the model was still thinking.
+        if _finish_reason(j) != "length":
+            caps["reason"] = "no `reasoning` field by default -> treat as non-reasoning model"
+            return caps
     caps["reasoning"] = True
 
     # B) can we turn thinking OFF via chat_template_kwargs?
@@ -1266,18 +1317,12 @@ def oc_sync(args, sampling, detected_installed):
                 if matched_recipe.get("variants"):
                     mentry["variants"] = matched_recipe["variants"]
                 ctx = mentry["limit"]["context"]   # auto-probed: matches running 128K/256K server
-                # Raise the output cap so the largest preset (general=81920) isn't
-                # clamped; never let it exceed the context window.
+                # If the recipe declares a larger per-request budget, raise the output
+                # cap so the largest preset isn't clamped; never exceed the context.
                 max_out = max((p.get("max_output", 0)
                                for p in matched_recipe.get("presets", {}).values()), default=0)
                 if max_out:
                     mentry["limit"]["output"] = min(max(mentry["limit"].get("output", 0), max_out), ctx)
-                    # OpenCode globally caps per-step output at 32k unless this env
-                    # var is raised -> the `general` agent's larger budget needs it.
-                    if max_out > 32000:
-                        env_notes.append(_ensure_shell_env(
-                            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", str(max_out),
-                            args.write_shell_env))
                 # context sufficiency warning (card: keep >= min_thinking for thinking)
                 need = matched_recipe.get("context", {}).get("min_thinking")
                 if need and ctx < need:
@@ -1287,6 +1332,22 @@ def oc_sync(args, sampling, detected_installed):
                 pass
         else:
             agents, agent_sampling = oc_build_agents(agent_model_ref, caps)
+
+        # OpenCode caps per-step output at 32k UNLESS this env var is raised. A
+        # reasoning model spends output tokens *thinking* before it answers, so one
+        # coding turn easily exceeds 32k and OpenCode cuts it off mid-thought. Raise
+        # the cap to the model's real output limit (set from the recipe/context
+        # above, else the auto default) -- NOT gated on a recipe declaring max_output,
+        # since a reasoning model without a curated output rec still needs it.
+        try:
+            key, mid = agent_model_ref.split("/", 1)
+            out_limit = cfg["provider"][key]["models"][mid]["limit"]["output"]
+            if out_limit > 32000:
+                env_notes.append(_ensure_shell_env(
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", str(out_limit),
+                    args.write_shell_env))
+        except (KeyError, ValueError, TypeError):
+            pass
         existing_agents = cfg.get("agent", {}) or {}
         # Capture a previously-set frontier team model + thinking config BEFORE we
         # overwrite, so a re-sync without the flags doesn't reset your choices.
@@ -1403,6 +1464,8 @@ def oc_sync(args, sampling, detected_installed):
             print(f"Profiles mode: {rc} reasoning model(s); no recipe -> generic Qwen numbers")
             print(f"  model: {agent_model_ref}")
             _print_roster(agents)
+            for n in env_notes:
+                print(f"  output: {n}")
     else:
         print(f"Sampling mode: {sampling['mode']}"
               + (" (+ chat.params plugin)" if write_plugin else ""))
