@@ -25,8 +25,10 @@ Quick start:
        --team-task-budget 4 --web-search exa --write-shell-env
   omw --dry-run                       # preview opencode.json + plugin, write nothing
 
---profiles builds, per reasoning model: an editable model_recipes.json-driven agent
-roster -- visible `research` / `code` / `agent` + a `team` orchestrator (which
+--profiles builds, per reasoning model, an agent roster from omodel-manager's
+declared per-model configs (configs/*.toml) -- capabilities + per-mode sampling are
+DECLARED, not probed (fast). Roster: visible `research` / `code` / `agent` + a
+`team` orchestrator (which
 delegates to hidden `agent-plan` / `agent-code` / `agent-instruct` workers) -- plus
 Ctrl+T thinking variants and an agent-aware chat.params plugin that pins sampling.
 """
@@ -75,208 +77,6 @@ REASONING_MAXTOKENS = 8192             # max_tokens is only a CEILING -- a model
 #   non-thinking  -> temperature 0.7, top_p 0.80, presence_penalty 1.5 (anti-repeat)
 QWEN_THINK_SAMPLING = {"temperature": 0.6, "top_p": 0.95}
 QWEN_NOTHINK_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5}
-
-# ----------------------------------------------------------------------------
-# Model recipes: curated, NON-discoverable recommended settings from model cards.
-# Lives in an editable file next to this script (model_recipes.json), version
-# controlled with the code. When a discovered model id matches a recipe's
-# `match`, --profiles writes that recipe's task presets (general/webdev/instruct)
-# as OpenCode agents, with sampling enforced by an agent-aware chat.params plugin.
-# Add new models by editing the file -- no code change needed.
-# ----------------------------------------------------------------------------
-def _recipes_path():
-    env = os.environ.get("OMODEL_WIRE_RECIPES")
-    if env:
-        return os.path.expanduser(env)
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_recipes.json")
-
-
-DEFAULT_RECIPES = {
-    "$otools": "model_recipes",
-    "recipes": [
-        {
-            # https://huggingface.co/unsloth/Qwen3.6-27B-NVFP4  (Best Practices)
-            "match": ["Qwen3.6-27B-NVFP4", "Qwen3.6-27B"],
-            "source": "https://huggingface.co/unsloth/Qwen3.6-27B-NVFP4",
-            "context": {"native": 262144, "min_thinking": 131072},
-            "thinking_default": True,
-            "soft_switch": False,   # no /think /no_think for this version
-            "presets": {
-                "reason": {
-                    "desc": "Research & Q&A (card general thinking: temp 1.0)",
-                    "thinking": True, "max_output": 81920,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                },
-                "code": {
-                    "desc": "Interactive coding (card precise coding / web dev: temp 0.6)",
-                    "thinking": True, "max_output": 32768,
-                    "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                },
-                "agent": {
-                    "desc": "Unattended agent (coding sampling + preserved thinking)",
-                    "thinking": True, "max_output": 32768,
-                    "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                    "options": {"chat_template_kwargs": {"preserve_thinking": True}},
-                },
-                "instruct": {
-                    "desc": "Fast, no thinking (card instruct: temp 0.7, presence_penalty 1.5)",
-                    "thinking": False, "max_output": 32768,
-                    "sampling": {"temperature": 0.7, "top_p": 0.80, "top_k": 20,
-                                 "min_p": 0.0, "presence_penalty": 1.5},
-                },
-            },
-        },
-        {
-            # https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
-            # Card: temperature=1.0, top_p=0.95 "across all tasks and serving backends".
-            "match": ["nemotron-3-super", "Nemotron-3-Super"],
-            "source": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-            "context": {"native": 1000000},
-            "thinking_default": True,
-            "soft_switch": False,
-            "thinking_control": "none",   # non-Qwen: don't inject reasoning_effort/preserve_thinking
-            "_note": ("Card gives ONE sampling (temp 1.0, top_p 0.95) for all tasks; the 4 roles "
-                      "share it and differ by thinking + permission. No preserved-thinking knob "
-                      "(Nemotron has low_effort, not clear_thinking)."),
-            "presets": {
-                "reason": {
-                    "desc": "Research & Q&A (card: temp 1.0, top_p 0.95)",
-                    "thinking": True,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True}},
-                },
-                "code": {
-                    "desc": "Interactive coding (card: temp 1.0, top_p 0.95)",
-                    "thinking": True,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True}},
-                },
-                "agent": {
-                    "desc": "Unattended agent (card: temp 1.0, top_p 0.95)",
-                    "thinking": True,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True}},
-                },
-                "instruct": {
-                    "desc": "Fast, no thinking (card: temp 1.0, top_p 0.95)",
-                    "thinking": False,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": False}},
-                },
-            },
-            # Ctrl+T thinking modes using Nemotron's own chat-template kwargs
-            "variants": {
-                "think": {"options": {"chat_template_kwargs": {"enable_thinking": True}}},
-                "think-low": {"options": {"chat_template_kwargs": {"enable_thinking": True,
-                                                                   "low_effort": True}}},
-                "no-think": {"options": {"chat_template_kwargs": {"enable_thinking": False}}},
-            },
-        },
-        {
-            # https://huggingface.co/zai-org/GLM-4.7-Flash
-            # GLM toggles thinking via chat_template_kwargs.enable_thinking (NOT
-            # Qwen's reasoning_effort). clear_thinking:false = Preserved Thinking
-            # (keep CoT across turns) -- SGLang only; vLLM ignores it.
-            # Serving (model_manager): --reasoning-parser glm45 --tool-call-parser glm47
-            "match": ["GLM-4.7-Flash", "glm-4.7-flash"],
-            "source": "https://huggingface.co/zai-org/GLM-4.7-Flash",
-            "context": {"native": 131072},
-            "thinking_default": True,
-            "soft_switch": False,
-            "thinking_control": "none",
-            "presets": {
-                "reason": {
-                    "desc": "Default / most tasks, math & hard problems (card: temp 1.0, top_p 0.95)",
-                    "thinking": True, "max_output": 131072,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True}},
-                },
-                "code": {
-                    "desc": "Precise coding (card Terminal-Bench / SWE-bench: temp 0.7, top_p 1.0)",
-                    "thinking": True, "max_output": 16384,
-                    "sampling": {"temperature": 0.7, "top_p": 1.0},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True}},
-                },
-                "agent": {
-                    "desc": "Unattended agent / tool use (card tau2-bench temp 0; 0.6 in practice). Preserved Thinking = SGLang only",
-                    "thinking": True, "max_output": 16384,
-                    "sampling": {"temperature": 0.6, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
-                },
-                "instruct": {
-                    "desc": "Non-thinking / low latency (temp 1.0, top_p 0.95)",
-                    "thinking": False, "max_output": 8192,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95},
-                    "options": {"chat_template_kwargs": {"enable_thinking": False}},
-                },
-            },
-            "variants": {
-                "think": {"options": {"chat_template_kwargs": {"enable_thinking": True}}},
-                "think-preserve": {"options": {"chat_template_kwargs": {"enable_thinking": True,
-                                                                        "clear_thinking": False}}},
-                "no-think": {"options": {"chat_template_kwargs": {"enable_thinking": False}}},
-            },
-        },
-        {
-            # https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4
-            # NVFP4 card is eval-only; numbers follow the Qwen3.6 family standard
-            # (same as the 27B). No per-request output-length rec -> no max_output.
-            "match": ["Qwen3.6-35B-A3B-NVFP4", "Qwen3.6-35B-A3B", "Qwen3.6-35B"],
-            "source": "https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4",
-            "_note": ("NVIDIA NVFP4 card is sparse (eval-only: general temp 1.0/top_p 0.95, "
-                      "SciCode coding 0.6/0.95). Numbers below follow the Qwen3.6 family "
-                      "standard (same as the 27B): thinking general 1.0, coding 0.6, instruct "
-                      "0.7/0.80+pp1.5, top_k 20. Card gives no per-request output-length rec "
-                      "-> no max_output."),
-            "context": {"native": 262144, "min_thinking": 131072},
-            "thinking_default": True,
-            "soft_switch": False,
-            "presets": {
-                "reason": {
-                    "desc": "Research & planning (card general thinking: temp 1.0, top_p 0.95)",
-                    "thinking": True,
-                    "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                },
-                "code": {
-                    "desc": "Precise coding (card SciCode: temp 0.6, top_p 0.95)",
-                    "thinking": True,
-                    "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                },
-                "agent": {
-                    "desc": "Unattended worker (coding sampling 0.6 + preserved thinking)",
-                    "thinking": True,
-                    "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-                    "options": {"chat_template_kwargs": {"preserve_thinking": True}},
-                },
-                "instruct": {
-                    "desc": "Fast, no thinking (Qwen instruct: temp 0.7, top_p 0.80, presence_penalty 1.5)",
-                    "thinking": False,
-                    "sampling": {"temperature": 0.7, "top_p": 0.80, "top_k": 20,
-                                 "min_p": 0.0, "presence_penalty": 1.5},
-                },
-            },
-        },
-    ],
-}
-
-
-def load_recipes(path=None):
-    path = path or _recipes_path()
-    if not os.path.exists(path):
-        try:
-            with open(path, "w") as f:
-                json.dump(DEFAULT_RECIPES, f, indent=2)
-                f.write("\n")
-            print(f"  (created recipe file {path})")
-        except OSError:
-            return DEFAULT_RECIPES
-        return json.loads(json.dumps(DEFAULT_RECIPES))
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"  warning: could not read recipes {path}: {e}; using built-ins")
-        return DEFAULT_RECIPES
 
 
 def match_recipe(model_id, recipes):
@@ -1306,6 +1106,46 @@ def _print_roster(agents):
               f"@agent-instruct (fast); Ctrl+T toggles thinking")
 
 
+def oc_verify(args):
+    """Opt-in: probe live endpoints and compare real capabilities to the declared
+    configs. Writes nothing. Exit 0 = all match, 1 = mismatch(es), 2 = none found."""
+    configs = load_configs(args.configs)
+    found_any, mismatches = False, 0
+    for host in args._hosts:
+        for port in args._ports:
+            found = probe(host, port, args.timeout)
+            if not found:
+                continue
+            found_any = True
+            for mm in found:
+                mid = mm["id"]
+                rec = match_recipe(mid, configs)
+                print(f"\n{host}:{port}  {mid}")
+                if not rec:
+                    print("  [MISS] no config matches -- add one to configs/ or fix `match`")
+                    mismatches += 1
+                    continue
+                cap = rec.get("capabilities", {}) or {}
+                print(f"  config: {rec['_file']}")
+                # reasoning
+                dr = bool(cap.get("reasoning"))
+                pr = probe_reasoning(host, port, mid, REASONING_TIMEOUT)["reasoning"]
+                ok = dr == pr
+                mismatches += 0 if ok else 1
+                print(f"  {'[ok] ' if ok else '[DIFF]'} reasoning: declared={dr} probed={pr}")
+                # vision (probe regardless, to catch under-declared multimodal models)
+                dv = bool(cap.get("vision"))
+                pv, _, why = probe_vision(host, port, mid, VISION_TIMEOUT)
+                ok = dv == pv
+                mismatches += 0 if ok else 1
+                print(f"  {'[ok] ' if ok else '[DIFF]'} vision:    declared={dv} probed={pv}  [{why}]")
+    if not found_any:
+        print("No live endpoints found to verify.")
+        return 2
+    print(f"\n{'All declared capabilities match.' if not mismatches else f'{mismatches} mismatch(es) -- update the config(s) or the model.'}")
+    return 0 if not mismatches else 1
+
+
 def oc_sync(args, sampling, detected_installed):
     """Run the OpenCode sync. Returns exit code (0 ok, 2 nothing found)."""
     config_path = os.path.expanduser(args.config)
@@ -1727,11 +1567,13 @@ def main():
     ap.add_argument("--configs", metavar="PATH",
                     help="omodel-manager's generic per-model configs dir (default: "
                          "$OMODEL_CONFIGS, else sibling ../omodel-manager/configs)")
-    ap.add_argument("--recipes", metavar="PATH", help=argparse.SUPPRESS)  # legacy alias, unused
     ap.add_argument("--no-recipes", action="store_true",
-                    help="(with --profiles) ignore configs; capabilities probing is off, so this "
-                         "yields generic behavior")
+                    help="(with --profiles) ignore the configs; yields generic behavior")
 
+    ap.add_argument("--verify", action="store_true",
+                    help="probe live endpoints and compare their real capabilities to the "
+                         "declared configs (opt-in; writes nothing). Slow -- re-runs the "
+                         "vision/reasoning probes the normal path no longer uses.")
     ap.add_argument("--dry-run", action="store_true", help="print result, do not write")
     ap.add_argument("--allow-empty", action="store_true",
                     help="write even if NOTHING was discovered (default: refuse, as a safety net)")
@@ -1743,6 +1585,9 @@ def main():
 
     args._hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
     args._ports = [int(p) for p in args.ports.split(",") if p.strip()]
+
+    if args.verify:
+        sys.exit(oc_verify(args))
 
     # 1) Detection
     detected = detect_tools()
