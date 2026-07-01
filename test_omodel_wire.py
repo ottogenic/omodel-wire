@@ -296,13 +296,16 @@ class TestVariantsAndPlugin(unittest.TestCase):
         self.assertEqual(v["no-think"]["options"], {})
 
     def test_sampling_plugin_js_is_valid(self):
-        _, sampling = m.oc_build_agents("dgx-n1-8000/Qwen3.6-27B-NVFP4", dict(FULL_CAPS))
-        js = m.oc_agent_sampling_plugin_js(sampling)
+        mid = "Qwen3.6-27B-NVFP4"
+        _, sampling = m.oc_build_agents("dgx-n1-8000/" + mid, dict(FULL_CAPS))
+        js = m.oc_agent_sampling_plugin_js({mid: sampling}, mid)
         self.assertIn("chat.params", js)
         self.assertIn(m.PROVIDER_PREFIX, js)
-        # the embedded AGENT_SAMPLING table must be valid JSON we can round-trip
+        self.assertIn("input.model", js)   # sampling is now keyed by the running model
+        # the embedded AGENT_SAMPLING table must be valid JSON we can round-trip;
+        # it's now nested: {model_id: {agent: vec}}.
         table = js.split("const AGENT_SAMPLING =", 1)[1].split("\n\nfunction", 1)[0].strip()
-        self.assertEqual(json.loads(table)["code"]["topK"], 20)
+        self.assertEqual(json.loads(table)[mid]["code"]["topK"], 20)
 
 
 # --------------------------------------------------------------------------- #
@@ -560,6 +563,67 @@ class TestPluginDirectory(unittest.TestCase):
                 f.write("// stale\n")
             self._sync(tmp)
             self.assertFalse(os.path.exists(legacy), "stale plugin/ file not removed")
+
+
+class TestAudit(unittest.TestCase):
+    """--audit: offline diff of the live OpenCode config vs the omodel-manager configs."""
+
+    def _sync(self, tmp, **over):
+        args = make_args(tmp, **over)
+        sampling = m.build_sampling(args)
+        with FakeProbes(), quiet():
+            self.assertEqual(m.oc_sync(args, sampling, {"opencode"}), 0)
+        return args
+
+    def test_audit_in_sync_after_fresh_sync(self):
+        # A config the tool just wrote must audit clean against the same configs.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._sync(tmp)
+            with quiet():
+                self.assertEqual(m.oc_audit(args), 0)
+
+    def test_audit_detects_plugin_drift(self):
+        # Tamper one plugin value -> audit must flag drift (exit 1).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._sync(tmp)
+            pj = os.path.join(tmp, "plugins", "dgx-sampling.js")
+            with open(pj, encoding="utf-8") as f:
+                txt = f.read()
+            self.assertIn('"topK": 20', txt)
+            with open(pj, "w", encoding="utf-8") as f:
+                f.write(txt.replace('"topK": 20', '"topK": 5', 1))
+            with quiet():
+                self.assertEqual(m.oc_audit(args), 1)
+
+    def test_audit_flags_model_missing_per_model_sampling(self):
+        # A registered managed model with no per-model plugin table is surfaced and
+        # flagged (agents on it would fall back to server defaults).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._sync(tmp)
+            cfgp = os.path.join(tmp, "opencode.json")
+            with open(cfgp, encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("provider", {})["dgx-n2-8000"] = {
+                "models": {"NVIDIA-Nemotron-3-Super-120B":
+                           {"reasoning": True, "tool_call": True}}}
+            with open(cfgp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = m.oc_audit(args)
+            out = buf.getvalue()
+            self.assertIn("NVIDIA-Nemotron-3-Super-120B", out)
+            self.assertIn("no per-model sampling", out)
+            self.assertEqual(rc, 1)
+
+    def test_audit_nothing_to_compare(self):
+        # No managed agents -> exit 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "opencode.json"), "w", encoding="utf-8") as f:
+                json.dump({"agent": {}}, f)
+            args = make_args(tmp)
+            with quiet():
+                self.assertEqual(m.oc_audit(args), 2)
 
 
 if __name__ == "__main__":
