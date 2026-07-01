@@ -7,12 +7,27 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Per-model sampling.** The `--profiles` `chat.params` plugin (`dgx-sampling.js`) is now
+  keyed by `(model, agent)`, not agent alone. It resolves the sampling vector from the
+  CURRENT model (`input.model.id`), so switching an agent onto a different model applies
+  THAT model's card-recommended sampling — e.g. a different `reason` temperature per model
+  across a fleet of 10+ endpoints. Falls back to `DEFAULT_MODEL` for a managed model with
+  no table. Verified live: one `research` agent ran temp 1.0 on FP8 and 0.9 on NVFP4
+  simultaneously. `--audit` now shows each model's per-agent sampling and flags a model
+  whose per-model table is missing (agents on it would use server defaults).
 - **Capabilities are now DECLARED, not probed.** `--profiles` reads vision / reasoning /
   thinking-knob and per-mode sampling from omodel-manager's `configs/*.toml` (consumed
   via `--configs` / `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`). Removes the
   slow per-model vision/reasoning warmups on every sync.
 
 ### Added
+- `--audit`: offline diff of the LIVE OpenCode config vs the omodel-manager configs it
+  was generated from. Prints a side-by-side table for **every registered managed model**
+  (including endpoints no agent is bound to, shown with a note), covering model-level
+  capabilities (reasoning / vision / tool_call) and per-agent sampling, and highlights
+  drift (e.g. after editing a preset) with a suggestion to `--profiles` re-sync. Reads
+  `opencode.json` + `plugins/dgx-sampling.js`; no probing. Exit 1 on drift, 2 if nothing
+  to compare.
 - `--verify`: opt-in — probe live endpoints and diff their real capabilities against the
   declared configs (writes nothing). The probe functions now run only here.
 

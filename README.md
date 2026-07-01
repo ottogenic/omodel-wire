@@ -118,6 +118,7 @@ NVIDIA-Nemotron-3-Super, and GLM-4.7-Flash. `--verify` checks a live model again
 | `--keep-builtins` | Keep native build/plan instead of replacing them. |
 | `--configs PATH` | omodel-manager's configs dir (or set `$OMODEL_CONFIGS`; default sibling). |
 | `--no-recipes` | Ignore the configs (generic behavior). |
+| `--audit` | Offline side-by-side of the live OpenCode config vs the omodel-manager configs, per model + agent; highlights sampling drift and suggests `--profiles`. Writes nothing. |
 | `--verify` | Probe live endpoints and compare to the declared configs; writes nothing. |
 | `--install-aliases` | Add the `omw` shell alias, then exit. |
 | `--write-shell-env` | Append needed OpenCode env vars (Exa, >32k output) to your shell rc. |
