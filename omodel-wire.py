@@ -155,10 +155,15 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 #   min_pattern_size (0->1)   smallest repeating unit to flag, in TOKENS
 #   max_pattern_size (0=off)  largest repeating unit to flag; min_pattern<=max_pattern
 #   min_count        (>=2)    consecutive repeats before terminating
-# Tuned LENIENT on purpose -- only cut genuine long loops, never legitimate short repeats:
-#   * min_pattern_size=3  -> a lone/paired repeated token is NEVER a pattern, so long
-#     numbers (300000), indentation, "====" rules, hex/base64 don't trip it. (The earlier
-#     default left this at 1, which cut "300000" off at "30000".)
+# Tuned LENIENT on purpose -- only cut genuine long loops, never legitimate short repeats.
+# Note the trip point for a repeated unit of pattern_len tokens is pattern_len*min_count
+# tokens (smallest checked pattern_len is min_pattern_size), so:
+#   * min_pattern_size=3  -> single/short-token runs only trip at min_pattern_size*min_count
+#     = 30 identical tokens in a row, so "300000", indentation, "====" / "----" rules,
+#     hex/base64 stay well under it. A long rule trips only if the tokenizer emits 30+
+#     IDENTICAL tokens; BPE packs "----" runs into multi-char tokens, so in practice that's
+#     a ~hundreds-of-chars run. (The earlier default left this at 1, which cut "300000" at
+#     "30000" after just five 0s.)
 #   * max_pattern_size=20 -> vLLM's own auto-enable ceiling; catches up to ~sentence-length
 #     loops (the expensive kind).
 #   * min_count=10        -> the unit must repeat 10x before we stop. Well past any
