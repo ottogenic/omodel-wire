@@ -327,8 +327,8 @@ class TestVariantsAndPlugin(unittest.TestCase):
     def test_repetition_detection_partial_override_merges(self):
         # tuning one knob must keep the others (not drop max_pattern_size -> disabled).
         with tempfile.TemporaryDirectory() as tmp:
-            rd = m.build_sampling(make_args(tmp, repetition_detection="min_count:10"))["repetition_detection"]
-        self.assertEqual(rd["min_count"], 10)            # overridden
+            rd = m.build_sampling(make_args(tmp, repetition_detection="min_count:4"))["repetition_detection"]
+        self.assertEqual(rd["min_count"], 4)             # overridden (differs from default)
         self.assertEqual(rd["max_pattern_size"], 20)     # kept from default
         self.assertEqual(rd["min_pattern_size"], 3)      # kept from default
 

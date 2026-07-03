@@ -161,9 +161,11 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 #     default left this at 1, which cut "300000" off at "30000".)
 #   * max_pattern_size=20 -> vLLM's own auto-enable ceiling; catches up to ~sentence-length
 #     loops (the expensive kind).
-#   * min_count=6         -> the unit must repeat 6x before we stop; well past incidental
-#     repetition, so it fires only when the model is clearly stuck.
-DEFAULT_REPETITION_DETECTION = {"min_pattern_size": 3, "max_pattern_size": 20, "min_count": 6}
+#   * min_count=10        -> the unit must repeat 10x before we stop. Well past any
+#     legitimate repetition (identical array rows / boilerplate / ASCII tables trip 6 but
+#     not 10), yet a genuine runaway repeats hundreds of times so it's still cut within
+#     ~30-40 tokens; the extra headroom costs <=80 tokens worst case on a 32k budget.
+DEFAULT_REPETITION_DETECTION = {"min_pattern_size": 3, "max_pattern_size": 20, "min_count": 10}
 LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provider
 # Agents emitted per recipe. We explicitly override OpenCode's built-in plan/build
 # (full defs, our sampling + permissions). Two tiers:
@@ -1774,10 +1776,10 @@ def main():
                     help="don't write the chat.params plugin (only set temperature:false)")
     ap.add_argument("--repetition-detection", default=None, metavar="VAL",
                     help="vLLM repetition_detection to terminate degenerate N-gram loops "
-                         "(default: min_pattern_size:3, max_pattern_size:20, min_count:6 -- "
+                         "(default: min_pattern_size:3, max_pattern_size:20, min_count:10 -- "
                          "lenient, only cuts long stuck loops). Use 'off' to disable, or "
                          "'K1:V1,...' to override knobs (merged onto the default, so "
-                         "'min_count:10' just raises that one), e.g. 'min_pattern_size:2,min_count:4'.")
+                         "'min_count:14' raises just that one), e.g. 'min_pattern_size:2,min_count:6'.")
 
     # Tool calling + web search exposure
     ap.add_argument("--no-tool-call", action="store_true",
