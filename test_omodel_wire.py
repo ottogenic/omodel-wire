@@ -112,6 +112,7 @@ def make_args(tmpdir, **over):
         configs=FIXTURE_DIR, recipes=None, no_recipes=False, dry_run=False,
         sampling="server-default", temperature=None, top_p=None, top_k=None,
         presence_penalty=None, frequency_penalty=None,
+        repetition_detection=None,
     )
     for k, v in over.items():
         setattr(a, k, v)
@@ -306,6 +307,37 @@ class TestVariantsAndPlugin(unittest.TestCase):
         # it's now nested: {model_id: {agent: vec}}.
         table = js.split("const AGENT_SAMPLING =", 1)[1].split("\n\nfunction", 1)[0].strip()
         self.assertEqual(json.loads(table)[mid]["code"]["topK"], 20)
+
+    def test_repetition_detection_default_is_lenient(self):
+        # Regression: the "300000" -> "30000" false cut came from min_pattern_size
+        # defaulting to 1 (a lone repeated token counted as a pattern). The default must
+        # set it >= 2 so single-token runs (long numbers, indentation, "====", hex) are
+        # never flagged; and vLLM requires min_count >= 2 and min_pattern <= max_pattern.
+        with tempfile.TemporaryDirectory() as tmp:
+            rd = m.build_sampling(make_args(tmp))["repetition_detection"]
+        self.assertGreaterEqual(rd["min_pattern_size"], 2)
+        self.assertLessEqual(rd["min_pattern_size"], rd["max_pattern_size"])
+        self.assertGreaterEqual(rd["min_count"], 2)
+
+    def test_repetition_detection_off_disables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = m.build_sampling(make_args(tmp, repetition_detection="off"))
+        self.assertIsNone(s["repetition_detection"])
+
+    def test_repetition_detection_partial_override_merges(self):
+        # tuning one knob must keep the others (not drop max_pattern_size -> disabled).
+        with tempfile.TemporaryDirectory() as tmp:
+            rd = m.build_sampling(make_args(tmp, repetition_detection="min_count:10"))["repetition_detection"]
+        self.assertEqual(rd["min_count"], 10)            # overridden
+        self.assertEqual(rd["max_pattern_size"], 20)     # kept from default
+        self.assertEqual(rd["min_pattern_size"], 3)      # kept from default
+
+    def test_repetition_detection_reaches_agent_options(self):
+        # the default must actually land on each built agent's sampling vector.
+        with tempfile.TemporaryDirectory() as tmp:
+            rd = m.build_sampling(make_args(tmp))["repetition_detection"]
+        _, sampling = m.oc_build_agents("dgx-n1-8000/Qwen3.6-27B-NVFP4", dict(FULL_CAPS), rd)
+        self.assertEqual(sampling["code"]["options"]["repetition_detection"], rd)
 
 
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`--repetition-detection`** — sets vLLM's `repetition_detection` (RepetitionDetectionParams)
+  on every managed request via the sampling plugin, terminating a generation once a token
+  N-gram loops so a degenerate loop can't burn the whole output budget. Default is tuned
+  **lenient** — `min_pattern_size:3, max_pattern_size:20, min_count:6`: it only cuts a unit
+  that repeats 6× and ignores single/double-token runs, so long numbers (`300000`),
+  indentation, `====` rules, and hex/base64 are never flagged. (The initial cut left
+  `min_pattern_size` at vLLM's default of 1, which clipped `300000` to `30000`.) Pass `off`
+  to disable, or `K:V,…` to override individual knobs — merged onto the default, so
+  `min_count:10` raises just that one instead of dropping `max_pattern_size` (→ disabled).
+
 ### Documentation
 - **Naming conventions codified** in `CONTRIBUTING.md`: kebab-case for the CLI surface
   (executable + flags), snake_case for imported Python files (modules/tests) — the latter
