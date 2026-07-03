@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Documentation
+- **Naming conventions codified** in `CONTRIBUTING.md`: kebab-case for the CLI surface
+  (executable + flags), snake_case for imported Python files (modules/tests) — the latter
+  required, since CI's `python -m unittest test_omodel_wire` / `import` reject hyphenated
+  module names. Documents why the existing split is intentional, not accidental.
+
 ### Changed
 - **Per-model sampling.** The `--profiles` `chat.params` plugin (`dgx-sampling.js`) is now
   keyed by `(model, agent)`, not agent alone. It resolves the sampling vector from the
