@@ -658,5 +658,42 @@ class TestAudit(unittest.TestCase):
                 self.assertEqual(m.oc_audit(args), 2)
 
 
+class TestSharedHosts(unittest.TestCase):
+    """omw reads the same ~/.config/otools/hosts store omodel-manager writes."""
+
+    def setUp(self):
+        self._old = m.HOSTS_FILE
+        self._dir = tempfile.mkdtemp()
+        m.HOSTS_FILE = os.path.join(self._dir, "hosts")
+
+    def tearDown(self):
+        m.HOSTS_FILE = self._old
+
+    def _write(self, text):
+        with open(m.HOSTS_FILE, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_parses_alias_bare_and_user_at(self):
+        self._write(
+            "# managed by install\n"
+            "dgx-1\totto@192.168.50.101\n"      # alias<TAB>user@host
+            "otto@192.168.50.102\n"              # bare user@host
+            "192.168.50.103\n"                   # bare host
+            "\n"
+        )
+        self.assertEqual(
+            m.load_shared_hosts(),
+            ["192.168.50.101", "192.168.50.102", "192.168.50.103"],
+        )
+
+    def test_dedup_by_host(self):
+        self._write("dgx-1\totto@192.168.50.101\nn1\troot@192.168.50.101\n")
+        self.assertEqual(m.load_shared_hosts(), ["192.168.50.101"])
+
+    def test_missing_file_is_empty(self):
+        m.HOSTS_FILE = os.path.join(self._dir, "nope")
+        self.assertEqual(m.load_shared_hosts(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

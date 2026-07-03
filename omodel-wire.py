@@ -56,7 +56,31 @@ DEFAULT_PORTS = [8000, 8001, 8002]
 HOST_LABELS = {                       # friendly short labels for provider keys
     "192.168.50.101": "n1",
     "192.168.50.102": "n2",
+    "192.168.50.103": "n3",
 }
+# Shared with omodel-manager: `omm install`/`ps` manage this file; omw reads it so
+# both tools see the same fleet. Absent/empty -> fall back to DEFAULT_HOSTS.
+HOSTS_FILE = os.path.expanduser("~/.config/otools/hosts")
+
+
+def load_shared_hosts():
+    """Bare host IPs from the shared omodel-manager store (HOSTS_FILE). Each line is
+    `alias<TAB>user@host`, a bare `user@host`, or a bare host; we take the host part
+    (after any `user@`) for HTTP probing. Returns [] if the file is absent/empty."""
+    out = []
+    try:
+        with open(HOSTS_FILE) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                target = ln.split(None, 1)[-1].strip()   # drop the alias column if present
+                host = target.split("@")[-1]             # drop user@ -> bare host/IP
+                if host and host not in out:
+                    out.append(host)
+    except OSError:
+        pass
+    return out
 PROBE_TIMEOUT = 2.0                    # seconds per /v1/models probe
 VISION_TIMEOUT = 30.0                  # seconds for the image probe (first call is slow)
 VISION_MAXTOKENS = 2048                # a vision *reasoning* model can burn a lot of tokens
@@ -1747,8 +1771,9 @@ def main():
                     help="only report which agentic-dev tools are installed; do not sync")
     ap.add_argument("--install-aliases", action="store_true",
                     help="add the `omw` shell alias (this sync tool) to your shell rc, then exit")
-    ap.add_argument("--hosts", default=",".join(DEFAULT_HOSTS),
-                    help="comma-separated host IPs to probe")
+    ap.add_argument("--hosts", default=",".join(load_shared_hosts() or DEFAULT_HOSTS),
+                    help="comma-separated host IPs to probe "
+                         "(default: the shared ~/.config/otools/hosts, else built-in)")
     ap.add_argument("--ports", default=",".join(map(str, DEFAULT_PORTS)),
                     help="comma-separated ports to probe on each host")
     ap.add_argument("--config", default="~/.config/opencode/opencode.json",

@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Shared host discovery.** `omw` now defaults its probe host list from the same
+  `~/.config/otools/hosts` store that omodel-manager's `install`/`ps` manage, so adding a
+  box once (`omm install user@ip dgx-3`) makes it visible to both tools — no more editing
+  the hardcoded `DEFAULT_HOSTS`. Parses `alias<TAB>user@host`, bare `user@host`, or bare
+  host lines and strips `user@` to the bare IP for HTTP probing; falls back to the built-in
+  `DEFAULT_HOSTS` when the file is absent/empty. `--hosts` still overrides. Added an `n3`
+  label (192.168.50.103) so the third node gets a clean provider key.
 - **`--repetition-detection`** — sets vLLM's `repetition_detection` (RepetitionDetectionParams)
   on every managed request via the sampling plugin, terminating a generation once a token
   N-gram loops so a degenerate loop can't burn the whole output budget. Default is tuned
