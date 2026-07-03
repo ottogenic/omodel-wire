@@ -149,6 +149,21 @@ DEFAULT_CONTEXT = 200000              # used if endpoint doesn't report max_mode
 DEFAULT_OUTPUT = 65536               # OpenCode requires limit.output
 API_KEY = "sglang"                    # dummy; vLLM/SGLang ignore it
 PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
+# vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
+# token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
+# Three knobs (vLLM's own defaults in parens):
+#   min_pattern_size (0->1)   smallest repeating unit to flag, in TOKENS
+#   max_pattern_size (0=off)  largest repeating unit to flag; min_pattern<=max_pattern
+#   min_count        (>=2)    consecutive repeats before terminating
+# Tuned LENIENT on purpose -- only cut genuine long loops, never legitimate short repeats:
+#   * min_pattern_size=3  -> a lone/paired repeated token is NEVER a pattern, so long
+#     numbers (300000), indentation, "====" rules, hex/base64 don't trip it. (The earlier
+#     default left this at 1, which cut "300000" off at "30000".)
+#   * max_pattern_size=20 -> vLLM's own auto-enable ceiling; catches up to ~sentence-length
+#     loops (the expensive kind).
+#   * min_count=6         -> the unit must repeat 6x before we stop; well past incidental
+#     repetition, so it fires only when the model is clearly stuck.
+DEFAULT_REPETITION_DETECTION = {"min_pattern_size": 3, "max_pattern_size": 20, "min_count": 6}
 LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provider
 # Agents emitted per recipe. We explicitly override OpenCode's built-in plan/build
 # (full defs, our sampling + permissions). Two tiers:
@@ -654,21 +669,21 @@ GENERIC_QWEN_RECIPE = {
 }
 
 
-def oc_build_agents(model_ref, caps):
+def oc_build_agents(model_ref, caps, repetition_detection=None):
     """Generic (no curated recipe) reasoning model -> the 4 standard roles via
     Qwen's recommended numbers. Returns (agents, agent_sampling) like the recipe
     path, so the agent-aware sampling plugin is written for these too."""
-    return oc_build_recipe_agents(model_ref, GENERIC_QWEN_RECIPE, caps)
+    return oc_build_recipe_agents(model_ref, GENERIC_QWEN_RECIPE, caps, repetition_detection)
 
 
-def oc_build_recipe_agents(model_ref, recipe, caps):
+def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
     """Turn a matched recipe's presets into OpenCode agents + an agent->sampling
     map for the agent-aware chat.params plugin.
 
     Returns (agents, agent_sampling):
       agents[name]         -> {description, model, options{thinking knob,...}}
       agent_sampling[name] -> {temperature, topP, topK, maxOutputTokens, options{...}}
-                              (the plugin enforces these so top_k/min_p land reliably)
+                               (the plugin enforces these so top_k/min_p land reliably)
     """
     # thinking_control: "auto" (default) injects Qwen-style knobs the probe
     # confirmed (reasoning_effort / enable_thinking / preserve_thinking);
@@ -705,6 +720,8 @@ def oc_build_recipe_agents(model_ref, recipe, caps):
         if s.get("presence_penalty") is not None: body["presence_penalty"] = s["presence_penalty"]
         if s.get("min_p"): body["min_p"] = s["min_p"]
         if s.get("repetition_penalty") not in (None, 1.0): body["repetition_penalty"] = s["repetition_penalty"]
+        if repetition_detection is not None:
+            body["repetition_detection"] = repetition_detection
         if body: vec["options"] = body
         return vec
 
@@ -913,6 +930,8 @@ def oc_sampling_plugin_js(sampling):
     top-level on `output`; penalties live in `output.options`.
     """
     mode = sampling["mode"]
+    rep_det = sampling.get("repetition_detection")
+    rep_det_json = json.dumps(rep_det) if rep_det else "undefined"
     if mode == "fixed":
         t = "undefined" if sampling["temperature"] is None else json.dumps(sampling["temperature"])
         p = "undefined" if sampling["top_p"] is None else json.dumps(sampling["top_p"])
@@ -968,7 +987,9 @@ export const DgxSampling = async () => {{
   return {{
     "chat.params": async (input, output) => {{
       if (!isManaged(input)) return
-{body}    }},
+{body}      // --- repetition_detection: terminate degenerate N-gram loops ---
+      output.options.repetition_detection = {rep_det_json}
+    }},
   }}
 }}
 """
@@ -1393,7 +1414,9 @@ def oc_sync(args, sampling, detected_installed):
         model_id = agent_model_ref.split("/", 1)[1] if "/" in agent_model_ref else agent_model_ref
         matched_recipe = match_recipe(model_id, configs)
         if matched_recipe:
-            agents, agent_sampling = oc_build_recipe_agents(agent_model_ref, matched_recipe, caps)
+            agents, agent_sampling = oc_build_recipe_agents(
+                agent_model_ref, matched_recipe, caps,
+                sampling.get("repetition_detection"))
             try:
                 key, mid = agent_model_ref.split("/", 1)
                 mentry = cfg["provider"][key]["models"][mid]
@@ -1417,19 +1440,21 @@ def oc_sync(args, sampling, detected_installed):
             except (KeyError, ValueError):
                 pass
         else:
-            agents, agent_sampling = oc_build_agents(agent_model_ref, caps)
+            agents, agent_sampling = oc_build_agents(
+                agent_model_ref, caps, sampling.get("repetition_detection"))
 
         # Per-(model, agent) sampling: one table per discovered reasoning model, so
         # switching an agent onto another model applies THAT model's card sampling
         # (10+ models with different recommended temps each get their own vector).
+        _rep_det = sampling.get("repetition_detection")
         per_model_sampling = {}
         for _mref, _mcaps in reasoning_caps.items():
             _mid = _mref.split("/", 1)[1] if "/" in _mref else _mref
             _mrec = match_recipe(_mid, configs)
             if _mrec:
-                _, _msamp = oc_build_recipe_agents(_mref, _mrec, _mcaps)
+                _, _msamp = oc_build_recipe_agents(_mref, _mrec, _mcaps, _rep_det)
             else:
-                _, _msamp = oc_build_agents(_mref, _mcaps)
+                _, _msamp = oc_build_agents(_mref, _mcaps, _rep_det)
             per_model_sampling[_mid] = _msamp
 
         # OpenCode caps per-step output at 32k UNLESS this env var is raised. A
@@ -1667,7 +1692,7 @@ def oc_is_managed(key):
 # CLI
 # ============================================================================
 def build_sampling(args):
-    return {
+    out = {
         "mode": args.sampling,
         "temperature": args.temperature,
         "top_p": args.top_p,
@@ -1675,6 +1700,35 @@ def build_sampling(args):
         "presence_penalty": args.presence_penalty,
         "frequency_penalty": args.frequency_penalty,
     }
+    # repetition_detection: parse --repetition-detection VAL.
+    #   None (flag absent)    -> DEFAULT_REPETITION_DETECTION
+    #   "off"                  -> None (disabled)
+    #   "K1:V1,K2:V2"          -> partial overrides MERGED onto the default, so tuning one
+    #                             knob (e.g. "min_count:10") keeps the others -- rather than
+    #                             dropping max_pattern_size and silently disabling detection.
+    raw = getattr(args, "repetition_detection", None)
+    if raw is None:
+        out["repetition_detection"] = dict(DEFAULT_REPETITION_DETECTION)
+    elif raw.lower() == "off":
+        out["repetition_detection"] = None
+    else:
+        merged = dict(DEFAULT_REPETITION_DETECTION)
+        for kv in raw.split(","):
+            if ":" not in kv:
+                print(f"  warning: ignoring malformed repetition_detection entry: {kv}",
+                      file=sys.stderr)
+                continue
+            k, v = kv.split(":", 1)
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+            merged[k.strip()] = v
+        out["repetition_detection"] = merged
+    return out
 
 
 def main():
@@ -1718,6 +1772,12 @@ def main():
                     help="(--sampling fixed) frequency_penalty to set; omit to drop it")
     ap.add_argument("--no-sampling-plugin", action="store_true",
                     help="don't write the chat.params plugin (only set temperature:false)")
+    ap.add_argument("--repetition-detection", default=None, metavar="VAL",
+                    help="vLLM repetition_detection to terminate degenerate N-gram loops "
+                         "(default: min_pattern_size:3, max_pattern_size:20, min_count:6 -- "
+                         "lenient, only cuts long stuck loops). Use 'off' to disable, or "
+                         "'K1:V1,...' to override knobs (merged onto the default, so "
+                         "'min_count:10' just raises that one), e.g. 'min_pattern_size:2,min_count:4'.")
 
     # Tool calling + web search exposure
     ap.add_argument("--no-tool-call", action="store_true",
