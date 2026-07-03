@@ -27,8 +27,11 @@ them — it does not own them.
 
 Top-to-bottom, the meaningful sections:
 
-- **Discovery defaults** — `DEFAULT_HOSTS`, `DEFAULT_PORTS`, `HOST_LABELS`, probe
-  timeouts/limits. Edit here if the DGX layout changes.
+- **Discovery defaults** — `DEFAULT_HOSTS` (fallback only), `DEFAULT_PORTS`, `HOST_LABELS`,
+  probe timeouts/limits, and `load_shared_hosts()` which reads the shared
+  `~/.config/otools/hosts` store (managed by omodel-manager) as the `--hosts` default so
+  both tools see the same fleet. Edit `DEFAULT_HOSTS`/`HOST_LABELS` only for the no-store
+  fallback / provider-key labels.
 - **Configs (consumed, not owned)** — `_configs_dir()` (resolves `--configs` /
   `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`), `load_configs()` (reads
   `omodel-manager`'s `configs/*.toml` via `tomllib`), `caps_from_capabilities()`

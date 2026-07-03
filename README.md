@@ -40,8 +40,10 @@ omw --profiles \
      --web-search exa --write-shell-env
 ```
 
-By default the tool probes `192.168.50.101` and `192.168.50.102` on ports
-`8000/8001/8002`. Override with `--hosts` / `--ports`.
+By default the tool probes the hosts registered in the shared
+`~/.config/otools/hosts` store (managed by omodel-manager's `install`/`ps`), on ports
+`8000/8001/8002` — so `omm install user@ip dgx-3` makes the box visible here too. If that
+file is absent it falls back to a built-in list. Override either with `--hosts` / `--ports`.
 
 ---
 
