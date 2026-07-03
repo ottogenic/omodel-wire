@@ -64,3 +64,23 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
   `omodel-wire.py`.
 - Keep it a single script with one companion JSON. Don't split into a package unless the
   tool genuinely outgrows one file.
+
+## Naming conventions
+
+Two standards, split by **how the name is used** — the same split every Python CLI uses
+(pytest's `test_*.py`, the `pre-commit` / `ruff` / `pip` commands, …). Pick by that rule,
+not by taste:
+
+- **kebab-case for anything you type at a shell** — the executable (`omodel-wire.py` is
+  invoked directly) and every flag (`--dry-run`, `--team-model`, `--no-vision-probe`).
+  No underscores on the CLI surface.
+- **snake_case for Python files that get imported** — modules and tests
+  (`test_omodel_wire.py`, `test_configs.py`). This is **required**, not stylistic:
+  CI runs `python -m unittest test_omodel_wire`, and `import` treats the filename as a
+  module name — a hyphen there is a syntax error (parsed as minus). PEP 8 also mandates
+  snake for modules.
+
+Rule of thumb: **type it at a shell → kebab; Python imports it → snake.** `omodel-wire.py`
+is a hyphenated file only because it's run by path or loaded via
+`spec_from_file_location(<logical name>, path)` in the tests — never imported by its
+filename, so it never has to be a valid module name.
