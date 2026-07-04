@@ -2430,10 +2430,6 @@ def _mutate_model(args, cfg_path, cfg, agents, plugin):
     if not targets:
         print(f"no live agent runs {mid} with role '{args.role}'.", file=sys.stderr)
         sys.exit(1)
-    
-    resolved_model_ref, _ = _resolve_model_ref(mid, cfg)
-    if not resolved_model_ref:
-        resolved_model_ref = mid
     plugin_exists = os.path.exists(_plugin_js_path(cfg_path))
     for nm in targets:
         a = agents[nm]
