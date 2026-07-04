@@ -2308,9 +2308,12 @@ def _write_plugin(cfg_path, plugin, cfg):
         f.write(oc_agent_sampling_plugin_js(plugin, _default_model_id(cfg)))
 
 
-def _resolve_model_ref(ref, cfg):
+def _resolve_model_ref(ref, cfg, configs=None):
     """Convert a bare model name to full provider/model-id reference if needed.
-    Returns (resolved_ref, provider) or (None, None) if model not found."""
+    Returns (resolved_ref, provider) or (None, None) if model not found.
+    
+    If configs is provided (omodel-manager recipes), uses match patterns to find
+    the correct provider/model-id for bare model names."""
     if "/" in ref:
         prov, mid = ref.split("/", 1)
         if prov.startswith(PROVIDER_PREFIX):
@@ -2320,13 +2323,50 @@ def _resolve_model_ref(ref, cfg):
         return None, None
     
     n = ref.lower()
+    
+    # First, try to match against model IDs in provider config
     for prov_key, prov_entry in (cfg.get("provider") or {}).items():
         if not prov_key.startswith(PROVIDER_PREFIX):
             continue
         models = (prov_entry.get("models") or {})
         for mid in models:
-            if mid.lower() == n:
+            mid_lower = mid.lower()
+            bare_mid = mid.split("/", 1)[-1].lower() if "/" in mid else mid_lower
+            if bare_mid == n:
                 return f"{prov_key}/{mid}", prov_key
+    
+    # If no match found and configs provided, try match patterns from omodel-manager
+    if configs:
+        recipes = configs.get("recipes", [])
+        for recipe in recipes:
+            match_pats = recipe.get("match", [])
+            match_pats = [match_pats] if isinstance(match_pats, str) else match_pats
+            for pat in match_pats:
+                if pat.lower() == n:
+                    # Find the provider/model-id pattern in this recipe (if any)
+                    target_bare = None
+                    for p in match_pats:
+                        if "/" in p:
+                            _, mid = p.split("/", 1)
+                            target_bare = mid.split("/", 1)[-1] if "/" in mid else mid
+                            target_bare_lower = target_bare.lower()
+                            break
+                    
+                    # If no provider/model-id pattern, use the matched pattern's bare name
+                    if target_bare is None:
+                        target_bare_lower = n
+                    else:
+                        target_bare_lower = target_bare.lower()
+                    
+                    # Find the model by bare name in all providers
+                    for prov_key, prov_entry in (cfg.get("provider") or {}).items():
+                        if not prov_key.startswith(PROVIDER_PREFIX):
+                            continue
+                        models = (prov_entry.get("models") or {})
+                        for mid in models:
+                            bare_mid = mid.split("/", 1)[-1] if "/" in mid else mid
+                            if bare_mid.lower() == target_bare_lower:
+                                return f"{prov_key}/{mid}", prov_key
     return None, None
 
 
@@ -2382,7 +2422,10 @@ def _mutate_roster(args, want_subagent):
     else:
         print("name an agent: omw agents <name> --set-model REF", file=sys.stderr)
         sys.exit(1)
-    resolved_ref, _ = _resolve_model_ref(ref, cfg)
+    
+    # Load omodel-manager configs to support bare model name resolution
+    configs = load_configs(getattr(args, "configs", None))
+    resolved_ref, _ = _resolve_model_ref(ref, cfg, configs)
     if resolved_ref:
         ref = resolved_ref
     else:
