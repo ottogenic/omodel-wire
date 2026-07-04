@@ -26,7 +26,10 @@ chore(cli): add --version flag
 Types: `feat`, `fix`, `docs`, `refactor`, `chore`, `test`. `scope` is optional
 (e.g. `recipes`, `agents`, `opencode`, `cli`). Add a body when the "why" isn't obvious.
 
-## Merging
+## Merging (reviewer / maintainer only)
+
+Merging is the **reviewer/maintainer's** step, not the contributor's. **AI contributors never
+merge — they open the PR and stop.**
 
 - **Squash-merge** feature branches into `main` so `main` reads as one clean commit per
   change. Delete the branch after merging.
