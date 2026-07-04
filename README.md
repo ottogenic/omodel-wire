@@ -21,45 +21,56 @@ layers are pluggable so other tools (pi.dev, Claude Code, …) can be added late
 
 ## Quick start
 
+`omw` is a verb-first CLI (like its sibling `omm`). Run it with no arguments for a
+guided home screen; each command suggests the next step.
+
 ```bash
 # 1) add the `omw` shell alias (re-open your shell afterwards)
-python3 omodel-wire.py --install-aliases
+python3 omodel-wire.py shell-init
 
-# 2) detect installed tools + sync discovered models (server decides sampling)
+# 2) see status + suggested next steps
 omw
 
-# 3) preview without writing anything
-omw --dry-run
+# 3) sync the OpenCode agent roster from the model configs
+omw sync
 
-# 4) build the full agent roster for reasoning models
-omw --profiles
+# 4) inspect what you got
+omw agents            # primary agents (research/code/agent/team)
+omw models qwen       # a model's per-role sampling table
 
-# 5) a frontier orchestrator that delegates to your local workers
-omw --profiles \
-     --team-model anthropic/claude-opus-4-8 --team-reasoning high --team-task-budget 4 \
-     --web-search exa --write-shell-env
+# 5) experiment live (edits are disposable — `omw sync` resets to known-good)
+omw models qwen --role code --set-temperature 0.5
+omw agents team --set-work-budget 4
+omw audit             # show what has drifted from the known-good configs
 ```
 
-By default the tool probes the hosts registered in the shared
-`~/.config/otools/hosts` store (managed by omodel-manager's `install`/`ps`), on ports
-`8000/8001/8002` — so `omm install user@ip dgx-3` makes the box visible here too. If that
-file is absent it falls back to a built-in list. Override either with `--hosts` / `--ports`.
+Common settings you don't want to retype live in `~/.config/otools/wire.json` — set
+them once and every command picks them up (precedence: **flag > wire.json > default**):
+
+```bash
+omw config --set team_model anthropic/claude-opus-4-8
+omw config --set default_agent code
+omw config                       # show resolved settings + their source
+```
+
+By default `omw sync` discovers the hosts in the shared `~/.config/otools/hosts` store
+(managed by omm's `install`/`ps`), on ports `8000/8001/8002` — so `omm install user@ip
+dgx-3` makes the box visible here too. Override with `omw sync --hosts` / `--ports`.
 
 ---
 
 ## What it does
 
 1. **Detect** which agentic-dev tools are installed (OpenCode today).
-2. **Probe** each `/v1/models` endpoint, then per model:
-   - a **vision** check — actually sends a blue test image and confirms the answer
-     mentions "blue" (a text-only server that silently ignores images won't fool it);
-   - with `--profiles`, a **reasoning** check plus which thinking knob it honors
-     (`chat_template_kwargs.enable_thinking` vs `reasoning_effort`).
+2. **Discover** live models via each `/v1/models` endpoint (fast), then read each
+   model's capabilities (vision / reasoning / thinking-knob) and per-mode sampling from
+   **omodel-manager**'s declared `configs/*.toml` — **no slow per-model probing** on the
+   sync path. (`omw verify` re-runs the real probes to check a declaration.)
 3. **Write** the OpenCode config: providers, models (with `tool_call`, `attachment` +
-   `modalities` for vision, context/output limits), a `chat.params` plugin that pins
-   sampling, and — with `--profiles` — the agent roster and Ctrl+T thinking variants.
+   `modalities` for vision, context/output limits), a `(model, agent)`-keyed `chat.params`
+   plugin that pins sampling, the agent roster, and Ctrl+T thinking variants.
 
-### The agent roster (`--profiles`)
+### The agent roster (`omw sync`)
 
 Built from `AGENT_SPECS`, with per-mode sampling from omodel-manager's configs:
 
@@ -80,14 +91,16 @@ bug where the orchestrator otherwise receives an empty result. The visible agent
 stay clean (no worker prompt) so they're pleasant to drive by hand.
 
 OpenCode reserves the names `build`/`plan` and ignores overrides on them, so
-`--profiles` **disables** the native pair and ships `research`/`code` in their place,
-setting `--default-agent` (default `code`) since `build` used to be the startup agent.
-Use `--keep-builtins` to opt out.
+`omw sync` **disables** the native pair and ships `research`/`code` in their place,
+pointing the startup agent at `--default-agent` (default `code`, or wire.json
+`default_agent`). `omw sync --keep-builtins` opts out.
 
-Put the `team` orchestrator on a frontier model with `--team-model`
-(e.g. `anthropic/claude-opus-4-8`); workers stay local. `--team-reasoning`
-(`low`/`medium`/`high` → 10000/24000/32000 thinking-budget tokens) and
-`--team-task-budget N` are preserved across re-syncs.
+Put the `team` orchestrator on a frontier model with `omw sync --team-model` — or persist
+it with `omw config --set team_model anthropic/claude-opus-4-8`; workers stay local.
+`--team-reasoning` (`low`/`medium`/`high` → 10000/24000/32000 thinking-budget tokens) and
+`--team-task-budget N` are preserved across re-syncs. If you don't set a budget, `sync`
+defaults it to the worker model's declared `concurrency` (its `max-num-seqs`) so it won't
+spawn more parallel workers than the server has sequence slots.
 
 ### Model configs
 
@@ -96,37 +109,34 @@ Curated capabilities + per-mode sampling live in **omodel-manager**'s `configs/*
 discovered model matches, its per-mode presets become the agents above with sampling
 enforced by the plugin. No match → generic `code`/`reason`. **Add a model by dropping a
 `.toml` in omodel-manager's `configs/`** — see that repo's `configs/README.md`.
-`--no-recipes` opts out. Configs ship for Qwen3.6-27B, Qwen3.6-35B-A3B,
-NVIDIA-Nemotron-3-Super, and GLM-4.7-Flash. `--verify` checks a live model against its config.
+`omw sync --no-recipes` opts out. Configs ship for Qwen3.6-27B, Qwen3.6-35B-A3B,
+NVIDIA-Nemotron-3-Super, GLM-4.7-Flash, and the Gemma-4 pair. `omw verify` checks a live
+model against its config.
 
 ---
 
-## Common options
+## Commands
 
-| Flag | Purpose |
-| ---- | ------- |
-| `--dry-run` | Print the resulting config + plugin; write nothing. |
-| `--detect-only` | Just report which tools are installed. |
-| `--hosts` / `--ports` | Comma-separated endpoints to probe. |
-| `--profiles` | Build the agent roster + thinking variants. |
-| `--sampling {server-default,fixed,opencode-default}` | Who decides sampling (default `server-default` = let the model server decide). `fixed` pins values via `--temperature`/`--top-p`/`--top-k`/`--presence-penalty`/`--frequency-penalty`. |
-| `--vision-probe-all` | Image-probe every model, not just name-matched ones. |
-| `--no-vision-probe` | Skip vision detection entirely. |
-| `--web-search {none,exa,mcp}` | Expose a web-search tool. `exa` needs `OPENCODE_ENABLE_EXA` (see `--enable-exa-shell`); `mcp` adds a server via `--mcp-command`/`--mcp-url`. |
-| `--team-model REF` | Put `team` on a specific (often frontier) model. |
-| `--team-reasoning {low,medium,high}` | Extended-thinking budget for an Anthropic team model. |
-| `--team-task-budget N` | Cap delegation calls per session. |
-| `--default-agent NAME` | Startup agent when native build/plan are disabled (default `code`). |
-| `--keep-builtins` | Keep native build/plan instead of replacing them. |
-| `--configs PATH` | omodel-manager's configs dir (or set `$OMODEL_CONFIGS`; default sibling). |
-| `--no-recipes` | Ignore the configs (generic behavior). |
-| `--audit` | Offline side-by-side of the live OpenCode config vs the omodel-manager configs, per model + agent; highlights sampling drift and suggests `--profiles`. Writes nothing. |
-| `--verify` | Probe live endpoints and compare to the declared configs; writes nothing. |
-| `--install-aliases` | Add the `omw` shell alias, then exit. |
-| `--write-shell-env` | Append needed OpenCode env vars (Exa, >32k output) to your shell rc. |
-| `--version` | Print version and exit. |
+| Command | What it does |
+| ------- | ------------ |
+| `omw` | Home screen: status + suggested next steps. |
+| `omw sync` | Build/refresh the OpenCode roster from the model configs. Carries all the sync knobs (`--hosts/--ports`, `--team-model/--team-task-budget/--team-reasoning`, `--default-agent/--keep-builtins`, `--web-search`, `--sampling …`, `--dry-run`, …). This is the "reset to known-good" button. |
+| `omw agents [<name>]` | List primary agents; show one in detail. |
+| `omw agents <name> --set-model REF` | Live-set an agent's model. |
+| `omw agents team --set-work-budget N` | Live-set the team's delegation budget. |
+| `omw subagents [<name>] [--set-model REF]` | List/inspect hidden workers; no name → set all workers. |
+| `omw models [<name>]` | List models; `<name>` shows the per-role sampling table. |
+| `omw models <name> --role R --set-temperature T` / `--set-thinking B` | Live-tweak one role's sampling/thinking. |
+| `omw audit` | Offline side-by-side of the live config vs the known-good configs; flags drift. |
+| `omw verify` | Probe live endpoints and compare to the declared capabilities (slow, opt-in). |
+| `omw config [--set KEY VAL] [--edit] [--path]` | Show or persist settings in `~/.config/otools/wire.json`. |
+| `omw detect` | Report which agentic-dev tools are installed. |
+| `omw shell-init` | Install the `omw` shell alias. |
 
-Run `python3 omodel-wire.py --help` for the complete list.
+Every `--set-*` edit touches **only** `~/.config/opencode/` (opencode.json + the sampling
+plugin) — the declared configs stay pristine, so `omw sync` always restores a known-good
+state and `omw audit` shows exactly what you've changed. Run `omw <command> --help` for
+the full flag list of any command.
 
 ---
 
