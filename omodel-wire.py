@@ -1764,162 +1764,552 @@ def build_sampling(args):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Detect agentic-dev tools and sync DGX models into them (OpenCode today).")
-    ap.add_argument("--version", action="version",
-                    version=f"omodel-wire {__version__}")
-    ap.add_argument("--detect-only", action="store_true",
-                    help="only report which agentic-dev tools are installed; do not sync")
-    ap.add_argument("--install-aliases", action="store_true",
-                    help="add the `omw` shell alias (this sync tool) to your shell rc, then exit")
-    ap.add_argument("--hosts", default=",".join(load_shared_hosts() or DEFAULT_HOSTS),
-                    help="comma-separated host IPs to probe "
-                         "(default: the shared ~/.config/otools/hosts, else built-in)")
-    ap.add_argument("--ports", default=",".join(map(str, DEFAULT_PORTS)),
-                    help="comma-separated ports to probe on each host")
-    ap.add_argument("--config", default="~/.config/opencode/opencode.json",
-                    help="path to opencode.json")
-    ap.add_argument("--set-default", metavar="REF",
-                    help="set OpenCode top-level default model, e.g. dgx-n1-8000/qwen3-coder")
-    ap.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
-    ap.add_argument("--no-vision-probe", action="store_true",
-                    help="skip the image test entirely (don't auto-detect vision)")
-    ap.add_argument("--vision-probe-all", action="store_true",
-                    help="image-probe EVERY model, not just name-matched ones (slower)")
+# ============================================================================
+# Persisted settings (~/.config/otools/wire.json) -- flag > wire.json > default
+# ============================================================================
+WIRE_SETTINGS_FILE = os.path.expanduser("~/.config/otools/wire.json")
 
-    # Sampling control (FIX #2)
-    ap.add_argument("--sampling", choices=["server-default", "fixed", "opencode-default"],
-                    default="server-default",
-                    help="server-default: stop OpenCode sending temp/topP/topK/penalties "
-                         "(server decides); fixed: pin values via flags below; "
-                         "opencode-default: keep OpenCode's behavior (old).")
-    ap.add_argument("--temperature", type=float, default=None,
-                    help="(--sampling fixed) temperature to pin; omit to leave unset")
-    ap.add_argument("--top-p", type=float, default=None,
-                    help="(--sampling fixed) top_p to pin; omit to leave unset")
-    ap.add_argument("--top-k", type=int, default=None,
-                    help="(--sampling fixed) top_k to pin; omit to leave unset")
-    ap.add_argument("--presence-penalty", type=float, default=None,
-                    help="(--sampling fixed) presence_penalty to set; omit to drop it")
-    ap.add_argument("--frequency-penalty", type=float, default=None,
-                    help="(--sampling fixed) frequency_penalty to set; omit to drop it")
-    ap.add_argument("--no-sampling-plugin", action="store_true",
-                    help="don't write the chat.params plugin (only set temperature:false)")
-    ap.add_argument("--repetition-detection", default=None, metavar="VAL",
-                    help="vLLM repetition_detection to terminate degenerate N-gram loops "
-                         "(default: min_pattern_size:3, max_pattern_size:20, min_count:10 -- "
-                         "lenient, only cuts long stuck loops). Use 'off' to disable, or "
-                         "'K1:V1,...' to override knobs (merged onto the default, so "
-                         "'min_count:14' raises just that one), e.g. 'min_pattern_size:2,min_count:6'.")
+# key -> (one-line description, built-in fallback)
+SETTINGS_KEYS = {
+    "opencode_config": ("path to opencode.json", "~/.config/opencode/opencode.json"),
+    "configs_dir":     ("omodel-manager configs/ dir", None),
+    "hosts":           ("comma-separated host IPs to probe", None),
+    "ports":           ("comma-separated ports", ",".join(map(str, DEFAULT_PORTS))),
+    "team_model":      ("model ref for the team orchestrator", None),
+    "team_reasoning":  ("low|medium|high (Anthropic team thinking)", None),
+    "default_agent":   ("startup agent (research/code/agent/team)", "code"),
+    "web_search":      ("none|exa|mcp", "none"),
+}
 
-    # Tool calling + web search exposure
-    ap.add_argument("--no-tool-call", action="store_true",
-                    help="don't declare tool_call capability (OpenCode then won't send "
-                         "ANY tools -- websearch/edit/bash -- to these custom models)")
-    ap.add_argument("--web-search", choices=["none", "exa", "mcp"], default="none",
-                    help="expose a web-search tool to all models. exa: built-in keyless Exa "
-                         "(needs OPENCODE_ENABLE_EXA env, see --enable-exa-shell); "
-                         "mcp: add an MCP server via --mcp-command or --mcp-url.")
-    ap.add_argument("--enable-exa-shell", action="store_true",
-                    help="(--web-search exa) append OPENCODE_ENABLE_EXA=1 to your shell rc")
-    ap.add_argument("--write-shell-env", action="store_true",
-                    help="append any needed OpenCode env vars (e.g. EXA, "
-                         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX for >32k output) to your shell rc")
-    ap.add_argument("--mcp-name", default="websearch",
-                    help="(--web-search mcp) name for the MCP server entry")
-    ap.add_argument("--mcp-command",
-                    help="(--web-search mcp) stdio command, e.g. 'npx -y exa-mcp-server'")
-    ap.add_argument("--mcp-url", help="(--web-search mcp) remote MCP URL instead of a command")
-    ap.add_argument("--mcp-env", action="append", metavar="KEY=VAL",
-                    help="(--web-search mcp local) env var for the server; repeatable. "
-                         "Use {env:NAME} to reference a shell var without storing the secret.")
-    ap.add_argument("--mcp-header", action="append", metavar="KEY=VAL",
-                    help="(--web-search mcp remote) HTTP header; repeatable.")
 
-    # Per-task profiles (agents + thinking-depth variants)
-    ap.add_argument("--profiles", action="store_true",
-                    help="generate the agent roster (research/code/agent + a team orchestrator "
-                         "delegating to hidden agent-plan/agent-code/agent-instruct workers), "
-                         "plus Ctrl+T thinking variants. Probes each endpoint for the right "
-                         "thinking knob and disables native build/plan. Supersedes --sampling.")
-    ap.add_argument("--no-reasoning-probe", action="store_true",
-                    help="(with --profiles) skip the reasoning capability probe")
-    ap.add_argument("--keep-builtins", action="store_true",
-                    help="(with --profiles) keep OpenCode's native build/plan agents instead "
-                         "of disabling them (we replace them with code/research).")
-    ap.add_argument("--default-agent", default="code",
-                    help="startup agent when native build/plan are disabled (default: code). "
-                         "e.g. research / code / agent / team.")
-    ap.add_argument("--team-model", "--architect-model", metavar="REF", dest="team_model",
-                    help="put the `team` orchestrator on a specific model, e.g. "
-                         "anthropic/claude-sonnet-4-6 or anthropic/claude-opus-4-8 (frontier "
-                         "planner). Workers stay on their local models. A previously-set "
-                         "frontier model is PRESERVED across re-syncs even without this flag. "
-                         "Non-dgx refs drop the local chat_template_kwargs automatically.")
-    ap.add_argument("--team-task-budget", "--architect-task-budget", type=int, metavar="N",
-                    dest="team_task_budget",
-                    help="cap how many sub-agents (task/delegation calls) the team may spawn "
-                         "per session. Omit for no cap (depth still bounded by level_limit).")
-    ap.add_argument("--team-reasoning", choices=["low", "medium", "high"], dest="team_reasoning",
-                    help="(Anthropic team model) set extended-thinking budget: low=10000, "
-                         "medium=24000, high=32000 budgetTokens. Preserved across re-syncs.")
-    ap.add_argument("--configs", metavar="PATH",
-                    help="omodel-manager's generic per-model configs dir (default: "
-                         "$OMODEL_CONFIGS, else sibling ../omodel-manager/configs)")
-    ap.add_argument("--no-recipes", action="store_true",
-                    help="(with --profiles) ignore the configs; yields generic behavior")
+def load_settings():
+    """Read wire.json; {} if absent or unparseable."""
+    try:
+        with open(WIRE_SETTINGS_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
-    ap.add_argument("--audit", action="store_true",
-                    help="compare the LIVE OpenCode agent sampling against the omodel-manager "
-                         "configs (offline, no probing): a side-by-side table per model + agent, "
-                         "highlighting drift and suggesting `--profiles` to re-sync. Writes nothing.")
-    ap.add_argument("--verify", action="store_true",
-                    help="probe live endpoints and compare their real capabilities to the "
-                         "declared configs (opt-in; writes nothing). Slow -- re-runs the "
-                         "vision/reasoning probes the normal path no longer uses.")
-    ap.add_argument("--dry-run", action="store_true", help="print result, do not write")
-    ap.add_argument("--allow-empty", action="store_true",
-                    help="write even if NOTHING was discovered (default: refuse, as a safety net)")
-    args = ap.parse_args()
 
-    if args.install_aliases:
-        install_aliases()
+def save_settings(d):
+    os.makedirs(os.path.dirname(WIRE_SETTINGS_FILE), exist_ok=True)
+    with open(WIRE_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+
+
+def _setting(args, key):
+    """Resolve a setting: wire.json value, else the built-in fallback."""
+    s = getattr(args, "_settings", {}) or {}
+    if s.get(key) is not None:
+        return s[key]
+    return SETTINGS_KEYS[key][1]
+
+
+def _suggest(items, header="Next steps"):
+    """items: list of (description, command-string). Prints a breadcrumb block.
+    Mirrors omodel-manager's _suggest so the two tools feel the same."""
+    items = [it for it in items if it]
+    if not items:
         return
+    print(f"\n{header}:")
+    for desc, cmd in items:
+        print(f"  - {desc}")
+        print(f"      {cmd}")
 
-    args._hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
-    args._ports = [int(p) for p in args.ports.split(",") if p.strip()]
 
-    if args.audit:
-        sys.exit(oc_audit(args))
+def _resolve_io(args):
+    """Fill args.config / args.configs from flag > wire.json > default."""
+    if not getattr(args, "config", None):
+        args.config = _setting(args, "opencode_config")
+    if not getattr(args, "configs", None):
+        args.configs = _setting(args, "configs_dir")   # None -> _configs_dir() default
+    return args
 
-    if args.verify:
-        sys.exit(oc_verify(args))
 
-    # 1) Detection
+def _resolve_hosts_ports(args):
+    """Fill args._hosts / args._ports from flag > wire.json > shared store/default."""
+    hosts = (getattr(args, "hosts", None)
+             or _setting(args, "hosts")
+             or ",".join(load_shared_hosts() or DEFAULT_HOSTS))
+    ports = getattr(args, "ports", None) or _setting(args, "ports")
+    args._hosts = [h.strip() for h in hosts.split(",") if h.strip()]
+    args._ports = [int(p) for p in ports.split(",") if p.strip()]
+    return args
+
+
+# ============================================================================
+# Subcommands
+# ============================================================================
+def cmd_home(args):
+    """No-subcommand landing screen: status + suggested next steps. No network."""
+    cfg_path = os.path.expanduser(_setting(args, "opencode_config"))
+    cfg = oc_load_config(cfg_path) if os.path.exists(cfg_path) else {}
+    agents = cfg.get("agent", {}) or {}
+    managed = [k for k, v in agents.items()
+               if k in MANAGED_AGENTS and not (isinstance(v, dict) and v.get("disable"))]
+    cdir = _configs_dir(_setting(args, "configs_dir"))
+    ntoml = len([f for f in os.listdir(cdir) if f.endswith(".toml")]) if os.path.isdir(cdir) else 0
+    hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
+    team = (agents.get("team") or {}).get("model") or _setting(args, "team_model") or "(local worker model)"
+
+    print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
+    print("Status:")
+    cfg_note = "" if ntoml else "  [not found -- omw config --set configs_dir PATH]"
+    print(f"  configs : {cdir}  ({ntoml} model config(s)){cfg_note}")
+    print(f"  hosts   : {hosts}")
+    dfl = f", default @{cfg.get('default_agent')}" if cfg.get("default_agent") else ""
+    print(f"  opencode: {cfg_path}  ({len(managed)} managed agent(s){dfl})")
+    print(f"  team    : {team}")
+    print(f"  settings: {WIRE_SETTINGS_FILE}{'' if os.path.exists(WIRE_SETTINGS_FILE) else '  (none yet)'}")
+
+    if not managed:
+        items = [("Sync the OpenCode agent roster from the model configs", "omw sync")]
+    else:
+        items = [
+            ("Review the agent roster (models, permissions)", "omw agents"),
+            ("Review per-model sampling", "omw models"),
+            ("Check for drift vs the known-good configs", "omw audit"),
+            ("Re-sync to known-good presets", "omw sync"),
+        ]
+    _suggest(items, header="Suggested next steps")
+
+
+def cmd_config(args):
+    """Show or persist wire settings (~/.config/otools/wire.json)."""
+    settings = args._settings
+    if args.path:
+        print(WIRE_SETTINGS_FILE)
+        return
+    if args.edit:
+        if not os.path.exists(WIRE_SETTINGS_FILE):
+            save_settings(settings)
+        editor = os.environ.get("EDITOR", "nano")
+        sys.exit(subprocess.run([editor, WIRE_SETTINGS_FILE]).returncode)
+    if args.set:
+        key, val = args.set
+        if key not in SETTINGS_KEYS:
+            print(f"unknown setting '{key}'. known: {', '.join(SETTINGS_KEYS)}", file=sys.stderr)
+            sys.exit(1)
+        if val.strip().lower() in ("", "none", "unset", "-", "default"):
+            settings.pop(key, None)
+            save_settings(settings)
+            print(f"cleared {key} (back to default)")
+        else:
+            settings[key] = val
+            save_settings(settings)
+            print(f"set {key} = {val}")
+        return
+    # default: show resolved settings + source
+    exists = os.path.exists(WIRE_SETTINGS_FILE)
+    print(f"omodel-wire settings ({WIRE_SETTINGS_FILE}{'' if exists else '  -- not created yet'}):\n")
+    for k, (desc, dflt) in SETTINGS_KEYS.items():
+        if settings.get(k) is not None:
+            print(f"  {k:16} {settings[k]}   ({desc})")
+        else:
+            print(f"  {k:16} (default: {dflt})   ({desc})")
+    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8")],
+             header="Set")
+
+
+def cmd_detect(args):
     detected = detect_tools()
     print_detection(detected)
-    if args.detect_only:
-        return
 
-    installed = {t["key"] for t in detected if t["installed"]}
 
-    # 2) Sync the tools that (a) support it and (b) are installed.
+def cmd_shell_init(args):
+    install_aliases()
+
+
+def cmd_audit(args):
+    _resolve_io(args)
+    sys.exit(oc_audit(args))
+
+
+def cmd_verify(args):
+    _resolve_io(args)
+    _resolve_hosts_ports(args)
+    sys.exit(oc_verify(args))
+
+
+def cmd_sync(args):
+    """Full profile sync: roster + providers + plugin + prompts (was --profiles)."""
+    _resolve_io(args)
+    _resolve_hosts_ports(args)
+    if args.team_model is None:
+        args.team_model = _setting(args, "team_model")
+    if args.team_reasoning is None:
+        args.team_reasoning = _setting(args, "team_reasoning")
+    if not args.default_agent:
+        args.default_agent = _setting(args, "default_agent")
+    if not args.web_search:
+        args.web_search = _setting(args, "web_search")
+    args.profiles = True   # the roster is the whole point of `sync`
+
     sampling = build_sampling(args)
+    detected = detect_tools()
+    print_detection(detected)
+    installed = {t["key"] for t in detected if t["installed"]}
     ran_any = False
     for tool in detected:
         if tool["sync"] != "opencode":
             continue
         ran_any = True
         if not tool["installed"]:
-            print(f"OpenCode not found on PATH -- writing config anyway "
-                  f"(remove --config or install opencode to use it).")
+            print("OpenCode not found on PATH -- writing config anyway "
+                  "(install opencode, or point --config, to use it).")
         rc = oc_sync(args, sampling, installed)
         if rc not in (0,):
             sys.exit(rc)
-
     if not ran_any:
         print("No configurable tools matched. (Only OpenCode sync is implemented today.)")
+        return
+    if not args.dry_run:
+        _suggest([
+            ("Review the agent roster", "omw agents"),
+            ("Review per-model sampling", "omw models"),
+            ("Confirm live config matches the known-good configs", "omw audit"),
+        ])
+
+
+def _add_sync_args(p):
+    """All sync-time knobs live under `omw sync` (moved off the top level).
+    Settings-backed flags default to None so cmd_sync can resolve wire.json."""
+    p.add_argument("--hosts", default=None,
+                   help="comma-separated host IPs to probe "
+                        "(default: wire.json hosts / shared ~/.config/otools/hosts / built-in)")
+    p.add_argument("--ports", default=None,
+                   help="comma-separated ports to probe on each host")
+    p.add_argument("--set-default", metavar="REF",
+                   help="set OpenCode top-level default model, e.g. dgx-n1-8000/qwen3-coder")
+    p.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
+
+    # Sampling control
+    p.add_argument("--sampling", choices=["server-default", "fixed", "opencode-default"],
+                   default="server-default",
+                   help="server-default: server decides temp/topP/topK/penalties; "
+                        "fixed: pin values via flags below; opencode-default: OpenCode's own.")
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--top-k", type=int, default=None)
+    p.add_argument("--presence-penalty", type=float, default=None)
+    p.add_argument("--frequency-penalty", type=float, default=None)
+    p.add_argument("--no-sampling-plugin", action="store_true",
+                   help="don't write the chat.params plugin (only set temperature:false)")
+    p.add_argument("--repetition-detection", default=None, metavar="VAL",
+                   help="vLLM repetition_detection to terminate degenerate N-gram loops "
+                        "(default lenient). 'off' to disable, or 'K:V,...' to override knobs.")
+
+    # Tool calling + web search
+    p.add_argument("--no-tool-call", action="store_true",
+                   help="don't declare tool_call (OpenCode then sends NO tools to these models)")
+    p.add_argument("--web-search", choices=["none", "exa", "mcp"], default=None,
+                   help="expose a web-search tool. exa: keyless Exa; mcp: an MCP server "
+                        "(default: wire.json web_search, else none)")
+    p.add_argument("--enable-exa-shell", action="store_true",
+                   help="(--web-search exa) append OPENCODE_ENABLE_EXA=1 to your shell rc")
+    p.add_argument("--write-shell-env", action="store_true",
+                   help="append needed OpenCode env vars (EXA, output-token max) to your shell rc")
+    p.add_argument("--mcp-name", default="websearch")
+    p.add_argument("--mcp-command", help="(--web-search mcp) stdio command")
+    p.add_argument("--mcp-url", help="(--web-search mcp) remote MCP URL")
+    p.add_argument("--mcp-env", action="append", metavar="KEY=VAL")
+    p.add_argument("--mcp-header", action="append", metavar="KEY=VAL")
+
+    # Roster / team
+    p.add_argument("--no-reasoning-probe", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--keep-builtins", action="store_true",
+                   help="keep OpenCode's native build/plan agents (normally disabled)")
+    p.add_argument("--default-agent", default=None,
+                   help="startup agent when build/plan are disabled "
+                        "(default: wire.json default_agent, else code)")
+    p.add_argument("--team-model", "--architect-model", metavar="REF", dest="team_model",
+                   default=None,
+                   help="put the `team` orchestrator on a specific model (e.g. "
+                        "anthropic/claude-opus-4-8). Workers stay local; preserved across syncs.")
+    p.add_argument("--team-task-budget", "--architect-task-budget", type=int, metavar="N",
+                   dest="team_task_budget", default=None,
+                   help="cap how many sub-agents the team may spawn per session")
+    p.add_argument("--team-reasoning", choices=["low", "medium", "high"], dest="team_reasoning",
+                   default=None,
+                   help="(Anthropic team model) extended-thinking budget: low/medium/high")
+    p.add_argument("--no-recipes", action="store_true",
+                   help="ignore the omodel-manager configs; yields generic behavior")
+    p.add_argument("--dry-run", action="store_true", help="print result, do not write")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="write even if NOTHING was discovered (default: refuse)")
+
+
+# ============================================================================
+# Read-only views: agents / subagents / models
+# ============================================================================
+def _table(headers, rows):
+    """Print an aligned table (omm-style column widths). Rows are tuples of cells."""
+    cols = list(zip(headers, *rows)) if rows else [(h,) for h in headers]
+    w = [max(len(str(c)) for c in col) for col in cols]
+    print("  " + "  ".join(str(h).ljust(w[i]) for i, h in enumerate(headers)))
+    print("  " + "  ".join("-" * w[i] for i in range(len(headers))))
+    for r in rows:
+        print("  " + "  ".join(str(r[i]).ljust(w[i]) for i in range(len(headers))))
+
+
+def _perm_label(perm):
+    """Map a permission block back to its tier name (readonly/ask/full)."""
+    if not isinstance(perm, dict):
+        return "?"
+    e, b = perm.get("edit"), perm.get("bash")
+    if e == "deny" and b == "deny":
+        return "readonly"
+    if e == "ask" or b == "ask":
+        return "ask"
+    if e == "allow" and b == "allow":
+        return "full"
+    return "custom"
+
+
+def _short_model(ref):
+    """dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4 -> Qwen3.6-35B-A3B-NVFP4 (keep provider for cloud)."""
+    if not ref:
+        return "-"
+    return ref.split("/", 1)[1] if ref.startswith(PROVIDER_PREFIX) and "/" in ref else ref
+
+
+def _model_id(ref):
+    return ref.split("/", 1)[1] if ref and "/" in ref else (ref or "")
+
+
+def _agent_vec(name, a, plugin):
+    """Effective flattened sampling for one agent (opencode agent block + plugin vector)."""
+    pv = (plugin or {}).get(_model_id(a.get("model", "")), {}).get(name)
+    return _audit_vec(a, pv)
+
+
+def _fmt(v):
+    return "-" if v is None else ("on" if v is True else ("off" if v is False else str(v)))
+
+
+def _load_live(args):
+    """(cfg_path, cfg, agents, plugin) for the resolved opencode.json."""
+    cfg_path = os.path.expanduser(args.config)
+    cfg = oc_load_config(cfg_path) if os.path.exists(cfg_path) else {}
+    return cfg_path, cfg, (cfg.get("agent", {}) or {}), (_plugin_agent_sampling(cfg_path) or {})
+
+
+def _roster_view(args, want_subagent):
+    """Shared implementation for `agents` (primaries) and `subagents` (workers)."""
+    _resolve_io(args)
+    cfg_path, cfg, agents, plugin = _load_live(args)
+    label = "subagent" if want_subagent else "primary"
+    if not agents:
+        print(f"No agents found in {cfg_path}.")
+        _suggest([("Sync the roster first", "omw sync")])
+        return
+
+    def _is(name, a):
+        if not isinstance(a, dict) or a.get("disable"):
+            return False
+        if name not in MANAGED_AGENTS:
+            return False
+        mode = a.get("mode")
+        return (mode == "subagent") if want_subagent else (mode in ("primary", "all"))
+
+    picked = {k: v for k, v in agents.items() if _is(k, v)}
+    if args.name:
+        if args.name not in picked:
+            print(f"{label} '{args.name}' not found. Available: {', '.join(picked) or '(none)'}",
+                  file=sys.stderr)
+            sys.exit(1)
+        _show_agent_detail(args.name, picked[args.name], plugin)
+        return
+
+    rows = []
+    for name, a in picked.items():
+        vec = _agent_vec(name, a, plugin)
+        budget = a.get("task_budget", "-") if name == "team" else "-"
+        rows.append((name, _short_model(a.get("model")), _fmt(vec["temperature"]),
+                     _fmt(vec["enable_thinking"]), _perm_label(a.get("permission")), budget))
+    print(f"{'Sub-agents (delegation workers)' if want_subagent else 'Primary agents (Tab cycle)'} "
+          f"in {cfg_path}:\n")
+    _table(("AGENT", "MODEL", "TEMP", "THINK", "PERM", "BUDGET"), rows)
+    nxt = [("Show one agent's full config", f"omw {'subagents' if want_subagent else 'agents'} <name>"),
+           ("Review per-model sampling", "omw models")]
+    _suggest(nxt)
+
+
+def _show_agent_detail(name, a, plugin):
+    vec = _agent_vec(name, a, plugin)
+    print(f"agent: {name}\n")
+    print(f"  model      : {a.get('model', '-')}")
+    print(f"  mode       : {a.get('mode', '-')}")
+    print(f"  permission : {_perm_label(a.get('permission'))}  ({a.get('permission')})")
+    if name == "team":
+        print(f"  work-budget: {a.get('task_budget', '(unset)')}")
+    print("  effective sampling (opencode.json + plugin):")
+    for k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty",
+              "max_output", "enable_thinking", "preserve_thinking"):
+        print(f"    {k:18} {_fmt(vec.get(k))}")
+
+
+def cmd_agents(args):
+    _roster_view(args, want_subagent=False)
+
+
+def cmd_subagents(args):
+    _roster_view(args, want_subagent=True)
+
+
+def _find_model_config(name, configs):
+    """Lenient match of a user-typed model name to a declared config (either direction)."""
+    n = (name or "").lower()
+    for r in configs.get("recipes", []):
+        pats = r.get("match") or []
+        pats = [pats] if isinstance(pats, str) else pats
+        if any(n in str(p).lower() or str(p).lower() in n for p in pats):
+            return r
+        if r.get("_file", "").lower().rsplit(".", 1)[0] == n:
+            return r
+    return None
+
+
+ROLE_ORDER = ["reason", "code", "agent", "instruct"]
+
+
+def cmd_models(args):
+    _resolve_io(args)
+    cfg_path, cfg, agents, plugin = _load_live(args)
+    configs = load_configs(args.configs)
+    live_ids = {mid for pv in (cfg.get("provider") or {}).values()
+                for mid in (pv.get("models") or {})}
+
+    if args.name:
+        r = _find_model_config(args.name, configs)
+        if not r:
+            avail = ", ".join((rr.get("match") or ["?"])[0] for rr in configs.get("recipes", []))
+            print(f"no model config matches '{args.name}'. Known: {avail}", file=sys.stderr)
+            sys.exit(1)
+        title = (r.get("match") or [args.name])[0]
+        cap = r.get("capabilities", {}) or {}
+        print(f"model: {title}   (config: {r.get('_file', '?')})")
+        print(f"  capabilities: reasoning={_fmt(bool(cap.get('reasoning')))}, "
+              f"vision={_fmt(bool(cap.get('vision')))}, tool_call={_fmt(bool(cap.get('tool_call')))}, "
+              f"thinking_control={cap.get('thinking_control', r.get('thinking_control', '-'))}\n")
+        rows = []
+        for role in ROLE_ORDER:
+            ps = (r.get("presets") or {}).get(role)
+            if not ps:
+                continue
+            s = ps.get("sampling", {}) or {}
+            rows.append((role, _fmt(s.get("temperature")), _fmt(s.get("top_p")), _fmt(s.get("top_k")),
+                         "on" if ps.get("thinking") else "off", _fmt(ps.get("max_output"))))
+        print("  Per-role presets (the known-good sampling, from the config):\n")
+        _table(("ROLE", "TEMP", "TOP_P", "TOP_K", "THINK", "MAX_OUT"), rows)
+        # which live agents currently run on this model + their effective temp
+        on_model = []
+        for aname, a in agents.items():
+            if not isinstance(a, dict) or a.get("disable"):
+                continue
+            if _find_model_config(_model_id(a.get("model", "")), {"recipes": [r]}) is r:
+                on_model.append(f"{aname}({_fmt(_agent_vec(aname, a, plugin)['temperature'])})")
+        if on_model:
+            print(f"\n  live agents on this model: {', '.join(on_model)}")
+        _suggest([("Tweak a role for testing (live-only; omw sync resets)",
+                   f"omw models {title} --role code --set-temperature 0.5")])
+        return
+
+    # list
+    rows = []
+    for r in configs.get("recipes", []):
+        title = (r.get("match") or ["?"])[0]
+        cap = r.get("capabilities", {}) or {}
+        live = "yes" if _find_model_config_live(r, live_ids) else "-"
+        rows.append((title, _fmt(bool(cap.get("reasoning"))), _fmt(bool(cap.get("vision"))),
+                     live, r.get("_file", "")))
+    if not rows:
+        print("No model configs found.")
+        _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
+        return
+    print("Models declared in the omodel-manager configs:\n")
+    _table(("MODEL", "REASON", "VISION", "LIVE", "CONFIG"), rows)
+    _suggest([("Show a model's per-role sampling", "omw models <name>")])
+
+
+def _find_model_config_live(recipe, live_ids):
+    pats = recipe.get("match") or []
+    pats = [pats] if isinstance(pats, str) else pats
+    return any(any(str(p).lower() in mid.lower() for p in pats) for mid in live_ids)
+
+
+def _build_parser():
+    ap = argparse.ArgumentParser(
+        prog="omodel-wire",
+        description="Wire local/OpenAI-compatible model endpoints into OpenCode (omw).")
+    ap.add_argument("--version", action="version", version=f"omodel-wire {__version__}")
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+
+    io_parent = argparse.ArgumentParser(add_help=False)
+    io_parent.add_argument("--config", default=None,
+                           help="path to opencode.json (default: wire.json / ~/.config/opencode/opencode.json)")
+    io_parent.add_argument("--configs", metavar="PATH", default=None,
+                           help="omodel-manager configs dir (default: wire.json / $OMODEL_CONFIGS / sibling)")
+
+    ps = sub.add_parser("sync", parents=[io_parent],
+                        help="sync the OpenCode agent roster from the model configs")
+    _add_sync_args(ps)
+    ps.set_defaults(func=cmd_sync)
+
+    pa = sub.add_parser("audit", parents=[io_parent],
+                        help="compare live OpenCode sampling vs declared configs (offline drift check)")
+    pa.set_defaults(func=cmd_audit)
+
+    pv = sub.add_parser("verify", parents=[io_parent],
+                        help="probe live endpoints vs declared capabilities (slow, opt-in)")
+    pv.add_argument("--hosts", default=None)
+    pv.add_argument("--ports", default=None)
+    pv.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
+    pv.add_argument("--no-vision-probe", action="store_true")
+    pv.add_argument("--vision-probe-all", action="store_true")
+    pv.set_defaults(func=cmd_verify)
+
+    pc = sub.add_parser("config", help="show or persist wire settings (wire.json)")
+    pc.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"), help="persist one setting")
+    pc.add_argument("--edit", action="store_true", help="open wire.json in $EDITOR")
+    pc.add_argument("--path", action="store_true", help="print the settings file path")
+    pc.set_defaults(func=cmd_config)
+
+    pag = sub.add_parser("agents", parents=[io_parent],
+                         help="list primary agents (or show one: `omw agents team`)")
+    pag.add_argument("name", nargs="?", help="agent name to show in detail")
+    pag.set_defaults(func=cmd_agents)
+
+    psa = sub.add_parser("subagents", parents=[io_parent],
+                         help="list hidden delegation workers (or show one)")
+    psa.add_argument("name", nargs="?", help="worker name to show in detail")
+    psa.set_defaults(func=cmd_subagents)
+
+    pm = sub.add_parser("models", parents=[io_parent],
+                        help="list models (or show one's per-role sampling: `omw models qwen`)")
+    pm.add_argument("name", nargs="?", help="model name to show in detail")
+    pm.set_defaults(func=cmd_models)
+
+    pd = sub.add_parser("detect", aliases=["doctor"],
+                        help="report which agentic-dev tools are installed")
+    pd.set_defaults(func=cmd_detect)
+
+    psi = sub.add_parser("shell-init", aliases=["install-aliases"],
+                         help="install the `omw` shell alias")
+    psi.set_defaults(func=cmd_shell_init)
+    return ap
+
+
+def main(argv=None):
+    ap = _build_parser()
+    args = ap.parse_args(argv)
+    args._settings = load_settings()
+    if not args.cmd:
+        cmd_home(args)
+        return
+    args.func(args)
 
 
 if __name__ == "__main__":

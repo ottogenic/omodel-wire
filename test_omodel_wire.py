@@ -695,5 +695,105 @@ class TestSharedHosts(unittest.TestCase):
         self.assertEqual(m.load_shared_hosts(), [])
 
 
+def _cli_args(config, **over):
+    a = types.SimpleNamespace(config=config, configs=FIXTURE_DIR, name=None, _settings={})
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
+def _capture(fn, *a, **k):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*a, **k)
+    return buf.getvalue()
+
+
+class TestCliViews(unittest.TestCase):
+    """Stage 1-2: subcommand skeleton, home, config, read-only views."""
+
+    def _synced(self, tmp, **over):
+        args = make_args(tmp, **over)
+        sampling = m.build_sampling(args)
+        with FakeProbes(), quiet():
+            m.oc_sync(args, sampling, {"opencode"})
+        return args.config
+
+    def test_suggest_formats_block(self):
+        out = _capture(m._suggest, [("do a thing", "omw thing")], header="Next")
+        self.assertIn("Next:", out)
+        self.assertIn("- do a thing", out)
+        self.assertIn("omw thing", out)
+
+    def test_suggest_skips_empty(self):
+        self.assertEqual(_capture(m._suggest, []), "")
+
+    def test_settings_roundtrip_and_precedence(self):
+        old = m.WIRE_SETTINGS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            m.WIRE_SETTINGS_FILE = os.path.join(tmp, "wire.json")
+            try:
+                self.assertEqual(m.load_settings(), {})
+                m.save_settings({"team_model": "anthropic/claude-opus-4-8"})
+                self.assertEqual(m.load_settings()["team_model"], "anthropic/claude-opus-4-8")
+                a = types.SimpleNamespace(_settings=m.load_settings())
+                self.assertEqual(m._setting(a, "team_model"), "anthropic/claude-opus-4-8")
+                self.assertEqual(m._setting(a, "default_agent"), "code")  # built-in fallback
+                self.assertIsNone(m._setting(a, "configs_dir"))
+            finally:
+                m.WIRE_SETTINGS_FILE = old
+
+    def test_agents_list_and_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp, team_task_budget=4)
+            out = _capture(m.cmd_agents, _cli_args(cfg))
+            for name in ("research", "code", "agent", "team"):
+                self.assertIn(name, out)
+            self.assertNotIn("agent-plan", out)  # workers are not primaries
+            detail = _capture(m.cmd_agents, _cli_args(cfg, name="team"))
+            self.assertIn("agent: team", detail)
+            self.assertIn("work-budget", detail)
+            self.assertIn("4", detail)
+
+    def test_subagents_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            out = _capture(m.cmd_subagents, _cli_args(cfg))
+            for w in ("agent-plan", "agent-code", "agent-instruct"):
+                self.assertIn(w, out)
+            self.assertNotIn("research", out)  # primaries excluded
+
+    def test_models_list_and_role_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            lst = _capture(m.cmd_models, _cli_args(cfg))
+            self.assertIn("MODEL", lst)
+            self.assertIn("Qwen3.6-27B-NVFP4", lst)
+            det = _capture(m.cmd_models, _cli_args(cfg, name="Qwen3.6-27B"))
+            self.assertIn("ROLE", det)
+            for role in ("reason", "code", "agent", "instruct"):
+                self.assertIn(role, det)
+
+    def test_home_suggests_sync_when_empty_and_review_when_synced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = types.SimpleNamespace(_settings={"configs_dir": FIXTURE_DIR,
+                                                     "opencode_config": os.path.join(tmp, "none.json")})
+            self.assertIn("omw sync", _capture(m.cmd_home, empty))
+            cfg = self._synced(tmp)
+            synced = types.SimpleNamespace(_settings={"configs_dir": FIXTURE_DIR,
+                                                      "opencode_config": cfg})
+            out = _capture(m.cmd_home, synced)
+            self.assertIn("managed agent", out)
+            self.assertIn("omw agents", out)
+
+    def test_main_dispatch_config_path(self):
+        out = _capture(m.main, ["config", "--path"])
+        self.assertIn(os.path.basename(m.WIRE_SETTINGS_FILE), out)
+
+    def test_main_dispatch_models_list(self):
+        out = _capture(m.main, ["models", "--configs", FIXTURE_DIR])
+        self.assertIn("MODEL", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
