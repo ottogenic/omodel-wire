@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`omw proxy` — a debug proxy that logs OpenCode ↔ model traffic** (stdlib only):
+  - `omw proxy on [<model>]` — route live models through the proxy with **no `--upstream`
+    needed**: rewrites the `dgx-` provider baseURLs to `127.0.0.1:<port>/<route>` and maps
+    each route → the real endpoint in `proxy_routes.json`. No arg = all live models; a model
+    name = just that one. Per-model toggles compose. Launches the daemon in the background.
+  - `omw proxy off [<model>]` — restore the selected (or all) providers; stops the daemon
+    when nothing is left proxied.
+  - `omw proxy replay <id> [--output-curl]` — re-issue a logged request **directly** to the
+    real API (the logged URL is the upstream, not the proxy), or print a copy-paste curl.
+  - `omw proxy read <id>` — **NEW**: colored, section-headed view of a logged exchange
+    (model & params, tools, system prompt, messages with real newlines, assembled response).
+  - `omw proxy status` — daemon + which providers are proxied.
+  - **Robust core:** threaded server with true **SSE/streaming passthrough** (tees the
+    stream to the log instead of buffering — fixes the stalls/crashes), **path-prefix
+    routing** to the correct model, short 7-char ids, and **flat `proxy_logs/`** (no date
+    subfolder) with an `index.jsonl`.
+- **`omw models` gains `LIVE` / `PROXY` / `SERVED` columns** — the list now shows, per model,
+  whether it's live, whether the proxy is on for it, and the real served id from the live
+  endpoint (e.g. `qwen/qwen3.6-35b`), so you can see what's actually running vs which config
+  it matched. Columns: `MODEL · REASON · VISION · LIVE · PROXY · SERVED · CONFIG`.
+
 ### Changed
 - **CLI redesigned into `omm`-style subcommands.** The ~40 flat top-level flags are
   replaced by verbs: `omw` (guided home screen), `omw sync` (the roster sync — all former

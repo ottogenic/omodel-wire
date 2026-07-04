@@ -130,6 +130,8 @@ model against its config.
 | `omw audit` | Offline side-by-side of the live config vs the known-good configs; flags drift. |
 | `omw verify` | Probe live endpoints and compare to the declared capabilities (slow, opt-in). |
 | `omw config [--set KEY VAL] [--edit] [--path]` | Show or persist settings in `~/.config/otools/wire.json`. |
+| `omw proxy on [<model>]` / `off [<model>]` | Route live models through a local debug proxy that logs every request/response (no name = all; a name = one). |
+| `omw proxy read <id>` / `replay <id> [--output-curl]` / `status` | Read a logged exchange (colored, sectioned); re-issue it directly to the API (or emit curl); show proxy state. |
 | `omw detect` | Report which agentic-dev tools are installed. |
 | `omw shell-init` | Install the `omw` shell alias. |
 
@@ -137,6 +139,24 @@ Every `--set-*` edit touches **only** `~/.config/opencode/` (opencode.json + the
 plugin) — the declared configs stay pristine, so `omw sync` always restores a known-good
 state and `omw audit` shows exactly what you've changed. Run `omw <command> --help` for
 the full flag list of any command.
+
+### Debugging with the proxy
+
+`omw proxy on` transparently inserts a local proxy between OpenCode and your model
+endpoints — no config guesswork, it reads the live provider list and rewrites those
+baseURLs, mapping each back to the real upstream. It **streams SSE through untouched**
+(so the TUI keeps working) while teeing the full request/response into `proxy_logs/`
+(short 7-char ids, one `<id>_req.json`/`<id>_res.json` pair each, plus `index.jsonl`).
+Then reload OpenCode, reproduce the issue, and inspect:
+
+```bash
+omw proxy on                       # or: omw proxy on qwen3.6-35b   (one model)
+# ... reproduce in OpenCode ...
+omw proxy read <id>                # human-readable, colored view of one exchange
+omw proxy replay <id>              # re-run that exact request straight at the API
+omw proxy replay <id> --output-curl   # ... or copy-paste it as curl
+omw proxy off                      # restore config, stop the proxy
+```
 
 ---
 
