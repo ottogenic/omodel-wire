@@ -84,3 +84,20 @@ Rule of thumb: **type it at a shell → kebab; Python imports it → snake.** `o
 is a hyphenated file only because it's run by path or loaded via
 `spec_from_file_location(<logical name>, path)` in the tests — never imported by its
 filename, so it never has to be a valid module name.
+
+## Code review (AI reviewer)
+
+Pull requests are reviewed and merged by an AI reviewer (Claude) following **`REVIEW.md`**.
+Open a Claude Code chat in this repo and say **"review open PRs"** (or run `/review-prs`): it
+lists the open PRs, runs the checks, makes critical fixes, and squash-merges the ones that pass
+the bar — leaving anything risky open with a change-request review. Authors follow the rules in
+`AGENTS.md` → *Contributing changes*. Requires the GitHub CLI (`gh auth status` clean).
+
+## Add PR review to a new otools repo
+
+1. Copy `REVIEW.md`; edit §1 (checks) and §2 (invariants) for that repo.
+2. Add the *Contributing changes (for AI agents)* section + the reviewer trigger line to its
+   `AGENTS.md`.
+3. Add `.github/pull_request_template.md` and a `.github/workflows/ci.yml` that runs the
+   offline suite.
+4. The `/review-prs` command is global (`~/.claude/commands/review-prs.md`) — nothing to copy.
