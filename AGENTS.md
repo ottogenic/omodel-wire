@@ -205,3 +205,31 @@ build/plan disabled, `default_agent` set, frontier team model preserved across r
 Prefer `--dry-run` over touching a real `opencode.json` while iterating. Do not write to
 `$HOME` dotfiles from tests — `install_aliases()` / shell-env writers append to the real
 rc file (the suite always passes `write_shell_env=False`, which never writes).
+
+## Contributing changes (for AI agents / local models)
+
+If you are an AI agent (e.g. a local model via OpenCode) opening a pull request against this
+repo, follow these rules. PRs that ignore them get sent back.
+
+**Scope & hygiene**
+- One concern per PR. Small, focused diffs — no unrelated reformatting or churn.
+- Branch `feat/<slug>` | `fix/<slug>` | `chore/<slug>`; Conventional-Commit messages.
+- Never touch `LICENSE`, `__version__` / release tags, or `.github/` CI unless explicitly asked.
+
+**Before you push (required)**
+- `python -m py_compile omodel-wire.py` — must pass.
+- `python -m unittest` — the full offline suite must pass. Add or adjust tests for your change.
+- Update `CHANGELOG.md` under `[Unreleased]` for anything user-facing.
+- Paste the py_compile + unittest output into the PR body (the template asks for it).
+
+**Respect the invariants above:** stdlib-only, single-script, LF endings, kebab/snake naming,
+`plugins/` (plural), and model configs owned by omodel-manager (never reintroduce
+`model_recipes.json`).
+
+**Open the PR** with `gh pr create` and fill in the template.
+
+### For the reviewer (Claude)
+
+If the user asks to **review / approve / merge open PRs**, read **`REVIEW.md`** and execute it
+against every open PR: run the checks, make critical fixes, squash-merge the ones that pass the
+bar, and leave anything risky open with a change-request review.
