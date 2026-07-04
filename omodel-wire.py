@@ -295,17 +295,19 @@ def team_prompt_text(task_budget=None):
 # OpenCode local-subagent bug (#18423 / PR #18429) where the orchestrator gets the
 # subagent's LAST text part even when it's empty -- by forcing a non-empty,
 # results-bearing final message. Written next to opencode.json; edit there to tune.
-WORKER_PROMPT = """When you finish, your FINAL message MUST be a concise plain-text summary of the
-result -- what you did or found, AND the concrete output that matters: command
-output, files changed, key findings, or the exact error if something failed.
+#
+# ORDERING IS LOAD-BEARING -- do not front-load the "final message must be plain text"
+# instruction. Leading with output/summary framing makes Qwen3-family models (served via
+# vLLM --tool-call-parser qwen3_coder) NARRATE tool calls as text (<invoke .../>, bash(...),
+# etc.) instead of emitting native tool calls -> the parser drops them, the loop exits, and
+# the worker fabricates/leaks (verified on n1: 1/8 vs 15/15 with action-first wording).
+# Lead with "call the tools", THEN state the summary rule.
+WORKER_PROMPT = """Complete the task by calling the provided tools. Act, inspect each tool result, then continue until the task is done.
 
-This final message is the ONLY thing your caller (the orchestrator) receives back.
-So:
-- Never end on a bare tool call or an empty message -- always finish with text.
+When the work is finished, send a final plain-text message that summarizes what you did and includes the concrete results that matter: command output, files changed, key findings, or the exact error if something failed. That final message is the only thing your caller (the orchestrator) receives back, so:
+- Never stop on a bare tool call or an empty message -- always finish with a text summary.
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
-
-Keep it short, but make sure the actual results are in your last message.
 """
 
 # The blue test image + the word we expect a real vision model to say back.
