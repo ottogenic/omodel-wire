@@ -226,6 +226,14 @@ rc file (the suite always passes `write_shell_env=False`, which never writes).
 If you are an AI agent (e.g. a local model via OpenCode) opening a pull request against this
 repo, follow these rules. PRs that ignore them get sent back.
 
+**You open PRs — you do NOT merge.** Never push to `main`, never merge a PR (not even your
+own, not even when it's green), and never approve. Your job ends at `gh pr create`; a separate
+reviewer runs the checks and merges. A direct push to `main` is a hard-rule violation.
+
+**Only claim what's actually in your diff.** Don't write "added tests" (or describe any change)
+in the commit/PR unless it's really in the diff — the reviewer verifies, and false claims get
+the PR bounced.
+
 **Scope & hygiene**
 - One concern per PR. Small, focused diffs — no unrelated reformatting or churn.
 - Branch `feat/<slug>` | `fix/<slug>` | `chore/<slug>`; Conventional-Commit messages.
@@ -241,7 +249,7 @@ repo, follow these rules. PRs that ignore them get sent back.
 `plugins/` (plural), and model configs owned by omodel-manager (never reintroduce
 `model_recipes.json`).
 
-**Open the PR** with `gh pr create` and fill in the template.
+**Open the PR** with `gh pr create`, fill in the template, then **stop** — do not merge; wait for review.
 
 ### For the reviewer (Claude)
 
