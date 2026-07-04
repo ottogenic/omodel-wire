@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-03
+
 ### Added
 - **Shared host discovery.** `omw` now defaults its probe host list from the same
   `~/.config/otools/hosts` store that omodel-manager's `install`/`ps` manage, so adding a
@@ -63,6 +65,12 @@ All notable changes to this project are documented here. The format follows
   omodel-manager (this tool is a consuming adapter).
 
 ### Fixed
+- **Worker prompt ordering (load-bearing).** The hidden workers' prompt now leads with the
+  tool-calling instruction, then the plain-text-summary rule. Front-loading the summary rule
+  made Qwen3-family workers (served via vLLM `--tool-call-parser qwen3_coder`) narrate tool
+  calls as text (`<invoke .../>`, `bash(...)`) instead of emitting native tool calls — the
+  parser dropped them, the loop exited early, and workers fabricated/leaked results. Verified
+  on n1: 1/8 → 15/15 successful worker runs.
 - Reasoning probe no longer misdetects reasoning models (e.g. Qwen3.6-35B-A3B) as
   non-reasoning. When a qwen3-style `--reasoning-parser` is configured and the model is
   cut off before closing `</think>`, vLLM returns the partial thinking in `content` with
@@ -111,5 +119,6 @@ Initial packaged release. Extracted from the `otools` suite and renamed to
   pointer lines, and a list of source-derived/undocumented mechanisms to verify against
   the installed OpenCode (the `chat.params` hook; the `task_budget` field).
 
-[Unreleased]: https://example.invalid/omodel-wire/compare/v0.1.0...HEAD
-[0.1.0]: https://example.invalid/omodel-wire/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ottogenic/omodel-wire/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ottogenic/omodel-wire/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/ottogenic/omodel-wire/releases/tag/v0.1.0
