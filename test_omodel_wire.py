@@ -866,5 +866,43 @@ class TestCliMutations(unittest.TestCase):
             self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 5)
 
 
+class TestWorkBudget(unittest.TestCase):
+    """Stage 4: team work-budget defaults from a config's [capabilities] concurrency."""
+
+    def _configs_with_concurrency(self, root, n):
+        cdir = os.path.join(root, "cfgs")
+        os.makedirs(cdir)
+        with open(os.path.join(cdir, "q.toml"), "w", encoding="utf-8") as f:
+            f.write('match = ["Qwen3.6-27B-NVFP4"]\n'
+                    '[capabilities]\nreasoning = true\ntool_call = true\n'
+                    f'concurrency = {n}\nthinking_control = "enable_thinking"\n'
+                    '[presets.reason]\nthinking = true\n[presets.reason.sampling]\ntemperature = 1.0\n'
+                    '[presets.code]\nthinking = true\n[presets.code.sampling]\ntemperature = 0.6\n'
+                    '[presets.agent]\nthinking = true\n[presets.agent.sampling]\ntemperature = 0.6\n'
+                    '[presets.instruct]\nthinking = false\n[presets.instruct.sampling]\ntemperature = 0.7\n')
+        return cdir
+
+    def _budget(self, cfg):
+        with open(cfg, encoding="utf-8") as f:
+            return json.load(f)["agent"]["team"].get("task_budget")
+
+    def test_defaults_from_concurrency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cdir = self._configs_with_concurrency(tmp, 3)
+            cfg = _sync_fixture(tmp, configs=cdir)
+            self.assertEqual(self._budget(cfg), 3)
+
+    def test_flag_overrides_concurrency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cdir = self._configs_with_concurrency(tmp, 3)
+            cfg = _sync_fixture(tmp, configs=cdir, team_task_budget=9)
+            self.assertEqual(self._budget(cfg), 9)
+
+    def test_no_concurrency_leaves_budget_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)  # FIXTURE_DIR configs have no concurrency
+            self.assertIsNone(self._budget(cfg))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **CLI redesigned into `omm`-style subcommands.** The ~40 flat top-level flags are
+  replaced by verbs: `omw` (guided home screen), `omw sync` (the roster sync — all former
+  sync flags live here), `omw agents` / `omw subagents` / `omw models` (list/inspect + live
+  tweaks), plus `omw audit` / `omw verify` / `omw config` / `omw detect` / `omw shell-init`.
+  Bare `omw` prints status + suggested next steps, and every command suggests the next
+  step (ported omm's `_suggest` breadcrumb helper). `sync` always builds the roster (was
+  `--profiles`). Old top-level flags (`--profiles`, `--audit`, `--install-aliases`, …) are
+  gone — use the subcommands.
+
+### Added
+- **`omw config` + `~/.config/otools/wire.json`** — persist the settings you keep
+  retyping (opencode path, configs dir, hosts, `team_model`, `team_reasoning`,
+  `default_agent`, `web_search`). Precedence everywhere: **flag > wire.json > built-in**.
+- **Live tweak commands** — `omw agents <name> --set-model`, `omw subagents [--set-model]`,
+  `omw agents team --set-work-budget N`, and `omw models <name> --role R --set-temperature
+  T` / `--set-thinking B`. Every edit touches ONLY `~/.config/opencode/` (opencode.json +
+  a re-emitted `plugins/dgx-sampling.js`); the declared configs stay pristine, so
+  `omw sync` restores known-good and `omw audit` shows exactly what drifted.
+- **Per-model work-budget default.** An optional `[capabilities] concurrency` in a model
+  config (mirrors the launch profile's `max-num-seqs`) becomes the default team
+  `task_budget` when none is set — the team won't spawn more parallel workers than the
+  server has sequence slots. Surfaced in `omw models <name>`.
+
 ## [0.2.0] - 2026-07-03
 
 ### Added

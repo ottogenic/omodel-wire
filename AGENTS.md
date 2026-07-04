@@ -75,8 +75,23 @@ Top-to-bottom, the meaningful sections:
   across runs, sets `default_agent`, and writes (unless `--dry-run`).
 - **Shell integration** — `_shell_rc()`, `_ensure_shell_env()`, `install_aliases()`
   (installs the `omw` alias only).
-- **CLI** — `build_sampling()`, `main()` (argparse). `__version__` is defined near the
-  top of the file.
+- **CLI (subcommands, omm-style)** — `_build_parser()` wires argparse subparsers with
+  `.set_defaults(func=cmd_x)`; `main(argv=None)` dispatches `args.func(args)` (bare `omw`
+  → `cmd_home`). Commands: `cmd_sync` (was the `--profiles` path; sets `args.profiles`),
+  `cmd_agents`/`cmd_subagents` (`_roster_view` + `_mutate_roster`), `cmd_models`
+  (`_mutate_model`), `cmd_audit`/`cmd_verify`/`cmd_detect`/`cmd_shell_init`, `cmd_config`.
+  `build_sampling()` still builds the sampling dict from the `sync` flags.
+- **Settings + UX helpers** — `~/.config/otools/wire.json` via `load_settings`/
+  `save_settings`/`_setting` (precedence flag > wire.json > `SETTINGS_KEYS` default;
+  resolved by `_resolve_io`/`_resolve_hosts_ports`). `_suggest()` (ported from omm) prints
+  the "Next steps" breadcrumbs; `_table()` renders aligned tables.
+- **Live tweaks** — `--set-*` handlers edit ONLY `~/.config/opencode/` (opencode.json +
+  re-emitted `plugins/dgx-sampling.js` via `_write_cfg`/`_write_plugin`); declared configs
+  are never touched. `AGENT_ROLE` maps an agent name → its preset role for `omw models
+  --role`. `[capabilities] concurrency` in a config seeds the team `task_budget` default.
+- **Invariant:** tests build their own args namespace and call `oc_sync`/`cmd_*` directly
+  (not through `main()`), so keep arg **dest-names** and function signatures stable.
+  `__version__` is near the top of the file.
 
 ## OpenCode reference (how to modify agents / settings)
 

@@ -1566,14 +1566,24 @@ def oc_sync(args, sampling, detected_installed):
             if args.team_model:
                 print(f"  team model -> {team_model} (workers stay local)")
 
-        # Cap how many sub-agents the team spawns (task_budget). Flag wins; else
-        # PRESERVE a previously-set budget so re-syncs don't drop it. The effective
-        # value is injected into the team prompt so the model can self-limit.
+        # Cap how many sub-agents the team spawns (task_budget). Precedence:
+        # flag > previously-set budget > the worker model's declared `concurrency`
+        # (its max-num-seqs -- you can't usefully run more parallel workers than the
+        # server has sequence slots). The effective value is injected into the team
+        # prompt so the model can self-limit.
         team_budget = args.team_task_budget if args.team_task_budget is not None else prev_team_budget
+        budget_src = "flag" if args.team_task_budget is not None else ("preserved" if prev_team_budget is not None else None)
+        if team_budget is None and matched_recipe:
+            conc = (matched_recipe.get("capabilities") or {}).get("concurrency")
+            if isinstance(conc, int) and conc > 0:
+                team_budget, budget_src = conc, "concurrency"
         if team_budget is not None and "team" in agents:
             cfg["agent"]["team"]["task_budget"] = team_budget
-            if args.team_task_budget is not None:
+            if budget_src == "flag":
                 print(f"  team task_budget -> {team_budget} delegations/session")
+            elif budget_src == "concurrency":
+                print(f"  team task_budget defaulted from model concurrency "
+                      f"(max-num-seqs): {team_budget}")
             else:
                 print(f"  team task_budget preserved: {team_budget}")
 
@@ -2197,9 +2207,11 @@ def cmd_models(args):
         title = (r.get("match") or [args.name])[0]
         cap = r.get("capabilities", {}) or {}
         print(f"model: {title}   (config: {r.get('_file', '?')})")
+        conc = cap.get("concurrency")
+        conc_s = f", concurrency={conc} (team work-budget default)" if conc else ""
         print(f"  capabilities: reasoning={_fmt(bool(cap.get('reasoning')))}, "
               f"vision={_fmt(bool(cap.get('vision')))}, tool_call={_fmt(bool(cap.get('tool_call')))}, "
-              f"thinking_control={cap.get('thinking_control', r.get('thinking_control', '-'))}\n")
+              f"thinking_control={cap.get('thinking_control', r.get('thinking_control', '-'))}{conc_s}\n")
         rows = []
         for role in ROLE_ORDER:
             ps = (r.get("presets") or {}).get(role)
