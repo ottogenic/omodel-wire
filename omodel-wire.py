@@ -2308,10 +2308,35 @@ def _write_plugin(cfg_path, plugin, cfg):
         f.write(oc_agent_sampling_plugin_js(plugin, _default_model_id(cfg)))
 
 
+def _resolve_model_ref(ref, cfg):
+    """Convert a bare model name to full provider/model-id reference if needed.
+    Returns (resolved_ref, provider) or (None, None) if model not found."""
+    if "/" in ref:
+        prov, mid = ref.split("/", 1)
+        if prov.startswith(PROVIDER_PREFIX):
+            models = ((cfg.get("provider") or {}).get(prov) or {}).get("models") or {}
+            if mid in models:
+                return ref, prov
+        return None, None
+    
+    n = ref.lower()
+    for prov_key, prov_entry in (cfg.get("provider") or {}).items():
+        if not prov_key.startswith(PROVIDER_PREFIX):
+            continue
+        models = (prov_entry.get("models") or {})
+        for mid in models:
+            if mid.lower() == n:
+                return f"{prov_key}/{mid}", prov_key
+    return None, None
+
+
 def _validate_ref(ref, cfg):
     """Return a warning string if REF isn't a live managed provider/model (None if ok
     or a cloud ref like anthropic/...)."""
     if "/" not in ref:
+        resolved, _ = _resolve_model_ref(ref, cfg)
+        if resolved:
+            return None
         return f"'{ref}' should look like provider/model-id"
     prov, mid = ref.split("/", 1)
     if prov.startswith(PROVIDER_PREFIX):
@@ -2357,9 +2382,13 @@ def _mutate_roster(args, want_subagent):
     else:
         print("name an agent: omw agents <name> --set-model REF", file=sys.stderr)
         sys.exit(1)
-    warn = _validate_ref(ref, cfg)
-    if warn:
-        print(f"  note: {warn}")
+    resolved_ref, _ = _resolve_model_ref(ref, cfg)
+    if resolved_ref:
+        ref = resolved_ref
+    else:
+        warn = _validate_ref(ref, cfg)
+        if warn:
+            print(f"  note: {warn}")
     for nm in targets:
         agents[nm]["model"] = ref
     _write_cfg(cfg_path, cfg)
@@ -2401,6 +2430,10 @@ def _mutate_model(args, cfg_path, cfg, agents, plugin):
     if not targets:
         print(f"no live agent runs {mid} with role '{args.role}'.", file=sys.stderr)
         sys.exit(1)
+    
+    resolved_model_ref, _ = _resolve_model_ref(mid, cfg)
+    if not resolved_model_ref:
+        resolved_model_ref = mid
     plugin_exists = os.path.exists(_plugin_js_path(cfg_path))
     for nm in targets:
         a = agents[nm]
