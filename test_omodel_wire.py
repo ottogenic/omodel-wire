@@ -904,5 +904,102 @@ class TestWorkBudget(unittest.TestCase):
             self.assertIsNone(self._budget(cfg))
 
 
+class TestBareModelNameResolution(unittest.TestCase):
+    """Test that bare model names (without provider prefix) are correctly resolved."""
+
+    def _make_cfg_with_providers(self):
+        return {
+            "provider": {
+                "dgx-n1-8000": {
+                    "models": {
+                        "Qwen3.6-35B-A3B-NVFP4": {"reasoning": True, "tool_call": True},
+                        "Qwen3.6-27B-NVFP4": {"reasoning": True, "tool_call": True},
+                    }
+                },
+                "nvidia": {
+                    "models": {
+                        "Qwen3.6-35B-NVFP4": {"reasoning": True, "tool_call": True},
+                    }
+                },
+            }
+        }
+
+    def test_resolve_model_ref_finds_provider_for_bare_name(self):
+        cfg = self._make_cfg_with_providers()
+        ref, prov = m._resolve_model_ref("Qwen3.6-35B-A3B-NVFP4", cfg)
+        self.assertEqual(ref, "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4")
+        self.assertEqual(prov, "dgx-n1-8000")
+
+    def test_resolve_model_ref_finds_exact_match(self):
+        cfg = self._make_cfg_with_providers()
+        ref, prov = m._resolve_model_ref("qwen3.6-35b-a3b-nvfp4", cfg)
+        self.assertEqual(ref, "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4")
+
+    def test_resolve_model_ref_prefers_exact_over_substring(self):
+        cfg = self._make_cfg_with_providers()
+        ref, prov = m._resolve_model_ref("Qwen3.6-35B", cfg)
+        self.assertIsNone(ref)
+
+    def test_resolve_model_ref_returns_none_for_unknown_model(self):
+        cfg = self._make_cfg_with_providers()
+        ref, prov = m._resolve_model_ref("unknown-model", cfg)
+        self.assertIsNone(ref)
+        self.assertIsNone(prov)
+
+    def test_resolve_model_ref_handles_fully_qualified_ref(self):
+        cfg = self._make_cfg_with_providers()
+        ref, prov = m._resolve_model_ref("dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4", cfg)
+        self.assertEqual(ref, "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4")
+        self.assertEqual(prov, "dgx-n1-8000")
+
+    def test_validate_ref_accepts_bare_name_if_model_exists(self):
+        cfg = self._make_cfg_with_providers()
+        warn = m._validate_ref("Qwen3.6-35B-A3B-NVFP4", cfg)
+        self.assertIsNone(warn)
+
+    def test_validate_ref_warns_for_unknown_bare_name(self):
+        cfg = self._make_cfg_with_providers()
+        warn = m._validate_ref("unknown-model", cfg)
+        self.assertIsNotNone(warn)
+        self.assertIn("should look like", warn)
+
+    def test_mutate_roster_resolves_bare_model_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "opencode.json")
+            cfg = {
+                "provider": {
+                    "dgx-n1-8000": {
+                        "models": {
+                            "Qwen3.6-35B-A3B-NVFP4": {"reasoning": True, "tool_call": True},
+                        }
+                    }
+                },
+                "agent": {
+                    "team": {"mode": "primary", "model": "dgx-n1-8000/Qwen3.6-27B-NVFP4"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(cfg, f)
+
+            class Args:
+                config = cfg_path
+                name = "team"
+                set_model = "Qwen3.6-35B-A3B-NVFP4"
+                _settings = {}
+                _hosts = ["192.168.50.101"]
+                _ports = [8000]
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m._mutate_roster(Args(), want_subagent=False)
+
+            with open(cfg_path) as f:
+                result = json.load(f)
+            self.assertEqual(
+                result["agent"]["team"]["model"],
+                "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4"
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

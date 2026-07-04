@@ -24,7 +24,9 @@ All notable changes to this project are documented here. The format follows
   `omw agents team --set-work-budget N`, and `omw models <name> --role R --set-temperature
   T` / `--set-thinking B`. Every edit touches ONLY `~/.config/opencode/` (opencode.json +
   a re-emitted `plugins/dgx-sampling.js`); the declared configs stay pristine, so
-  `omw sync` restores known-good and `omw audit` shows exactly what drifted.
+  `omw sync` restores known-good and `omw audit` shows exactly what drifted. `--set-model`
+  accepts a bare model name (e.g. `qwen3.6-35b-nvfp4`), auto-resolved to the live
+  `provider/model-id`.
 - **Per-model work-budget default.** An optional `[capabilities] concurrency` in a model
   config (mirrors the launch profile's `max-num-seqs`) becomes the default team
   `task_budget` when none is set — the team won't spawn more parallel workers than the
