@@ -2152,10 +2152,14 @@ def _show_agent_detail(name, a, plugin):
 
 
 def cmd_agents(args):
+    if _has_roster_mutation(args):
+        return _mutate_roster(args, want_subagent=False)
     _roster_view(args, want_subagent=False)
 
 
 def cmd_subagents(args):
+    if _has_roster_mutation(args):
+        return _mutate_roster(args, want_subagent=True)
     _roster_view(args, want_subagent=True)
 
 
@@ -2178,6 +2182,8 @@ ROLE_ORDER = ["reason", "code", "agent", "instruct"]
 def cmd_models(args):
     _resolve_io(args)
     cfg_path, cfg, agents, plugin = _load_live(args)
+    if getattr(args, "set_temperature", None) is not None or getattr(args, "set_thinking", None) is not None:
+        return _mutate_model(args, cfg_path, cfg, agents, plugin)
     configs = load_configs(args.configs)
     live_ids = {mid for pv in (cfg.get("provider") or {}).values()
                 for mid in (pv.get("models") or {})}
@@ -2240,6 +2246,172 @@ def _find_model_config_live(recipe, live_ids):
     return any(any(str(p).lower() in mid.lower() for p in pats) for mid in live_ids)
 
 
+# ============================================================================
+# Live tweaks (--set-*): edit ONLY ~/.config/opencode/. `omw sync` resets.
+# ============================================================================
+# agent name -> preset role it runs (research=reason, code=code, ... team=reason)
+AGENT_ROLE = {spec[0]: spec[1] for spec in AGENT_SPECS}
+AGENT_ROLE.setdefault("team", "reason")
+
+RESET_NOTE = "  (live edit only; run `omw sync` to reset to the known-good configs)"
+
+
+def _boolish(s):
+    v = str(s).strip().lower()
+    if v in ("true", "on", "yes", "1"):
+        return True
+    if v in ("false", "off", "no", "0"):
+        return False
+    raise argparse.ArgumentTypeError("expected true/false")
+
+
+def _has_roster_mutation(args):
+    return bool(getattr(args, "set_model", None)) or getattr(args, "set_work_budget", None) is not None
+
+
+def _plugin_js_path(cfg_path):
+    return os.path.join(os.path.dirname(cfg_path), "plugins", "dgx-sampling.js")
+
+
+def _default_model_id(cfg):
+    d = _model_id(cfg.get("model") or "")
+    if d:
+        return d
+    for pv in (cfg.get("provider") or {}).values():
+        for mid in (pv.get("models") or {}):
+            return mid
+    return ""
+
+
+def _write_cfg(cfg_path, cfg):
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def _write_plugin(cfg_path, plugin, cfg):
+    p = _plugin_js_path(cfg_path)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(oc_agent_sampling_plugin_js(plugin, _default_model_id(cfg)))
+
+
+def _validate_ref(ref, cfg):
+    """Return a warning string if REF isn't a live managed provider/model (None if ok
+    or a cloud ref like anthropic/...)."""
+    if "/" not in ref:
+        return f"'{ref}' should look like provider/model-id"
+    prov, mid = ref.split("/", 1)
+    if prov.startswith(PROVIDER_PREFIX):
+        models = ((cfg.get("provider") or {}).get(prov) or {}).get("models") or {}
+        if mid not in models:
+            return f"'{ref}' isn't among the live providers (setting anyway; sync it to use it)"
+    return None
+
+
+def _resolve_live_model(name, cfg, plugin):
+    ids = set(plugin or {})
+    for pv in (cfg.get("provider") or {}).values():
+        ids |= set(pv.get("models") or {})
+    n = (name or "").lower()
+    exact = [i for i in ids if i.lower() == n]
+    if exact:
+        return exact[0], sorted(ids)
+    sub = [i for i in ids if n and n in i.lower()]
+    if len(sub) == 1:
+        return sub[0], sorted(ids)
+    return None, sorted(ids)
+
+
+def _mutate_roster(args, want_subagent):
+    _resolve_io(args)
+    cfg_path, cfg, agents, plugin = _load_live(args)
+    if not agents:
+        print("No agents to edit. Run `omw sync` first.", file=sys.stderr)
+        sys.exit(1)
+    if getattr(args, "set_work_budget", None) is not None:
+        return _set_work_budget(cfg_path, cfg, agents, args.set_work_budget)
+
+    ref = args.set_model
+    if getattr(args, "name", None):
+        if args.name not in agents:
+            print(f"agent '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        targets = [args.name]
+    elif want_subagent:
+        targets = [k for k, a in agents.items()
+                   if isinstance(a, dict) and not a.get("disable")
+                   and a.get("mode") == "subagent" and k in MANAGED_AGENTS]
+    else:
+        print("name an agent: omw agents <name> --set-model REF", file=sys.stderr)
+        sys.exit(1)
+    warn = _validate_ref(ref, cfg)
+    if warn:
+        print(f"  note: {warn}")
+    for nm in targets:
+        agents[nm]["model"] = ref
+    _write_cfg(cfg_path, cfg)
+    print(f"set model -> {ref}  for: {', '.join(targets)}")
+    print(RESET_NOTE)
+    _suggest([("See the change", "omw subagents" if want_subagent else "omw agents"),
+              ("Reset to known-good", "omw sync")])
+
+
+def _set_work_budget(cfg_path, cfg, agents, n):
+    team = agents.get("team")
+    if not isinstance(team, dict) or team.get("disable"):
+        print("no `team` agent in this config (nothing delegates).", file=sys.stderr)
+        sys.exit(1)
+    team["task_budget"] = n
+    tp = os.path.join(os.path.dirname(cfg_path), "prompts", "otools-team.md")
+    os.makedirs(os.path.dirname(tp), exist_ok=True)
+    with open(tp, "w", encoding="utf-8") as f:
+        f.write(team_prompt_text(n))
+    _write_cfg(cfg_path, cfg)
+    print(f"team work-budget -> {n} delegations/session")
+    print(RESET_NOTE)
+    _suggest([("Review", "omw agents team"), ("Reset to known-good", "omw sync")])
+
+
+def _mutate_model(args, cfg_path, cfg, agents, plugin):
+    if not getattr(args, "role", None):
+        print("specify a role: --role reason|code|agent|instruct "
+              "(see `omw models <name>`)", file=sys.stderr)
+        sys.exit(1)
+    mid, ids = _resolve_live_model(getattr(args, "name", None), cfg, plugin)
+    if not mid:
+        avail = ", ".join(ids) or "(none -- run `omw sync` first)"
+        print(f"no single live model matches '{args.name}'. live models: {avail}", file=sys.stderr)
+        sys.exit(1)
+    targets = [nm for nm, a in agents.items()
+               if isinstance(a, dict) and not a.get("disable")
+               and _model_id(a.get("model", "")) == mid and AGENT_ROLE.get(nm) == args.role]
+    if not targets:
+        print(f"no live agent runs {mid} with role '{args.role}'.", file=sys.stderr)
+        sys.exit(1)
+    plugin_exists = os.path.exists(_plugin_js_path(cfg_path))
+    for nm in targets:
+        a = agents[nm]
+        if args.set_temperature is not None:
+            a["temperature"] = args.set_temperature
+            plugin.setdefault(mid, {}).setdefault(nm, {})["temperature"] = args.set_temperature
+        if args.set_thinking is not None:
+            a.setdefault("options", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = args.set_thinking
+    _write_cfg(cfg_path, cfg)
+    if plugin_exists and args.set_temperature is not None:
+        _write_plugin(cfg_path, plugin, cfg)
+    what = []
+    if args.set_temperature is not None:
+        what.append(f"temperature={args.set_temperature}")
+    if args.set_thinking is not None:
+        what.append(f"thinking={args.set_thinking}")
+    print(f"{mid} [{args.role}] -> {', '.join(what)}   (agents: {', '.join(targets)})")
+    print(RESET_NOTE)
+    _suggest([("See it", f"omw models {args.name}"),
+              ("Check drift vs known-good", "omw audit"),
+              ("Reset to known-good", "omw sync")])
+
+
 def _build_parser():
     ap = argparse.ArgumentParser(
         prog="omodel-wire",
@@ -2278,18 +2450,29 @@ def _build_parser():
     pc.set_defaults(func=cmd_config)
 
     pag = sub.add_parser("agents", parents=[io_parent],
-                         help="list primary agents (or show one: `omw agents team`)")
-    pag.add_argument("name", nargs="?", help="agent name to show in detail")
+                         help="list primary agents; show/tweak one (`omw agents team`)")
+    pag.add_argument("name", nargs="?", help="agent name to show or edit")
+    pag.add_argument("--set-model", metavar="REF", help="live-set this agent's model")
+    pag.add_argument("--set-work-budget", type=int, metavar="N",
+                     help="live-set the team's delegation budget (task_budget)")
     pag.set_defaults(func=cmd_agents)
 
     psa = sub.add_parser("subagents", parents=[io_parent],
-                         help="list hidden delegation workers (or show one)")
-    psa.add_argument("name", nargs="?", help="worker name to show in detail")
+                         help="list hidden workers; show/tweak (no name = all workers)")
+    psa.add_argument("name", nargs="?", help="worker name to show or edit")
+    psa.add_argument("--set-model", metavar="REF",
+                     help="live-set model (no name -> all workers)")
+    psa.add_argument("--set-work-budget", type=int, metavar="N",
+                     help="live-set the team's delegation budget (forwards to team)")
     psa.set_defaults(func=cmd_subagents)
 
     pm = sub.add_parser("models", parents=[io_parent],
-                        help="list models (or show one's per-role sampling: `omw models qwen`)")
-    pm.add_argument("name", nargs="?", help="model name to show in detail")
+                        help="list models; show/tweak per-role sampling (`omw models qwen`)")
+    pm.add_argument("name", nargs="?", help="model name to show or edit")
+    pm.add_argument("--role", choices=ROLE_ORDER, help="which role to edit (with --set-*)")
+    pm.add_argument("--set-temperature", type=float, metavar="T", help="live-set temperature")
+    pm.add_argument("--set-thinking", type=_boolish, metavar="BOOL",
+                    help="live-set thinking on/off (true|false)")
     pm.set_defaults(func=cmd_models)
 
     pd = sub.add_parser("detect", aliases=["doctor"],

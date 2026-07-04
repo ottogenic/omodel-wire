@@ -795,5 +795,76 @@ class TestCliViews(unittest.TestCase):
         self.assertIn("MODEL", out)
 
 
+def _sync_fixture(tmp, **over):
+    args = make_args(tmp, **over)
+    sampling = m.build_sampling(args)
+    with FakeProbes(), quiet():
+        m.oc_sync(args, sampling, {"opencode"})
+    return args.config
+
+
+class TestCliMutations(unittest.TestCase):
+    """Stage 3: --set-* live edits touch only opencode.json + the plugin."""
+
+    def _load(self, cfg):
+        with open(cfg, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_set_agent_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.cmd_agents(_cli_args(cfg, name="research", set_model="anthropic/claude-opus-4-8"))
+            self.assertEqual(self._load(cfg)["agent"]["research"]["model"], "anthropic/claude-opus-4-8")
+
+    def test_set_all_subagent_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.cmd_subagents(_cli_args(cfg, name=None, set_model="anthropic/x"))
+            ag = self._load(cfg)["agent"]
+            for w in ("agent-plan", "agent-code", "agent-instruct"):
+                self.assertEqual(ag[w]["model"], "anthropic/x")
+
+    def test_set_work_budget_updates_team_and_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.cmd_agents(_cli_args(cfg, name=None, set_model=None, set_work_budget=7))
+            self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 7)
+            with open(os.path.join(tmp, "prompts", "otools-team.md"), encoding="utf-8") as f:
+                self.assertIn("7", f.read())
+
+    def test_set_model_temperature_hits_all_role_agents_and_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.cmd_models(_cli_args(cfg, name="Qwen3.6-27B", role="code",
+                                       set_temperature=0.42, set_thinking=None))
+            ag = self._load(cfg)["agent"]
+            # both code-preset agents on that model move
+            self.assertEqual(ag["code"]["temperature"], 0.42)
+            self.assertEqual(ag["agent-code"]["temperature"], 0.42)
+            # the plugin table moved too
+            plugin = m._plugin_agent_sampling(cfg)
+            self.assertEqual(plugin["Qwen3.6-27B-NVFP4"]["code"]["temperature"], 0.42)
+
+    def test_set_thinking_toggles_enable_thinking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.cmd_models(_cli_args(cfg, name="Qwen3.6-27B", role="instruct",
+                                       set_temperature=None, set_thinking=True))
+            opts = self._load(cfg)["agent"]["agent-instruct"]["options"]["chat_template_kwargs"]
+            self.assertTrue(opts["enable_thinking"])
+
+    def test_main_dispatch_set_work_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            with quiet():
+                m.main(["agents", "team", "--config", cfg, "--set-work-budget", "5"])
+            self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
