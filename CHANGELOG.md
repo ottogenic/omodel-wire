@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
   it matched. Columns: `MODEL · REASON · VISION · LIVE · PROXY · SERVED · CONFIG`.
 
 ### Changed
+- **`omw models` now lists only LIVE models by default; `--all` shows the full catalogue.**
+  The declared roster can be long and mostly-offline, so the bare `omw models` view is now
+  scoped to what's actually running; it prints how many more are hidden and hints `--all`.
+  `omw models --all` restores the every-declared-model table. `omw models <name>` detail is
+  unchanged.
 - **CLI redesigned into `omm`-style subcommands.** The ~40 flat top-level flags are
   replaced by verbs: `omw` (guided home screen), `omw sync` (the roster sync — all former
   sync flags live here), `omw agents` / `omw subagents` / `omw models` (list/inspect + live

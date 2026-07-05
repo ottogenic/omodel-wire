@@ -795,8 +795,25 @@ class TestCliViews(unittest.TestCase):
         self.assertIn(os.path.basename(m.WIRE_SETTINGS_FILE), out)
 
     def test_main_dispatch_models_list(self):
+        # No live opencode config -> nothing live -> default lists nothing...
         out = _capture(m.main, ["models", "--configs", FIXTURE_DIR])
-        self.assertIn("MODEL", out)
+        self.assertNotIn("MODEL", out)
+        self.assertIn("No models are live", out)
+        # ...but --all shows the full declared catalogue.
+        out_all = _capture(m.main, ["models", "--all", "--configs", FIXTURE_DIR])
+        self.assertIn("MODEL", out_all)
+
+    def test_models_list_defaults_to_live_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            live = _capture(m.cmd_models, _cli_args(cfg, all=False))
+            allrows = _capture(m.cmd_models, _cli_args(cfg, all=True))
+            # --all is a superset: it lists at least as many rows as the
+            # live-only default.
+            self.assertIn("MODEL", live)
+            self.assertIn("MODEL", allrows)
+            self.assertGreaterEqual(allrows.count(".toml"), live.count(".toml"))
+            self.assertIn("--all", live)  # hint to see the rest
 
 
 def _sync_fixture(tmp, **over):
