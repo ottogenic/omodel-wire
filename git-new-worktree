@@ -61,6 +61,7 @@ confirm() {  # confirm "question" -> 0 if yes
 # ---- delete / abort ---------------------------------------------------------
 if [ "$MODE" = "delete" ] || [ "$MODE" = "abort" ]; then
   folder="$(basename "$A1")"           # accept a name or a path
+  case "$folder" in ""|.|..|/) echo "Refusing: invalid name '$A1'." >&2; exit 1 ;; esac
   target_path=""; target_branch=""; cur=""
   while IFS= read -r line; do
     case "$line" in
@@ -71,8 +72,26 @@ if [ "$MODE" = "delete" ] || [ "$MODE" = "abort" ]; then
   done < <(git worktree list --porcelain)
 
   if [ -z "$target_path" ]; then
-    echo "No worktree named '$folder'. Current worktrees:" >&2
-    git worktree list >&2; exit 1
+    # Not a registered worktree — it may be an ORPHANED worktree folder (its git
+    # registration was pruned, e.g. by a cross-OS 'prune') or a stray sibling dir.
+    # Offer to remove the folder directly. Restricted to SIBLINGS of this repo.
+    cand="$(dirname "$repo_root")/$folder"
+    if [ ! -d "$cand" ] || [ "$cand" = "$repo_root" ]; then
+      echo "No worktree or sibling folder named '$folder'. Current worktrees:" >&2
+      git worktree list >&2; exit 1
+    fi
+    echo "'$folder' is not a registered worktree."
+    if [ -e "$cand/.git" ]; then
+      echo "  Looks like an ORPHANED worktree (its git link is dead) — git can't verify"
+      echo "  whether it holds uncommitted or unpushed work. Deletion is PERMANENT."
+    else
+      echo "  It's a plain folder (not a git worktree). Deletion is PERMANENT."
+    fi
+    echo "  folder: $cand"
+    confirm "rm -rf it?" || { echo "aborted."; exit 0; }
+    rm -rf "$cand" && echo "✓ deleted $cand"
+    echo "done."
+    exit 0
   fi
   if [ "$(git rev-parse --show-toplevel)" = "$target_path" ]; then
     echo "You're inside '$folder' — cd out first (e.g. cd '$repo_root'), then rerun." >&2; exit 1
