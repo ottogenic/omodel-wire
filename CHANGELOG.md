@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **`./new-worktree` gains teardown**: `--delete <folder>` (aliases `--undo`/`--rm`) removes a
+  worktree, deletes its branch, and — if it was pushed — offers to close the open PR + delete the
+  remote branch (`-y` skips the prompt). One command to abort a feature cleanly.
 - **Genericized example host addresses** to the RFC 5737 documentation range (`192.0.2.0/24`)
   in `DEFAULT_HOSTS`/`HOST_LABELS`, docstrings, and tests — the shipped fallback no longer
   hardcodes a specific private LAN. Configure real hosts via `omm install` /
