@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# new-worktree — create OR tear down an isolated git worktree, so an agent (or you)
-# never shares a working tree with anyone else. Two actors in one tree is how one
-# sweeps up the other's uncommitted changes — give each its own worktree. See AGENTS.md.
+# new-worktree — create, clean up, or abort an isolated git worktree, so an agent
+# (or you) never shares a working tree with anyone else. See AGENTS.md.
 #
-#   create:  ./new-worktree <folder> <branch>          -> ../<folder> on a new <branch>
+#   create:  ./new-worktree <folder> <branch>       -> ../<folder> on a new <branch>
 #            e.g.  ./new-worktree omw-thingy feat/123
-#   remove:  ./new-worktree --delete <folder>          (aliases: --undo, --rm)
-#            e.g.  ./new-worktree --delete omw-thingy
-#            tears down ../<folder>, deletes its branch, and — if it was pushed —
-#            offers to close the PR + delete the remote branch. Add -y to skip prompts.
+#   clean:   ./new-worktree --delete <folder>        (aliases: --undo, --rm)
+#            remove ../<folder> + its LOCAL branch only. SAFE: never touches an open
+#            PR or the remote branch, so a submitted-but-unmerged PR lives on. Use
+#            this to free the folder once your PR is up (or after it merged).
+#   abort:   ./new-worktree --abort <folder>
+#            the throw-it-all-away version — ALSO closes the open PR + deletes the
+#            remote branch. Use when abandoning the feature entirely.
+#            (-y skips the confirmation prompt in either mode.)
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -20,29 +23,32 @@ new-worktree — make or remove an isolated worktree (own folder + own branch).
 
   create:  ./new-worktree <folder> <branch>
            e.g.  ./new-worktree omw-thingy feat/123
-  remove:  ./new-worktree --delete <folder>        (aliases: --undo, --rm; -y skips prompts)
-           e.g.  ./new-worktree --delete omw-thingy
-           removes ../<folder>, deletes its branch, and if the branch was pushed,
-           offers to close its open PR + delete the remote branch.
+  clean:   ./new-worktree --delete <folder>   (aliases: --undo, --rm; -y skips prompt)
+           removes ../<folder> + its LOCAL branch only. SAFE: leaves any open PR and
+           the remote branch alone, so a pending PR (or a merged one) is untouched.
+  abort:   ./new-worktree --abort <folder>
+           also CLOSES the open PR + deletes the remote branch — for abandoning a feature.
 
 Worktrees are siblings of this repo. `git worktree list` shows them all.
 EOF
 }
 
 # ---- parse args -------------------------------------------------------------
-ASSUME_YES=0; MODE=""; A1=""; A2=""
+ASSUME_YES=0; MODE=""; A1=""
 for a in "$@"; do
   case "$a" in
     -y|--yes)                 ASSUME_YES=1 ;;
     --delete|--undo|--rm|-d)  MODE="delete" ;;
+    --abort)                  MODE="abort" ;;
     -h|--help)                usage; exit 0 ;;
     -*)                       echo "unknown flag: $a" >&2; usage >&2; exit 1 ;;
-    *)  if [ -z "$A1" ]; then A1="$a"; elif [ -z "$A2" ]; then A2="$a"; fi ;;
+    *)  if [ -z "${A1:-}" ]; then A1="$a"; elif [ -z "${A2:-}" ]; then A2="$a"; fi ;;
   esac
 done
-if [ -z "$MODE" ] && [ -n "$A1" ] && [ -n "$A2" ]; then MODE="create"; fi
-if { [ "$MODE" = "create" ] && { [ -z "$A1" ] || [ -z "$A2" ]; }; } \
-   || { [ "$MODE" = "delete" ] && [ -z "$A1" ]; } || [ -z "$MODE" ]; then
+if [ -z "$MODE" ] && [ -n "${A1:-}" ] && [ -n "${A2:-}" ]; then MODE="create"; fi
+if { [ "$MODE" = "create" ] && { [ -z "${A1:-}" ] || [ -z "${A2:-}" ]; }; } \
+   || { { [ "$MODE" = "delete" ] || [ "$MODE" = "abort" ]; } && [ -z "${A1:-}" ]; } \
+   || [ -z "$MODE" ]; then
   usage; exit 0
 fi
 
@@ -52,8 +58,8 @@ confirm() {  # confirm "question" -> 0 if yes
   printf '%s [y/N] ' "$1"; read -r ans; [ "$ans" = y ] || [ "$ans" = Y ]
 }
 
-# ---- delete mode ------------------------------------------------------------
-if [ "$MODE" = "delete" ]; then
+# ---- delete / abort ---------------------------------------------------------
+if [ "$MODE" = "delete" ] || [ "$MODE" = "abort" ]; then
   folder="$(basename "$A1")"           # accept a name or a path
   target_path=""; target_branch=""; cur=""
   while IFS= read -r line; do
@@ -81,26 +87,38 @@ if [ "$MODE" = "delete" ]; then
   fi
 
   echo "About to remove:"
-  echo "  worktree:  $target_path"
-  [ -n "$target_branch" ] && echo "  branch:    $target_branch (local)"
-  [ -n "$pr" ]            && echo "  PR:        #$pr (open)  -> will be closed"
-  { [ "$remote_branch" = 1 ] && [ -z "$pr" ]; } && echo "  remote:    origin/$target_branch  -> will be deleted"
-  confirm "Delete all of the above?" || { echo "aborted."; exit 0; }
+  echo "  worktree:      $target_path"
+  [ -n "$target_branch" ] && echo "  local branch:  $target_branch"
+  if [ "$MODE" = "abort" ]; then
+    [ -n "$pr" ]                                   && echo "  PR #$pr        -> WILL BE CLOSED"
+    { [ "$remote_branch" = 1 ] && [ -z "$pr" ]; }  && echo "  origin/$target_branch -> WILL BE DELETED"
+  else
+    [ -n "$pr" ]           && echo "  PR #$pr (open) -> KEPT (use --abort to close it)"
+    [ "$remote_branch" = 1 ] && echo "  origin/$target_branch -> KEPT"
+  fi
+  confirm "Proceed?" || { echo "aborted."; exit 0; }
 
   git worktree remove --force "$target_path" && echo "✓ removed worktree"
   if [ -n "$target_branch" ] && git show-ref --verify --quiet "refs/heads/$target_branch"; then
     git branch -D "$target_branch" >/dev/null && echo "✓ deleted local branch $target_branch"
   fi
-  if [ -n "$pr" ]; then
-    gh pr close "$pr" --delete-branch && echo "✓ closed PR #$pr + deleted remote branch"
-  elif [ "$remote_branch" = 1 ]; then
-    git push origin --delete "$target_branch" && echo "✓ deleted remote branch origin/$target_branch"
+
+  if [ "$MODE" = "abort" ]; then
+    if [ -n "$pr" ]; then
+      gh pr close "$pr" --delete-branch && echo "✓ closed PR #$pr + deleted remote branch"
+    elif [ "$remote_branch" = 1 ]; then
+      git push origin --delete "$target_branch" && echo "✓ deleted remote branch origin/$target_branch"
+    fi
+  else
+    [ -n "$pr" ] && echo "ℹ PR #$pr is still open and origin/$target_branch is intact — your PR lives on."
+    { [ -z "$pr" ] && [ "$remote_branch" = 1 ]; } && \
+      echo "ℹ origin/$target_branch still exists — delete it with 'git push origin --delete $target_branch', or use --abort."
   fi
   echo "done."
   exit 0
 fi
 
-# ---- create mode ------------------------------------------------------------
+# ---- create -----------------------------------------------------------------
 folder="$A1"; branch="$A2"
 dest="$(dirname "$repo_root")/$folder"
 if [ -e "$dest" ]; then echo "Refusing: '$dest' already exists." >&2; exit 1; fi
@@ -122,6 +140,7 @@ cat <<EOF
 
 ✓ Worktree ready:  $dest
   branch:          $branch
-  Point your agent's working directory here. When finished, tear it down with:
-     ./new-worktree --delete $folder
+  Point your agent's working directory here. When finished:
+     ./new-worktree --delete $folder    # free the folder, keep any PR
+     ./new-worktree --abort  $folder    # or throw it all away (closes the PR)
 EOF
