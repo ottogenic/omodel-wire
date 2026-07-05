@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# new-worktree — spin up an isolated git worktree (its own folder + own branch) so an
+# agent (or you) can work without sharing a working tree with anyone else. Two agents in
+# one working tree is how one sweeps up the other's uncommitted changes — see AGENTS.md.
+#
+#   usage:  ./new-worktree <folder> <branch>
+#   e.g.    ./new-worktree omw-thingy feat/123     -> ../omw-thingy on branch feat/123
+#
+# The worktree is created as a sibling of this repo, based on the latest origin/main.
+# Point the agent's working directory at the new folder. Remove it when finished:
+#   git worktree remove ../<folder>
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "Not inside a git repository." >&2; exit 1; }
+
+if [ "$#" -lt 2 ]; then
+  cat <<'EOF'
+new-worktree — make an isolated worktree (own folder + own branch) for parallel work.
+
+  usage:  ./new-worktree <folder> <branch>
+  e.g.    ./new-worktree omw-thingy feat/123
+
+Creates ../<folder> (a sibling of this repo) on a new <branch> based on the latest
+origin/main, so an agent can work there without colliding with anyone else's tree.
+Point the agent's working directory at the new folder. When done:
+  git worktree remove ../<folder>
+EOF
+  exit 0
+fi
+
+folder="$1"
+branch="$2"
+dest="$(dirname "$repo_root")/$folder"
+
+if [ -e "$dest" ]; then
+  echo "Refusing: '$dest' already exists." >&2; exit 1
+fi
+
+echo "Fetching origin..."
+git fetch --quiet origin || echo "(fetch failed — falling back to local refs)"
+
+base="origin/main"
+git rev-parse --verify --quiet "$base" >/dev/null || base="main"
+
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+  echo "Branch '$branch' already exists — checking it out in the new worktree."
+  git worktree add "$dest" "$branch"
+else
+  echo "Creating branch '$branch' from $base."
+  git worktree add -b "$branch" "$dest" "$base"
+fi
+
+cat <<EOF
+
+✓ Worktree ready:  $dest
+  branch:          $branch
+  Point your agent's working directory here. When finished:
+     git worktree remove "$dest"
+EOF
