@@ -27,9 +27,11 @@ import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import types
 import unittest
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULE_PATH = os.path.join(HERE, "omodel-wire.py")
@@ -242,8 +244,10 @@ class TestAgentBuilding(unittest.TestCase):
         team = agents["team"]
         self.assertEqual(team["mode"], "primary")
         self.assertEqual(team["color"], m.TEAM_COLOR)
-        self.assertEqual(team["permission"]["edit"], "deny")
-        self.assertEqual(team["permission"]["bash"], "deny")
+        # delegation-only: EVERY tool category denied except `task`
+        for tool in ("read", "grep", "glob", "list", "edit", "bash", "webfetch", "websearch"):
+            self.assertEqual(team["permission"][tool], "deny",
+                             f"team should not be able to use {tool}")
         task = team["permission"]["task"]
         self.assertEqual(task["*"], "deny")
         for t in m.TEAM_TARGETS:
@@ -999,6 +1003,177 @@ class TestBareModelNameResolution(unittest.TestCase):
                 result["agent"]["team"]["model"],
                 "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Proxy tests
+# --------------------------------------------------------------------------- #
+class TestProxyModule(unittest.TestCase):
+    """Unit tests for the proxy helper module (loaded by omw as m.proxy)."""
+    PX = m.proxy
+
+    def test_module_loaded(self):
+        self.assertIsNotNone(self.PX, "utils/omw_proxy.py failed to load")
+
+    def test_short_id_short_and_unique(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.PX.short_id(tmp)
+            self.assertEqual(len(a), 7)
+            open(os.path.join(tmp, a + "_req.json"), "w").close()
+            self.assertNotEqual(a, self.PX.short_id(tmp))
+
+    def test_build_curl_strips_host(self):
+        curl = self.PX.build_curl({"method": "POST", "url": "http://h:8000/v1/chat/completions",
+                                   "headers": {"Content-Type": "application/json", "Host": "x"},
+                                   "body": '{"model":"m"}'})
+        self.assertIn("-X POST", curl)
+        self.assertIn("http://h:8000/v1/chat/completions", curl)
+        self.assertNotIn("Host:", curl)
+
+    def test_render_read_sections_and_newlines(self):
+        req = {"request_id": "abc1234", "method": "POST", "url": "http://h/v1/chat/completions",
+               "model": "m", "body": json.dumps({"model": "m", "temperature": 0.6,
+                   "tools": [{"function": {"name": "bash", "description": "run a command"}}],
+                   "messages": [{"role": "system", "content": "you are helpful"},
+                                {"role": "user", "content": "hi\nthere"}]})}
+        res = {"status": 200, "elapsed_ms": 5,
+               "body": json.dumps({"choices": [{"message": {"content": "hello"}}]})}
+        out = self.PX.render_read(req, res, use_color=False)
+        for tok in ("abc1234", "tools", "bash", "system", "you are helpful",
+                    "[user]", "there", "hello"):
+            self.assertIn(tok, out)
+        self.assertNotIn("\\n", out)  # newlines rendered, not literal backslash-n
+
+
+class TestProxyIntegration(unittest.TestCase):
+    """End-to-end: mock upstream -> proxy -> client, incl. SSE streaming."""
+
+    def test_routing_streaming_logging(self):
+        import threading
+        import urllib.request as ur
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        PX = m.proxy
+
+        class Up(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def log_message(self, *a): pass
+            def do_GET(self):
+                b = json.dumps({"data": [{"id": "qwen/qwen3.6-35b"}]}).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0) or 0); self.rfile.read(n)
+                self.send_response(200); self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+                for tok in ["Hel", "lo!"]:
+                    d = ("data: " + json.dumps({"choices": [{"delta": {"content": tok}}]}) + "\n\n").encode()
+                    self.wfile.write(b"%X\r\n" % len(d) + d + b"\r\n"); self.wfile.flush()
+                done = b"data: [DONE]\n\n"
+                self.wfile.write(b"%X\r\n" % len(done) + done + b"\r\n"); self.wfile.write(b"0\r\n\r\n")
+
+        up = ThreadingHTTPServer(("127.0.0.1", 0), Up); up.daemon_threads = True
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = os.path.join(tmp, "proxy_logs"); os.makedirs(logs)
+            routes = os.path.join(tmp, "routes.json")
+            with open(routes, "w") as f:
+                json.dump({"dgx-n1-8000": f"http://127.0.0.1:{up.server_address[1]}/v1"}, f)
+            px = ThreadingHTTPServer(("127.0.0.1", 0), PX.ProxyHandler); px.daemon_threads = True
+            px.logs_dir, px.routes_path = logs, routes
+            threading.Thread(target=px.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{px.server_address[1]}/dgx-n1-8000"
+            try:
+                self.assertIn("qwen/qwen3.6-35b", ur.urlopen(base + "/models", timeout=10).read().decode())
+                r = ur.Request(base + "/chat/completions",
+                               data=json.dumps({"model": "qwen/qwen3.6-35b", "stream": True,
+                                                "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                               headers={"Content-Type": "application/json"}, method="POST")
+                sse = ur.urlopen(r, timeout=10).read().decode()
+                self.assertIn("Hel", sse); self.assertIn("[DONE]", sse)
+            finally:
+                px.shutdown(); up.shutdown()
+            files = os.listdir(logs)
+            ids = {f.split("_")[0] for f in files if f.endswith(".json")}
+            self.assertTrue(ids and all(len(i) == 7 for i in ids), ids)
+            self.assertIn("index.jsonl", files)
+            for i in ids:
+                req_d, res_d = PX.find_pair(logs, i)
+                if res_d and res_d.get("streamed"):
+                    self.assertIn("Hello!", PX.render_read(req_d, res_d, use_color=False))
+
+
+class TestProxyCli(unittest.TestCase):
+    """omw proxy on/off rewrites only ~/.config/opencode; no daemon spawned in tests."""
+
+    def setUp(self):
+        self._sf, self._epr = m.WIRE_SETTINGS_FILE, m._ensure_proxy_running
+        self._tmp = tempfile.mkdtemp()
+        m.WIRE_SETTINGS_FILE = os.path.join(self._tmp, "wire.json")
+        m._ensure_proxy_running = lambda P: False
+
+    def tearDown(self):
+        m.WIRE_SETTINGS_FILE, m._ensure_proxy_running = self._sf, self._epr
+
+    def _cfg(self):
+        path = os.path.join(self._tmp, "opencode.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"provider": {
+                "dgx-n1-8000": {"options": {"baseURL": "http://192.168.50.101:8000/v1"},
+                                "models": {"qwen/qwen3.6-35b": {}}},
+                "dgx-n2-8000": {"options": {"baseURL": "http://192.168.50.102:8000/v1"},
+                                "models": {"qwen3-coder-next-nvfp4": {}}}}}, f)
+        return path
+
+    def _args(self, cfg, **over):
+        a = types.SimpleNamespace(config=cfg, configs=FIXTURE_DIR, target=None, port=9099,
+                                  action="on", output_curl=False, no_color=True, _settings={})
+        for k, v in over.items():
+            setattr(a, k, v)
+        return a
+
+    def _load(self, cfg):
+        with open(cfg, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_on_all_then_off_restores(self):
+        cfg = self._cfg()
+        with quiet():
+            m.cmd_proxy_on(self._args(cfg))
+        prov = self._load(cfg)["provider"]
+        self.assertTrue(all(m._is_loopback(p["options"]["baseURL"]) for p in prov.values()))
+        routes = self._load(os.path.join(self._tmp, "proxy_routes.json"))
+        self.assertEqual(routes["dgx-n1-8000"], "http://192.168.50.101:8000/v1")
+        with quiet():
+            m.cmd_proxy_off(self._args(cfg))
+        prov = self._load(cfg)["provider"]
+        self.assertEqual(prov["dgx-n1-8000"]["options"]["baseURL"], "http://192.168.50.101:8000/v1")
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "proxy_routes.json")))
+
+    def test_on_single_model_only(self):
+        cfg = self._cfg()
+        with quiet():
+            m.cmd_proxy_on(self._args(cfg, target="qwen3-coder-next-nvfp4"))
+        prov = self._load(cfg)["provider"]
+        self.assertFalse(m._is_loopback(prov["dgx-n1-8000"]["options"]["baseURL"]))
+        self.assertTrue(m._is_loopback(prov["dgx-n2-8000"]["options"]["baseURL"]))
+
+
+class TestModelsProxyColumn(unittest.TestCase):
+    """omw models list gains LIVE/PROXY/SERVED reflecting the live config."""
+
+    def test_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "opencode.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"provider": {"dgx-n1-8000": {
+                    "options": {"baseURL": "http://127.0.0.1:9099/dgx-n1-8000"},
+                    "models": {"Qwen3.6-27B-NVFP4": {}}}}}, f)
+            out = _capture(m.cmd_models, _cli_args(cfg))
+            self.assertIn("PROXY", out)
+            self.assertIn("SERVED", out)
+            live = [ln for ln in out.splitlines() if "Qwen3.6-27B-NVFP4" in ln and "yes" in ln]
+            self.assertTrue(live, "live row not found")
+            self.assertIn("on", live[0])  # proxied (loopback baseURL)
 
 
 if __name__ == "__main__":
