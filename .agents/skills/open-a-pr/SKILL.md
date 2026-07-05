@@ -36,8 +36,8 @@ endings, kebab/snake naming, `plugins/` (plural), and model configs owned by omo
 never assume you're alone in the working tree:
 - **One worktree per agent.** Do your work in your own `git worktree` (a separate folder on its
   own branch), not the shared clone — different folder means you can't sweep up another agent's
-  uncommitted work, and they can't sweep yours. Make one with `./new-worktree <folder> <branch>`
-  (e.g. `./new-worktree omw-fix-x fix/x`).
+  uncommitted work, and they can't sweep yours. Make one with `./git-new-worktree <folder> <branch>`
+  (e.g. `./git-new-worktree omw-fix-x fix/x`).
 - **Branch first, stage explicit paths.** `git switch -c fix/<slug>` before editing; stage what
   you changed by name (`git add omodel-wire.py test_omodel_wire.py`). **Never `git add -A` /
   `git add .`** — that's how one agent's commit swallows another's uncommitted changes.

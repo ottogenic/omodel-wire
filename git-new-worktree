@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# new-worktree — create, clean up, or abort an isolated git worktree, so an agent
+# git-new-worktree — create, clean up, or abort an isolated git worktree, so an agent
 # (or you) never shares a working tree with anyone else. See AGENTS.md.
 #
-#   create:  ./new-worktree <folder> <branch>       -> ../<folder> on a new <branch>
-#            e.g.  ./new-worktree omw-thingy feat/123
-#   clean:   ./new-worktree --delete <folder>        (aliases: --undo, --rm)
+#   create:  ./git-new-worktree <folder> <branch>       -> ../<folder> on a new <branch>
+#            e.g.  ./git-new-worktree omw-thingy feat/123
+#   clean:   ./git-new-worktree --delete <folder>        (aliases: --undo, --rm)
 #            remove ../<folder> + its LOCAL branch only. SAFE: never touches an open
 #            PR or the remote branch, so a submitted-but-unmerged PR lives on. Use
 #            this to free the folder once your PR is up (or after it merged).
-#   abort:   ./new-worktree --abort <folder>
+#   abort:   ./git-new-worktree --abort <folder>
 #            the throw-it-all-away version — ALSO closes the open PR + deletes the
 #            remote branch. Use when abandoning the feature entirely.
 #            (-y skips the confirmation prompt in either mode.)
@@ -19,14 +19,14 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 
 usage() {
   cat <<'EOF'
-new-worktree — make or remove an isolated worktree (own folder + own branch).
+git-new-worktree — make or remove an isolated worktree (own folder + own branch).
 
-  create:  ./new-worktree <folder> <branch>
-           e.g.  ./new-worktree omw-thingy feat/123
-  clean:   ./new-worktree --delete <folder>   (aliases: --undo, --rm; -y skips prompt)
+  create:  ./git-new-worktree <folder> <branch>
+           e.g.  ./git-new-worktree omw-thingy feat/123
+  clean:   ./git-new-worktree --delete <folder>   (aliases: --undo, --rm; -y skips prompt)
            removes ../<folder> + its LOCAL branch only. SAFE: leaves any open PR and
            the remote branch alone, so a pending PR (or a merged one) is untouched.
-  abort:   ./new-worktree --abort <folder>
+  abort:   ./git-new-worktree --abort <folder>
            also CLOSES the open PR + deletes the remote branch — for abandoning a feature.
 
 Worktrees are siblings of this repo. `git worktree list` shows them all.
@@ -141,6 +141,6 @@ cat <<EOF
 ✓ Worktree ready:  $dest
   branch:          $branch
   Point your agent's working directory here. When finished:
-     ./new-worktree --delete $folder    # free the folder, keep any PR
-     ./new-worktree --abort  $folder    # or throw it all away (closes the PR)
+     ./git-new-worktree --delete $folder    # free the folder, keep any PR
+     ./git-new-worktree --abort  $folder    # or throw it all away (closes the PR)
 EOF
