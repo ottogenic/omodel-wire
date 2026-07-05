@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **`AGENTS.md` slimmed to invariants + a skill index; task detail moved to lazy-loaded
+  skills.** The full `AGENTS.md` was injected into every model request (~4.4k tokens) even for
+  trivial turns. It's now a lean always-on core; the layout / OpenCode-reference / contributing
+  sections moved into OpenCode **skills** under `.agents/skills/` (the vendor-neutral discovery
+  path): `code-changes`, `opencode-reference`, `validate-opencode`, `open-a-pr`. Only each
+  skill's name + description is advertised up front; the body loads on demand via the `skill`
+  tool. `VALIDATE_OPENCODE.md` moved into the `validate-opencode` skill. Cuts per-request
+  prompt overhead substantially with no loss of guidance.
+
 ### Fixed
 - **`team` is now truly delegation-only.** Its permission block denied only `edit`/`bash`,
   but OpenCode gates the read-only tools (`read`/`grep`/`glob`/`list`) under their own

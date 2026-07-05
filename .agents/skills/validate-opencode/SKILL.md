@@ -1,3 +1,8 @@
+---
+name: validate-opencode
+description: Validate that the OpenCode config omodel-wire generated actually reaches the model server — each agent's sampling matches its omodel-manager preset and OpenCode isn't falling back to model defaults. Use to prove the sampling handoff via live request logs.
+---
+
 # Validate the OpenCode sampling handoff (AI guide)
 
 An AI-runnable procedure to prove that the OpenCode config `omodel-wire` generated
