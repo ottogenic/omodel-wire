@@ -30,3 +30,9 @@ CLAUDE.local.md
 .github/copilot-instructions.md
 GEMINI.md
 .opencode/
+
+# omw proxy runtime artifacts (never commit)
+proxy_logs/
+proxy_routes.json
+*.proxy-bak
+.omw-proxy.pid

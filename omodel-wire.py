@@ -45,7 +45,19 @@ import subprocess
 import sys
 import tomllib   # stdlib (Python 3.11+); reads the generic per-model configs
 import urllib.error
+import urllib.parse
 import urllib.request
+
+# Proxy helper module (utils/omw_proxy.py) loaded BY PATH so it works whether omw is
+# run as a script or imported by the tests via importlib (the file name has no bearing).
+import importlib.util as _ilu
+_PROXY_MOD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "omw_proxy.py")
+try:
+    _pspec = _ilu.spec_from_file_location("omw_proxy", _PROXY_MOD_PATH)
+    proxy = _ilu.module_from_spec(_pspec)
+    _pspec.loader.exec_module(proxy)
+except (OSError, ImportError, AttributeError):
+    proxy = None
 
 # ----------------------------------------------------------------------------
 # DGX endpoint discovery defaults -- edit if your layout changes
@@ -240,9 +252,10 @@ MANAGED_AGENTS = {"research", "code", "agent", "team",
 
 # System prompt for the `team` lead/orchestrator. Written to a file next to
 # opencode.json and referenced via {file:...}; edit it there to tune behavior.
-TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You do NOT write code, edit files, or
-run commands yourself (you have no edit/bash access). Your job is to break work
-down, delegate it to your workers, and verify the result.
+TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You have NO tools of your own: you
+cannot read, grep, edit, or run commands -- the ONLY thing you can do is delegate
+by calling the `task` tool. Your job is to break work down, hand each piece to a
+worker, and verify the results they report back.
 
 You delegate by CALLING THE `task` TOOL -- choose a subagent by NAME and give it
 an instruction. Do NOT just type "@agent ..." in your reply; that does nothing.
@@ -798,15 +811,20 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             task_map[k] = "allow"
         rs = rp.get("sampling", {})
         team = {
-            "description": "team: lead orchestrator -- plans, delegates to the agent-* workers, "
-                           "validates; does not edit directly",
+            "description": "team: lead orchestrator -- plans and delegates to the agent-* "
+                           "workers, validates; has NO tools of its own (delegation only)",
             "mode": "primary",
             "model": model_ref,
             "color": TEAM_COLOR,
             "prompt": "{file:./prompts/otools-team.md}",
             "options": _opts_for(rp),
-            "permission": {"edit": "deny", "bash": "deny",
-                           "websearch": "allow", "webfetch": "allow",
+            # Delegation-only: deny EVERY tool category (incl. the read-only ones --
+            # read/grep/glob/list have their own permission keys and default to allow,
+            # so denying edit/bash alone still lets the orchestrator grep/read). The
+            # only thing it can do is spawn its workers via `task`.
+            "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
+                           "edit": "deny", "bash": "deny",
+                           "webfetch": "deny", "websearch": "deny",
                            "task": task_map},
         }
         if "temperature" in rs: team["temperature"] = rs["temperature"]
@@ -1789,6 +1807,8 @@ SETTINGS_KEYS = {
     "team_reasoning":  ("low|medium|high (Anthropic team thinking)", None),
     "default_agent":   ("startup agent (research/code/agent/team)", "code"),
     "web_search":      ("none|exa|mcp", "none"),
+    "proxy_port":      ("proxy listen port (default: 9099)", 9099),
+    "proxy_active":    ("is proxy currently active?", False),
 }
 
 
@@ -2236,19 +2256,32 @@ def cmd_models(args):
         return
 
     # list
+    # Full catalogue; LIVE/PROXY/SERVED reflect what's actually running now.
+    # served id -> is its provider proxied (loopback baseURL)?
+    live_proxied = {}
+    for pv in (cfg.get("provider") or {}).values():
+        prox = _is_loopback((pv.get("options") or {}).get("baseURL", ""))
+        for mid in (pv.get("models") or {}):
+            live_proxied[mid] = prox
     rows = []
     for r in configs.get("recipes", []):
         title = (r.get("match") or ["?"])[0]
         cap = r.get("capabilities", {}) or {}
-        live = "yes" if _find_model_config_live(r, live_ids) else "-"
+        pats = r.get("match") or []
+        pats = [pats] if isinstance(pats, str) else pats
+        matched = [mid for mid in live_proxied
+                   if any(str(p).lower() in mid.lower() for p in pats)]
+        live = "yes" if matched else "-"
+        proxy = ("on" if any(live_proxied[m] for m in matched) else "off") if matched else "-"
+        served = ", ".join(matched) if matched else "-"
         rows.append((title, _fmt(bool(cap.get("reasoning"))), _fmt(bool(cap.get("vision"))),
-                     live, r.get("_file", "")))
+                     live, proxy, served, r.get("_file", "")))
     if not rows:
         print("No model configs found.")
         _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
         return
-    print("Models declared in the omodel-manager configs:\n")
-    _table(("MODEL", "REASON", "VISION", "LIVE", "CONFIG"), rows)
+    print("Models declared in the omodel-manager configs (LIVE/PROXY/SERVED = live state):\n")
+    _table(("MODEL", "REASON", "VISION", "LIVE", "PROXY", "SERVED", "CONFIG"), rows)
     _suggest([("Show a model's per-role sampling", "omw models <name>")])
 
 
@@ -2566,9 +2599,287 @@ def _build_parser():
     psi = sub.add_parser("shell-init", aliases=["install-aliases"],
                          help="install the `omw` shell alias")
     psi.set_defaults(func=cmd_shell_init)
+
+    pp = sub.add_parser("proxy", parents=[io_parent],
+                        help="debug proxy: log OpenCode<->model traffic (on|off|replay|read|status)")
+    pp.add_argument("action", choices=["on", "off", "replay", "read", "status"],
+                    help="on/off [model] | replay <id> | read <id> | status")
+    pp.add_argument("target", nargs="?",
+                    help="model name (on/off) or request_id (replay/read)")
+    pp.add_argument("--port", type=int, default=None,
+                    help="proxy port (default: wire.json proxy_port, else 9099)")
+    pp.add_argument("--output-curl", action="store_true",
+                    help="(replay) print a copy-pasteable curl instead of running the request")
+    pp.add_argument("--no-color", action="store_true", help="(read) disable ANSI colors")
+    pp.set_defaults(func=cmd_proxy)
+
     return ap
 
 
+# ============================================================================
+# Proxy commands (debug proxy: log OpenCode <-> model traffic)
+# ============================================================================
+def _proxy_paths(args):
+    config_path = os.path.expanduser(args.config)
+    d = os.path.dirname(config_path)
+    port = getattr(args, "port", None) or _setting(args, "proxy_port") or 9099
+    return {
+        "config_path": config_path,
+        "pid": os.path.join(d, ".omw-proxy.pid"),
+        "routes": os.path.join(d, "proxy_routes.json"),
+        "backup": config_path + ".proxy-bak",
+        "logs": os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_logs"),
+        "port": int(port),
+    }
+
+
+def _is_loopback(url):
+    try:
+        host = urllib.parse.urlsplit(url or "").hostname or ""
+    except (ValueError, AttributeError):
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _read_json_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _dump_json(path, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+
+
+def _read_pid(pid_file):
+    try:
+        with open(pid_file) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _proxy_pid(P):
+    """Return the live daemon pid, or None (stale pid files read as not-running)."""
+    pid = _read_pid(P["pid"])
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+        return pid
+    except OSError:
+        return None
+
+
+def _providers_for_target(cfg, target):
+    """Managed provider keys hosting model `target` (bare name ok); all dgx- if None."""
+    providers = cfg.get("provider") or {}
+    managed = [k for k in providers if k.startswith(PROVIDER_PREFIX)]
+    if not target:
+        return managed
+    mid, _ids = _resolve_live_model(target, cfg, {})
+    if not mid:
+        return []
+    return [k for k in managed if mid in ((providers[k].get("models") or {}))]
+
+
+def cmd_proxy(args):
+    _resolve_io(args)
+    if proxy is None:
+        print("proxy helper (utils/omw_proxy.py) not found.", file=sys.stderr)
+        sys.exit(1)
+    return {"on": cmd_proxy_on, "off": cmd_proxy_off, "replay": cmd_proxy_replay,
+            "read": cmd_proxy_read, "status": cmd_proxy_status}[args.action](args)
+
+
+def _ensure_proxy_running(P):
+    """Launch the proxy daemon if not already up. Returns True if it started it."""
+    if _proxy_pid(P):
+        return False
+    os.makedirs(P["logs"], exist_ok=True)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "omw_proxy.py")
+    env = os.environ.copy()
+    env["OMW_PROXY_LOGS_DIR"] = P["logs"]
+    # Redirect to a file (NOT a PIPE -- an unread PIPE fills and stalls the daemon).
+    out = open(os.path.join(P["logs"], "proxy.log"), "a", encoding="utf-8")
+    kw = {"start_new_session": True} if os.name == "posix" else {}
+    proc = subprocess.Popen(
+        [sys.executable, script, "--port", str(P["port"]),
+         "--logs-dir", P["logs"], "--routes", P["routes"]],
+        stdout=out, stderr=subprocess.STDOUT, env=env, **kw)
+    with open(P["pid"], "w") as f:
+        f.write(str(proc.pid))
+    return True
+
+
+def cmd_proxy_on(args):
+    P = _proxy_paths(args)
+    cfg = oc_load_config(P["config_path"])
+    providers = cfg.get("provider") or {}
+    targets = _providers_for_target(cfg, args.target)
+    if not targets:
+        if args.target:
+            print(f"no live managed model matches '{args.target}'. See `omw models`.", file=sys.stderr)
+        else:
+            print("no managed (dgx-) providers in opencode.json. Run `omw sync` first.", file=sys.stderr)
+        sys.exit(1)
+
+    routes = _read_json_file(P["routes"]) or {}
+    if not os.path.exists(P["backup"]) and os.path.exists(P["config_path"]):
+        shutil.copy2(P["config_path"], P["backup"])
+
+    changed = []
+    for key in targets:
+        opts = providers[key].get("options") or {}
+        cur = opts.get("baseURL")
+        if not cur or _is_loopback(cur):
+            continue
+        routes[key] = cur                       # remember the real upstream
+        opts["baseURL"] = f"http://127.0.0.1:{P['port']}/{key}"
+        providers[key]["options"] = opts
+        changed.append(key)
+
+    _dump_json(P["routes"], routes)
+    _write_cfg(P["config_path"], cfg)
+    settings = load_settings()
+    settings["proxy_port"] = P["port"]
+    settings["proxy_active"] = True
+    save_settings(settings)
+
+    started = _ensure_proxy_running(P)
+    print(f"proxy ON for: {', '.join(changed)}" if changed
+          else f"already proxied: {', '.join(routes)}")
+    print(f"  daemon: {'started' if started else 'already running'} on 127.0.0.1:{P['port']} "
+          f"(pid {_read_pid(P['pid'])})")
+    print(f"  logs  : {P['logs']}")
+    print("  reload OpenCode to route through the proxy.")
+    _suggest([("Read a logged exchange (id shown by the proxy / in proxy_logs/index.jsonl)",
+               "omw proxy read <id>"),
+              ("Turn the proxy off", "omw proxy off")])
+
+
+def cmd_proxy_off(args):
+    P = _proxy_paths(args)
+    cfg = oc_load_config(P["config_path"])
+    providers = cfg.get("provider") or {}
+    routes = _read_json_file(P["routes"]) or {}
+    if not routes:
+        print("proxy is not on (no proxy_routes.json).")
+        _stop_proxy(P)   # tidy any stray daemon/pid
+        return
+
+    if args.target:
+        want = set(_providers_for_target(cfg, args.target))
+        keys = [k for k in list(routes) if k in want]
+        if not keys:
+            print(f"'{args.target}' is not currently proxied. Proxied: {', '.join(routes)}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        keys = list(routes)
+
+    for k in keys:
+        if k in providers and k in routes:
+            (providers[k].setdefault("options", {}))["baseURL"] = routes[k]
+        routes.pop(k, None)
+    _write_cfg(P["config_path"], cfg)
+    print(f"proxy OFF for: {', '.join(keys)}")
+
+    if routes:
+        _dump_json(P["routes"], routes)
+        print(f"  still proxied: {', '.join(routes)}")
+    else:
+        _stop_proxy(P)
+        for f in (P["routes"], P["backup"]):
+            if os.path.exists(f):
+                os.remove(f)
+        settings = load_settings()
+        settings["proxy_active"] = False
+        save_settings(settings)
+        print("  all models unproxied; daemon stopped, config restored.")
+    print("  reload OpenCode to pick up the change.")
+
+
+def _stop_proxy(P):
+    pid = _read_pid(P["pid"])
+    if pid is not None:
+        try:
+            os.kill(pid, 15)   # SIGTERM (Windows: terminates regardless of sig)
+        except OSError:
+            pass
+    if os.path.exists(P["pid"]):
+        os.remove(P["pid"])
+
+
+def cmd_proxy_status(args):
+    P = _proxy_paths(args)
+    cfg = oc_load_config(P["config_path"])
+    providers = cfg.get("provider") or {}
+    pid = _proxy_pid(P)
+    print(f"daemon : {('running (pid ' + str(pid) + ')') if pid else 'not running'} "
+          f"on 127.0.0.1:{P['port']}")
+    print(f"logs   : {P['logs']}")
+    proxied = [k for k, v in providers.items()
+               if _is_loopback((v.get("options") or {}).get("baseURL", ""))]
+    print(f"proxied: {', '.join(proxied) or '(none)'}")
+    if not pid and proxied:
+        _suggest([("Restart the daemon", "omw proxy on")])
+
+
+def cmd_proxy_replay(args):
+    P = _proxy_paths(args)
+    rid = args.target
+    if not rid:
+        print("usage: omw proxy replay <request_id> [--output-curl]", file=sys.stderr)
+        sys.exit(1)
+    req, _res = proxy.find_pair(P["logs"], rid)
+    if not req:
+        print(f"request '{rid}' not found in {P['logs']}", file=sys.stderr)
+        sys.exit(1)
+    if args.output_curl:
+        print(proxy.build_curl(req))
+        return
+    method = req.get("method", "GET")
+    url = req.get("url", "")
+    headers = {k: v for k, v in (req.get("headers") or {}).items()
+               if k.lower() not in ("host", "content-length", "accept-encoding", "connection")}
+    body = req.get("body") or ""
+    print(f"replaying {rid}: {method} {url}\n")
+    try:
+        r = urllib.request.Request(url, data=body.encode("utf-8") if body else None,
+                                   headers=headers, method=method)
+        with urllib.request.urlopen(r, timeout=120) as resp:
+            status, out = resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, out = e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        print(f"replay failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"-> {status}\n{out}")
+
+
+def cmd_proxy_read(args):
+    P = _proxy_paths(args)
+    rid = args.target
+    if not rid:
+        print("usage: omw proxy read <request_id>", file=sys.stderr)
+        sys.exit(1)
+    req, res = proxy.find_pair(P["logs"], rid)
+    if not req:
+        print(f"request '{rid}' not found in {P['logs']}", file=sys.stderr)
+        sys.exit(1)
+    use_color = (sys.stdout.isatty() and not getattr(args, "no_color", False)
+                 and not os.environ.get("NO_COLOR"))
+    print(proxy.render_read(req, res, use_color=use_color))
+
+
+# ============================================================================
+# Main entry point
+# ============================================================================
 def main(argv=None):
     ap = _build_parser()
     args = ap.parse_args(argv)

@@ -89,6 +89,15 @@ Top-to-bottom, the meaningful sections:
   re-emitted `plugins/dgx-sampling.js` via `_write_cfg`/`_write_plugin`); declared configs
   are never touched. `AGENT_ROLE` maps an agent name → its preset role for `omw models
   --role`. `[capabilities] concurrency` in a config seeds the team `task_budget` default.
+- **Debug proxy** — `utils/omw_proxy.py` (loaded by path as `proxy`) is a threaded stdlib
+  HTTP proxy: **path-prefix routing** (`/​<provider>​/…` → real upstream via
+  `proxy_routes.json`, re-read per request), **SSE streaming passthrough** that tees the
+  stream into the log, short 7-char ids, flat `proxy_logs/`. Importable helpers:
+  `proxy_logs_dir` / `find_pair` / `build_curl` / `render_read`. The `cmd_proxy_*` handlers
+  in `omodel-wire.py` rewrite live `dgx-` provider baseURLs to the proxy and back (backup
+  `.proxy-bak`, map `proxy_routes.json`, pid `.omw-proxy.pid`); daemon stdout goes to a
+  **file** (never a PIPE — an unread PIPE stalls the proxy). Streaming + threading + the
+  file redirect are the fixes for the earlier "proxy dies" behavior.
 - **Invariant:** tests build their own args namespace and call `oc_sync`/`cmd_*` directly
   (not through `main()`), so keep arg **dest-names** and function signatures stable.
   `__version__` is near the top of the file.
