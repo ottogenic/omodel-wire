@@ -102,7 +102,7 @@ def make_args(tmpdir, **over):
     writing into tmpdir. Override any field via kwargs."""
     a = types.SimpleNamespace(
         config=os.path.join(tmpdir, "opencode.json"),
-        _hosts=["192.168.50.101"], _ports=[8000], timeout=1.0,
+        _hosts=["192.0.2.101"], _ports=[8000], timeout=1.0,
         no_vision_probe=True, vision_probe_all=False,
         profiles=True, no_reasoning_probe=False, no_tool_call=False,
         set_default=None, allow_empty=False, no_sampling_plugin=False,
@@ -123,7 +123,7 @@ def make_args(tmpdir, **over):
 
 class FakeProbes:
     """Context manager that swaps the network probes for canned answers so the whole
-    sync runs offline. `model` is served at 192.168.50.101:8000."""
+    sync runs offline. `model` is served at 192.0.2.101:8000."""
 
     def __init__(self, model="Qwen3.6-27B-NVFP4", max_len=262144, vision=False):
         self.model, self.max_len, self.vision = model, max_len, vision
@@ -134,7 +134,7 @@ class FakeProbes:
             self._saved[name] = getattr(m, name)
 
         def probe(host, port, timeout):
-            if (host, port) == ("192.168.50.101", 8000):
+            if (host, port) == ("192.0.2.101", 8000):
                 return [{"id": self.model, "max_model_len": self.max_len}]
             return []
 
@@ -412,7 +412,7 @@ class TestProviders(unittest.TestCase):
     def test_tool_call_declared_by_default(self):
         with FakeProbes():
             providers, refs, caps = m.oc_build_providers(
-                ["192.168.50.101"], [8000], 1.0, self.SD,
+                ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["tool_call"])
@@ -421,7 +421,7 @@ class TestProviders(unittest.TestCase):
     def test_tool_call_can_be_disabled(self):
         with FakeProbes():
             providers, _, _ = m.oc_build_providers(
-                ["192.168.50.101"], [8000], 1.0, self.SD,
+                ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, tool_call=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertNotIn("tool_call", entry)
@@ -429,7 +429,7 @@ class TestProviders(unittest.TestCase):
     def test_server_default_sets_temperature_false(self):
         with FakeProbes():
             providers, _, _ = m.oc_build_providers(
-                ["192.168.50.101"], [8000], 1.0, self.SD,
+                ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertIs(entry["temperature"], False)
@@ -437,7 +437,7 @@ class TestProviders(unittest.TestCase):
     def test_profiles_keeps_temperature_true(self):
         with FakeProbes():
             providers, _, caps = m.oc_build_providers(
-                ["192.168.50.101"], [8000], 1.0, self.SD,
+                ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=True, recipes=FIXTURE_CONFIGS, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertIs(entry["temperature"], True)
@@ -448,7 +448,7 @@ class TestProviders(unittest.TestCase):
     def test_vision_writes_attachment_and_modalities(self):
         with FakeProbes():
             providers, _, _ = m.oc_build_providers(
-                ["192.168.50.101"], [8000], 1.0, self.SD,
+                ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, recipes=FIXTURE_VISION, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["attachment"])
@@ -680,19 +680,19 @@ class TestSharedHosts(unittest.TestCase):
     def test_parses_alias_bare_and_user_at(self):
         self._write(
             "# managed by install\n"
-            "dgx-1\totto@192.168.50.101\n"      # alias<TAB>user@host
-            "otto@192.168.50.102\n"              # bare user@host
-            "192.168.50.103\n"                   # bare host
+            "dgx-1\totto@192.0.2.101\n"      # alias<TAB>user@host
+            "otto@192.0.2.102\n"              # bare user@host
+            "192.0.2.103\n"                   # bare host
             "\n"
         )
         self.assertEqual(
             m.load_shared_hosts(),
-            ["192.168.50.101", "192.168.50.102", "192.168.50.103"],
+            ["192.0.2.101", "192.0.2.102", "192.0.2.103"],
         )
 
     def test_dedup_by_host(self):
-        self._write("dgx-1\totto@192.168.50.101\nn1\troot@192.168.50.101\n")
-        self.assertEqual(m.load_shared_hosts(), ["192.168.50.101"])
+        self._write("dgx-1\totto@192.0.2.101\nn1\troot@192.0.2.101\n")
+        self.assertEqual(m.load_shared_hosts(), ["192.0.2.101"])
 
     def test_missing_file_is_empty(self):
         m.HOSTS_FILE = os.path.join(self._dir, "nope")
@@ -1007,7 +1007,7 @@ class TestBareModelNameResolution(unittest.TestCase):
                 name = "team"
                 set_model = "Qwen3.6-35B-A3B-NVFP4"
                 _settings = {}
-                _hosts = ["192.168.50.101"]
+                _hosts = ["192.0.2.101"]
                 _ports = [8000]
 
             buf = io.StringIO()
@@ -1135,9 +1135,9 @@ class TestProxyCli(unittest.TestCase):
         path = os.path.join(self._tmp, "opencode.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"provider": {
-                "dgx-n1-8000": {"options": {"baseURL": "http://192.168.50.101:8000/v1"},
+                "dgx-n1-8000": {"options": {"baseURL": "http://192.0.2.101:8000/v1"},
                                 "models": {"qwen/qwen3.6-35b": {}}},
-                "dgx-n2-8000": {"options": {"baseURL": "http://192.168.50.102:8000/v1"},
+                "dgx-n2-8000": {"options": {"baseURL": "http://192.0.2.102:8000/v1"},
                                 "models": {"qwen3-coder-next-nvfp4": {}}}}}, f)
         return path
 
@@ -1159,11 +1159,11 @@ class TestProxyCli(unittest.TestCase):
         prov = self._load(cfg)["provider"]
         self.assertTrue(all(m._is_loopback(p["options"]["baseURL"]) for p in prov.values()))
         routes = self._load(os.path.join(self._tmp, "proxy_routes.json"))
-        self.assertEqual(routes["dgx-n1-8000"], "http://192.168.50.101:8000/v1")
+        self.assertEqual(routes["dgx-n1-8000"], "http://192.0.2.101:8000/v1")
         with quiet():
             m.cmd_proxy_off(self._args(cfg))
         prov = self._load(cfg)["provider"]
-        self.assertEqual(prov["dgx-n1-8000"]["options"]["baseURL"], "http://192.168.50.101:8000/v1")
+        self.assertEqual(prov["dgx-n1-8000"]["options"]["baseURL"], "http://192.0.2.101:8000/v1")
         self.assertFalse(os.path.exists(os.path.join(self._tmp, "proxy_routes.json")))
 
     def test_on_single_model_only(self):

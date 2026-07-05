@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Genericized example host addresses** to the RFC 5737 documentation range (`192.0.2.0/24`)
+  in `DEFAULT_HOSTS`/`HOST_LABELS`, docstrings, and tests — the shipped fallback no longer
+  hardcodes a specific private LAN. Configure real hosts via `omm install` /
+  `~/.config/otools/hosts` as before. Also ignore `wire.json`/`hosts` defensively.
 - **`AGENTS.md` slimmed to invariants + a skill index; task detail moved to lazy-loaded
   skills.** The full `AGENTS.md` was injected into every model request (~4.4k tokens) even for
   trivial turns. It's now a lean always-on core; the layout / OpenCode-reference / contributing

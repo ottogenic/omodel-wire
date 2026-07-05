@@ -9,6 +9,8 @@ venv/
 *.local.json
 .env
 hf_token
+wire.json
+hosts
 
 # OS / editor cruft
 .DS_Store
