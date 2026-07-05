@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# git-sync-main — bring THIS clone's `main` up to date with origin (all merged PRs).
+# "Make sure this is up to date." Fetches (pruning deleted remote branches), switches
+# to main if needed, and fast-forwards it. Refuses inside a linked worktree and on a
+# dirty tree, so it can't disturb feature work — run it in your MAIN folder.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "Not inside a git repository." >&2; exit 1; }
+
+# The main clone has a .git DIRECTORY; a linked worktree has a .git FILE. Refuse in a
+# worktree: 'main' can't even be checked out there, and syncing belongs in the main clone.
+if [ ! -d "$repo_root/.git" ]; then
+  echo "This is a linked worktree, not the main clone — nothing to sync here." >&2
+  echo "Run git-sync-main in your main folder (the first entry of 'git worktree list')." >&2
+  exit 1
+fi
+
+# Never disturb uncommitted work.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Working tree has uncommitted changes — commit or stash them first:" >&2
+  git status --short >&2
+  exit 1
+fi
+
+echo "Fetching origin (pruning deleted branches)..."
+git fetch --prune origin
+
+cur="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$cur" != "main" ]; then
+  echo "Switching from '$cur' to main."
+  git switch main
+fi
+
+before="$(git rev-parse --short HEAD)"
+if git merge --ff-only origin/main; then
+  git worktree prune
+  after="$(git rev-parse --short HEAD)"
+  if [ "$before" = "$after" ]; then
+    echo "✓ Already up to date @ $after"
+  else
+    echo "✓ Updated $before -> $after:"
+    git --no-pager log --oneline "$before..$after" | sed 's/^/    /'
+  fi
+else
+  echo "Local main has diverged from origin/main (not a fast-forward)." >&2
+  echo "You have local commit(s) on main that aren't on origin — reconcile manually:" >&2
+  git --no-pager log --oneline --left-right "origin/main...main" | sed 's/^/    /' >&2
+  exit 1
+fi
