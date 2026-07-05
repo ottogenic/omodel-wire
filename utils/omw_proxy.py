@@ -301,6 +301,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _handle(self):
         try:
             self._proxy()
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            pass                                     # client hung up (incl. mid-stream write) — nothing to send
         except Exception as e:                       # never let one request kill the thread
             self._fail(502, f"omw-proxy error: {e}")
 
