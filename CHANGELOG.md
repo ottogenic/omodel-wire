@@ -7,7 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
-- **`./new-worktree` gains teardown**: `--delete <folder>` (aliases `--undo`/`--rm`) removes the
+- **New `git-sync-main` helper + renamed `new-worktree` → `git-new-worktree`.** `./git-sync-main`
+  brings the current clone's `main` up to date with origin (fetch --prune → switch to main →
+  fast-forward) — "make sure this is up to date." It **refuses inside a linked worktree and on a
+  dirty tree**, so it never disturbs feature work. Both helpers now carry the `git-` prefix (also
+  usable as `git new-worktree` / `git sync-main` when the repo is on `PATH`).
+- **`./git-new-worktree` gains teardown**: `--delete <folder>` (aliases `--undo`/`--rm`) removes the
   worktree + its **local** branch only — **safe by default**: it never touches an open PR or the
   remote branch, so a submitted-but-unmerged PR (or a merged one) is untouched. `--abort <folder>`
   is the throw-it-all-away version — it also closes the open PR + deletes the remote branch. `-y`
