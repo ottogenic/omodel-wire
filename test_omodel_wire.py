@@ -411,7 +411,7 @@ class TestProviders(unittest.TestCase):
 
     def test_tool_call_declared_by_default(self):
         with FakeProbes():
-            providers, refs, caps = m.oc_build_providers(
+            providers, refs, caps, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -420,7 +420,7 @@ class TestProviders(unittest.TestCase):
 
     def test_tool_call_can_be_disabled(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, tool_call=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -428,7 +428,7 @@ class TestProviders(unittest.TestCase):
 
     def test_server_default_sets_temperature_false(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -436,7 +436,7 @@ class TestProviders(unittest.TestCase):
 
     def test_profiles_keeps_temperature_true(self):
         with FakeProbes():
-            providers, _, caps = m.oc_build_providers(
+            providers, _, caps, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=True, recipes=FIXTURE_CONFIGS, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -447,7 +447,7 @@ class TestProviders(unittest.TestCase):
 
     def test_vision_writes_attachment_and_modalities(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, recipes=FIXTURE_VISION, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -483,6 +483,29 @@ class TestSyncEndToEnd(unittest.TestCase):
             entry = cfg["provider"]["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
+
+    def test_non_reasoning_only_fleet_still_builds_roster(self):
+        # Regression: a fleet with NO reasoning models must still rebuild the roster
+        # onto a live model, not leave the agents empty/stale pointing at a model
+        # that's no longer served (the "model ... is not valid" bug).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+            sampling = m.build_sampling(args)
+            with FakeProbes(model="qwen3-coder-next-fp8"), quiet():  # matches no config -> non-reasoning
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(args.config, encoding="utf-8") as f:
+                cfg = json.load(f)
+            ag = cfg["agent"]
+            for k in ("research", "code", "agent", "team",
+                      "agent-plan", "agent-code", "agent-instruct"):
+                self.assertIn(k, ag, f"{k} missing -> roster not rebuilt for a non-reasoning fleet")
+            # local agents point at the LIVE model + an existing provider (not a stale ref)
+            for k in ("code", "agent", "agent-plan", "agent-code", "agent-instruct"):
+                ref = ag[k]["model"]
+                self.assertIn("qwen3-coder-next-fp8", ref, f"{k} not on the live model: {ref}")
+                self.assertIn(ref.split("/", 1)[0], cfg["provider"],
+                              f"{k} points at a non-existent provider: {ref}")
 
     def test_agent_ordering_visible_then_hidden_then_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:

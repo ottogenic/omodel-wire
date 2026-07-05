@@ -38,6 +38,13 @@ All notable changes to this project are documented here. The format follows
   supported mechanism — the old `tools` field is deprecated in OpenCode.)
 
 ### Added
+- **`default_models.json` — user-editable model preferences for agents/subagents.** `omw sync`
+  selects the highest-preferred *available* model from `default_models.json` for each
+  agent/subagent (ordered lists; fall back to the first available model if none match).
+  **The roster is now rebuilt from the live endpoints even when no reasoning model is running**
+  — a coder-only fleet (all non-reasoning) gets a full, valid roster instead of leaving agents
+  pointing at a model that's no longer served (which OpenCode rejected as "not valid").
+  Per-model sampling is emitted for non-reasoning models too. Template auto-created on first run.
 - **`omw proxy` — a debug proxy that logs OpenCode ↔ model traffic** (stdlib only):
   - `omw proxy on [<model>]` — route live models through the proxy with **no `--upstream`
     needed**: rewrites the `dgx-` provider baseURLs to `127.0.0.1:<port>/<route>` and maps
