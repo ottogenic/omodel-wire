@@ -484,6 +484,29 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
+    def test_non_reasoning_only_fleet_still_builds_roster(self):
+        # Regression: a fleet with NO reasoning models must still rebuild the roster
+        # onto a live model, not leave the agents empty/stale pointing at a model
+        # that's no longer served (the "model ... is not valid" bug).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+            sampling = m.build_sampling(args)
+            with FakeProbes(model="qwen3-coder-next-fp8"), quiet():  # matches no config -> non-reasoning
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(args.config, encoding="utf-8") as f:
+                cfg = json.load(f)
+            ag = cfg["agent"]
+            for k in ("research", "code", "agent", "team",
+                      "agent-plan", "agent-code", "agent-instruct"):
+                self.assertIn(k, ag, f"{k} missing -> roster not rebuilt for a non-reasoning fleet")
+            # local agents point at the LIVE model + an existing provider (not a stale ref)
+            for k in ("code", "agent", "agent-plan", "agent-code", "agent-instruct"):
+                ref = ag[k]["model"]
+                self.assertIn("qwen3-coder-next-fp8", ref, f"{k} not on the live model: {ref}")
+                self.assertIn(ref.split("/", 1)[0], cfg["provider"],
+                              f"{k} points at a non-existent provider: {ref}")
+
     def test_agent_ordering_visible_then_hidden_then_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._sync(tmp)

@@ -1615,12 +1615,20 @@ def oc_sync(args, sampling, detected_installed):
     matched_recipe = None
     env_notes = []
     team_budget = None
-    if args.profiles and reasoning_caps:
+    if args.profiles and available_models:
+        # Build the roster from whatever is LIVE. Prefer a reasoning model for the
+        # primary ref when one exists; otherwise fall back to any live model (e.g. a
+        # coder-only fleet) so the roster is rebuilt from the live endpoints instead
+        # of leaving stale agents pointing at a model that is no longer served.
         cur = cfg.get("model")
-        agent_model_ref = cur if cur in reasoning_caps else sorted(reasoning_caps)[0]
-        caps = reasoning_caps[agent_model_ref]
+        pool = reasoning_caps if reasoning_caps else available_models
+        agent_model_ref = cur if cur in pool else sorted(pool)[0]
         model_id = agent_model_ref.split("/", 1)[1] if "/" in agent_model_ref else agent_model_ref
         matched_recipe = match_recipe(model_id, configs)
+        # Reasoning models carry declared caps; a non-reasoning model derives them
+        # from its config (caps_from_capabilities handles a None/{} recipe -> a valid
+        # non-reasoning caps dict, so build never KeyErrors on an unmatched model).
+        caps = reasoning_caps.get(agent_model_ref) or caps_from_capabilities(matched_recipe or {})
         if matched_recipe:
             agents, agent_sampling = oc_build_recipe_agents(
                 agent_model_ref, matched_recipe, caps,
@@ -1655,14 +1663,16 @@ def oc_sync(args, sampling, detected_installed):
         default_models = load_default_models()
         agents = _apply_default_models(agents, default_models, reasoning_caps, available_models)
 
-        # Per-(model, agent) sampling: one table per discovered reasoning model, so
-        # switching an agent onto another model applies THAT model's card sampling
-        # (10+ models with different recommended temps each get their own vector).
+        # Per-(model, agent) sampling: one table per discovered model, so switching
+        # an agent onto another model applies THAT model's card sampling (10+ models
+        # with different recommended temps each get their own vector). Covers
+        # non-reasoning models too, so a coder-only fleet still gets its sampling.
         _rep_det = sampling.get("repetition_detection")
         per_model_sampling = {}
-        for _mref, _mcaps in reasoning_caps.items():
+        for _mref in available_models:
             _mid = _mref.split("/", 1)[1] if "/" in _mref else _mref
             _mrec = match_recipe(_mid, configs)
+            _mcaps = reasoning_caps.get(_mref) or caps_from_capabilities(_mrec or {})
             if _mrec:
                 _, _msamp = oc_build_recipe_agents(_mref, _mrec, _mcaps, _rep_det)
             else:
@@ -1800,17 +1810,18 @@ def oc_sync(args, sampling, detected_installed):
     print(f"\nDiscovered {len(refs)} model(s); removed {len(removed)} stale provider(s).")
     if args.profiles:
         rc = len(reasoning_caps)
-        if not rc:
-            print("Profiles mode: no reasoning models found")
-        elif matched_recipe:
-            print(f"Profiles mode: recipe match for {agent_model_ref}")
-            print(f"  source: {matched_recipe.get('source','(recipe)')}")
-            _print_roster(agents)
-            for n in env_notes:
-                print(f"  output: {n}")
+        if not agents:
+            print("Profiles mode: no models discovered")
         else:
-            print(f"Profiles mode: {rc} reasoning model(s); no recipe -> generic Qwen numbers")
-            print(f"  model: {agent_model_ref}")
+            if not rc:
+                print(f"Profiles mode: no reasoning models live -> roster on "
+                      f"{agent_model_ref} (per default_models.json)")
+            elif matched_recipe:
+                print(f"Profiles mode: recipe match for {agent_model_ref}")
+                print(f"  source: {matched_recipe.get('source','(recipe)')}")
+            else:
+                print(f"Profiles mode: {rc} reasoning model(s); no recipe -> generic Qwen numbers")
+                print(f"  model: {agent_model_ref}")
             _print_roster(agents)
             for n in env_notes:
                 print(f"  output: {n}")
