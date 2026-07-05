@@ -2264,25 +2264,38 @@ def cmd_models(args):
         for mid in (pv.get("models") or {}):
             live_proxied[mid] = prox
     rows = []
+    total = 0
+    show_all = getattr(args, "all", False)
     for r in configs.get("recipes", []):
+        total += 1
         title = (r.get("match") or ["?"])[0]
         cap = r.get("capabilities", {}) or {}
         pats = r.get("match") or []
         pats = [pats] if isinstance(pats, str) else pats
         matched = [mid for mid in live_proxied
                    if any(str(p).lower() in mid.lower() for p in pats)]
+        if not matched and not show_all:
+            continue  # LIVE-only by default; --all shows the full catalogue
         live = "yes" if matched else "-"
         proxy = ("on" if any(live_proxied[m] for m in matched) else "off") if matched else "-"
         served = ", ".join(matched) if matched else "-"
         rows.append((title, _fmt(bool(cap.get("reasoning"))), _fmt(bool(cap.get("vision"))),
                      live, proxy, served, r.get("_file", "")))
-    if not rows:
+    if not total:
         print("No model configs found.")
         _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
         return
-    print("Models declared in the omodel-manager configs (LIVE/PROXY/SERVED = live state):\n")
+    if not rows:  # configs exist, but nothing live and no --all
+        print("No models are live right now.")
+        _suggest([("Show every declared model", "omw models --all")])
+        return
+    scope = "declared in the omodel-manager configs" if show_all else "live now"
+    hidden = "" if show_all else f"  ({total - len(rows)} more not live; --all to show)"
+    print(f"Models {scope} (LIVE/PROXY/SERVED = live state):{hidden}\n")
     _table(("MODEL", "REASON", "VISION", "LIVE", "PROXY", "SERVED", "CONFIG"), rows)
-    _suggest([("Show a model's per-role sampling", "omw models <name>")])
+    _suggest([("Show a model's per-role sampling", "omw models <name>"),
+              ("List every declared model", "omw models --all")] if not show_all
+             else [("Show a model's per-role sampling", "omw models <name>")])
 
 
 def _find_model_config_live(recipe, live_ids):
@@ -2586,6 +2599,8 @@ def _build_parser():
     pm = sub.add_parser("models", parents=[io_parent],
                         help="list models; show/tweak per-role sampling (`omw models qwen`)")
     pm.add_argument("name", nargs="?", help="model name to show or edit")
+    pm.add_argument("--all", action="store_true",
+                    help="list every declared model, not just the live ones")
     pm.add_argument("--role", choices=ROLE_ORDER, help="which role to edit (with --set-*)")
     pm.add_argument("--set-temperature", type=float, metavar="T", help="live-set temperature")
     pm.add_argument("--set-thinking", type=_boolish, metavar="BOOL",
