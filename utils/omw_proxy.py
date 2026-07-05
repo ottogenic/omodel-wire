@@ -8,7 +8,7 @@ through untouched so OpenCode's SSE UI keeps working.
 
 Routing is by PATH PREFIX: OpenCode's provider baseURL is rewritten to
 `http://127.0.0.1:<port>/<route>`, and `proxy_routes.json` maps `<route>` -> the
-real upstream baseURL (e.g. http://192.168.50.101:8000/v1). The proxy strips the
+real upstream baseURL (e.g. http://192.0.2.101:8000/v1). The proxy strips the
 route prefix and forwards to `<real baseURL><rest of path>`. This routes every
 endpoint (GET /models, POST /chat/completions) to the right model, and lets omw
 toggle models on/off independently by editing the map (re-read per request).

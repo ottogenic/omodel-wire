@@ -60,15 +60,17 @@ except (OSError, ImportError, AttributeError):
     proxy = None
 
 # ----------------------------------------------------------------------------
-# DGX endpoint discovery defaults -- edit if your layout changes
+# Endpoint discovery defaults -- placeholder examples only. Set your real hosts
+# via `omm install` / `~/.config/otools/hosts`; these are the no-store fallback.
+# (192.0.2.0/24 is the RFC 5737 documentation range -- replace with your own.)
 # ----------------------------------------------------------------------------
-DEFAULT_HOSTS = ["192.168.50.101", "192.168.50.102"]
+DEFAULT_HOSTS = ["192.0.2.101", "192.0.2.102"]
 # DEFAULT_PORTS = [8000, 8001, 8002, 8888, 30000, 11434]  # 11434 = ollama
 DEFAULT_PORTS = [8000, 8001, 8002]
 HOST_LABELS = {                       # friendly short labels for provider keys
-    "192.168.50.101": "n1",
-    "192.168.50.102": "n2",
-    "192.168.50.103": "n3",
+    "192.0.2.101": "n1",
+    "192.0.2.102": "n2",
+    "192.0.2.103": "n3",
 }
 # Shared with omodel-manager: `omm install`/`ps` manage this file; omw reads it so
 # both tools see the same fleet. Absent/empty -> fall back to DEFAULT_HOSTS.
