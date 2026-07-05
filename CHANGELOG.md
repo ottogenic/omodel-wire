@@ -35,6 +35,11 @@ All notable changes to this project are documented here. The format follows
   supported mechanism — the old `tools` field is deprecated in OpenCode.)
 
 ### Added
+- **`default_models.json` — user-editable model preferences for agents/subagents.** When
+  `omw sync` discovers multiple models, it now selects the highest-preferred available model
+  from `default_models.json` for each agent/subagent. Non-reasoning models are now included
+  in the selection pool. Template auto-created on first run with `qwen3-coder-next-fp8` for
+  all managed agents. Preferences are ordered lists; fallback to first available if no match.
 - **`omw proxy` — a debug proxy that logs OpenCode ↔ model traffic** (stdlib only):
   - `omw proxy on [<model>]` — route live models through the proxy with **no `--upstream`
     needed**: rewrites the `dgx-` provider baseURLs to `127.0.0.1:<port>/<route>` and maps

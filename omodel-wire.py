@@ -252,6 +252,158 @@ MANAGED_AGENTS = {"research", "code", "agent", "team",
                   "plan", "build", "instruct", "architect", "reason", "chat", "fast",
                   "general", "webdev", "agentic"}
 
+# Default models config file (user preferences for agent/subagent models)
+DEFAULT_MODELS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default_models.json")
+
+
+def load_default_models():
+    """Load default_models.json preferences. Returns {agents: {...}, subagents: {...}}.
+    Auto-creates with template if missing. Never overwrites existing user config."""
+    if not os.path.exists(DEFAULT_MODELS_FILE):
+        return _create_default_models_template()
+    try:
+        with open(DEFAULT_MODELS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return _create_default_models_template()
+        if "agents" not in data:
+            data["agents"] = {}
+        if "subagents" not in data:
+            data["subagents"] = {}
+        return data
+    except (json.JSONDecodeError, OSError):
+        return _create_default_models_template()
+
+
+def _create_default_models_template():
+    """Create default_models.json with template (all agents set to qwen3-coder-next-fp8)."""
+    template = {
+        "agents": {
+            "Team": ["qwen3-coder-next-fp8"],
+            "research": ["qwen3-coder-next-fp8"],
+            "code": ["qwen3-coder-next-fp8"],
+            "agent": ["qwen3-coder-next-fp8"]
+        },
+        "subagents": {
+            "agent-plan": ["qwen3-coder-next-fp8"],
+            "agent-code": ["qwen3-coder-next-fp8"],
+            "agent-instruct": ["qwen3-coder-next-fp8"]
+        }
+    }
+    try:
+        with open(DEFAULT_MODELS_FILE, "w", encoding="utf-8") as f:
+            json.dump(template, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
+    return template
+
+
+def get_preferred_model(available_models, preferences):
+    """Pick the best model from preferences that's in available_models.
+    
+    Args:
+        available_models: list of model IDs available from the endpoint
+        preferences: list of preferred model IDs (in order of preference)
+    
+    Returns:
+        The first preference that's in available_models, or the first available model,
+        or None if no models available.
+    """
+    if not available_models:
+        return None
+    if not preferences:
+        return available_models[0]
+    
+    available_set = set(available_models)
+    for pref in preferences:
+        if pref in available_set:
+            return pref
+    return available_models[0]
+
+
+def _apply_default_models(agents, default_models, reasoning_caps, available_models=None):
+    """Apply user's default model preferences to agents based on available models.
+    
+    Args:
+        agents: dict of agents from oc_build_agents/oc_build_recipe_agents
+        default_models: loaded default_models.json data
+        reasoning_caps: dict mapping model_ref -> caps (for reasoning models)
+        available_models: dict mapping model_ref -> {} (all models, including non-reasoning)
+    
+    Returns:
+        agents dict with models updated according to preferences
+    """
+    if not agents:
+        return agents
+    
+    # Use available_models if provided, otherwise fall back to reasoning_caps
+    if available_models:
+        model_refs = list(available_models.keys())
+    elif reasoning_caps:
+        model_refs = list(reasoning_caps.keys())
+    else:
+        return agents
+    
+    if not model_refs:
+        return agents
+    
+    # Build list of available model IDs
+    available_model_ids = []
+    for model_ref in model_refs:
+        # Extract just the model ID part (after /)
+        model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+        available_model_ids.append(model_id)
+    
+    if not available_model_ids:
+        return agents
+    
+    # Apply preferences for each agent
+    agents_copy = dict(agents)
+    for agent_name, agent_cfg in agents_copy.items():
+        if not isinstance(agent_cfg, dict):
+            continue
+        
+        # Determine which preferences to use (agents or subagents)
+        if agent_cfg.get("mode") == "subagent":
+            prefs = (default_models.get("subagents") or {}).get(agent_name, [])
+        else:
+            prefs = (default_models.get("agents") or {}).get(agent_name, [])
+        
+        if prefs:
+            preferred = get_preferred_model(available_model_ids, prefs)
+            if preferred:
+                # Find the full model_ref for the preferred model
+                # Prefer reasoning_caps if the model is reasoning, otherwise use available_models
+                model_ref = None
+                if reasoning_caps and preferred in available_model_ids:
+                    for ref, caps in reasoning_caps.items():
+                        mid = ref.split("/", 1)[1] if "/" in ref else ref
+                        if mid == preferred:
+                            model_ref = ref
+                            break
+                
+                if not model_ref and available_models:
+                    for ref in available_models.keys():
+                        mid = ref.split("/", 1)[1] if "/" in ref else ref
+                        if mid == preferred:
+                            model_ref = ref
+                            break
+                
+                if model_ref:
+                    agent_cfg["model"] = model_ref
+                else:
+                    # Fallback: keep the provider from current model
+                    current_ref = agent_cfg.get("model", "")
+                    if "/" in current_ref:
+                        provider = current_ref.split("/", 1)[0]
+                        agent_cfg["model"] = f"{provider}/{preferred}"
+                    else:
+                        agent_cfg["model"] = preferred
+    
+    return agents_copy
+
+
 # System prompt for the `team` lead/orchestrator. Written to a file next to
 # opencode.json and referenced via {file:...}; edit it there to tune behavior.
 TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You have NO tools of your own: you
@@ -899,6 +1051,7 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
     providers = {}
     refs = []
     reasoning_caps = {}
+    available_models = {}
     for host in hosts:
         for port in ports:
             found = probe(host, port, timeout)
@@ -962,6 +1115,8 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
 
                 model_entries[m["id"]] = entry
                 refs.append(f"{key}/{m['id']}")
+                # Track all available models (not just reasoning) for default model selection
+                available_models[f"{key}/{m['id']}"] = {}
 
             providers[key] = {
                 "npm": "@ai-sdk/openai-compatible",
@@ -972,7 +1127,7 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
             if verbose:
                 ids = ", ".join(m["id"] for m in found)
                 print(f"  [up]   {host}:{port}  ->  {ids}")
-    return providers, refs, reasoning_caps
+    return providers, refs, reasoning_caps, available_models
 
 
 def oc_sampling_plugin_js(sampling):
@@ -1416,7 +1571,7 @@ def oc_sync(args, sampling, detected_installed):
 
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
     print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
-    providers, refs, reasoning_caps = oc_build_providers(
+    providers, refs, reasoning_caps, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling,
         profiles=args.profiles, tool_call=not args.no_tool_call, recipes=configs)
 
@@ -1495,6 +1650,10 @@ def oc_sync(args, sampling, detected_installed):
         else:
             agents, agent_sampling = oc_build_agents(
                 agent_model_ref, caps, sampling.get("repetition_detection"))
+
+        # Apply default models preferences to agents
+        default_models = load_default_models()
+        agents = _apply_default_models(agents, default_models, reasoning_caps, available_models)
 
         # Per-(model, agent) sampling: one table per discovered reasoning model, so
         # switching an agent onto another model applies THAT model's card sampling

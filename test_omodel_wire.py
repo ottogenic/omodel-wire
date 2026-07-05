@@ -411,7 +411,7 @@ class TestProviders(unittest.TestCase):
 
     def test_tool_call_declared_by_default(self):
         with FakeProbes():
-            providers, refs, caps = m.oc_build_providers(
+            providers, refs, caps, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -420,7 +420,7 @@ class TestProviders(unittest.TestCase):
 
     def test_tool_call_can_be_disabled(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, tool_call=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -428,7 +428,7 @@ class TestProviders(unittest.TestCase):
 
     def test_server_default_sets_temperature_false(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -436,7 +436,7 @@ class TestProviders(unittest.TestCase):
 
     def test_profiles_keeps_temperature_true(self):
         with FakeProbes():
-            providers, _, caps = m.oc_build_providers(
+            providers, _, caps, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=True, recipes=FIXTURE_CONFIGS, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
@@ -447,7 +447,7 @@ class TestProviders(unittest.TestCase):
 
     def test_vision_writes_attachment_and_modalities(self):
         with FakeProbes():
-            providers, _, _ = m.oc_build_providers(
+            providers, _, _, _ = m.oc_build_providers(
                 ["192.0.2.101"], [8000], 1.0, self.SD,
                 profiles=False, recipes=FIXTURE_VISION, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
