@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows
   prompt overhead substantially with no loss of guidance.
 
 ### Fixed
+- **`omw proxy` no longer logs a traceback when a client disconnects.** A client (OpenCode)
+  cancelling or timing out mid-request raises a connection error on the proxy's response write;
+  the request handler now swallows the client-disconnect family (`ConnectionResetError`,
+  `BrokenPipeError`, `ConnectionAbortedError`) instead of trying to send a doomed 502.
+  `ConnectionRefusedError` (an *upstream* failure) is deliberately left to still return 502.
 - **`team` is now truly delegation-only.** Its permission block denied only `edit`/`bash`,
   but OpenCode gates the read-only tools (`read`/`grep`/`glob`/`list`) under their own
   permission keys that default to *allow* — so the orchestrator could (and did) grep/read
