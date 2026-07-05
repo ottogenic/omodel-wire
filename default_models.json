@@ -1,0 +1,13 @@
+{
+  "agents": {
+    "Team": ["openai/gpt-5.5","qwen3-coder-next-fp8"],
+    "research": ["openai/gpt-5.5","qwen3-coder-next-fp8"],
+    "code": ["qwen3-coder-next-fp8"],
+    "agent": ["qwen3-coder-next-fp8"]
+  },
+  "subagents": {
+    "agent-plan": ["qwen3-coder-next-fp8"],
+    "agent-code": ["qwen3-coder-next-fp8"],
+    "agent-instruct": ["qwen3-coder-next-fp8"]
+  }
+}
