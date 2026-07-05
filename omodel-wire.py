@@ -252,9 +252,10 @@ MANAGED_AGENTS = {"research", "code", "agent", "team",
 
 # System prompt for the `team` lead/orchestrator. Written to a file next to
 # opencode.json and referenced via {file:...}; edit it there to tune behavior.
-TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You do NOT write code, edit files, or
-run commands yourself (you have no edit/bash access). Your job is to break work
-down, delegate it to your workers, and verify the result.
+TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You have NO tools of your own: you
+cannot read, grep, edit, or run commands -- the ONLY thing you can do is delegate
+by calling the `task` tool. Your job is to break work down, hand each piece to a
+worker, and verify the results they report back.
 
 You delegate by CALLING THE `task` TOOL -- choose a subagent by NAME and give it
 an instruction. Do NOT just type "@agent ..." in your reply; that does nothing.
@@ -810,15 +811,20 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             task_map[k] = "allow"
         rs = rp.get("sampling", {})
         team = {
-            "description": "team: lead orchestrator -- plans, delegates to the agent-* workers, "
-                           "validates; does not edit directly",
+            "description": "team: lead orchestrator -- plans and delegates to the agent-* "
+                           "workers, validates; has NO tools of its own (delegation only)",
             "mode": "primary",
             "model": model_ref,
             "color": TEAM_COLOR,
             "prompt": "{file:./prompts/otools-team.md}",
             "options": _opts_for(rp),
-            "permission": {"edit": "deny", "bash": "deny",
-                           "websearch": "allow", "webfetch": "allow",
+            # Delegation-only: deny EVERY tool category (incl. the read-only ones --
+            # read/grep/glob/list have their own permission keys and default to allow,
+            # so denying edit/bash alone still lets the orchestrator grep/read). The
+            # only thing it can do is spawn its workers via `task`.
+            "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
+                           "edit": "deny", "bash": "deny",
+                           "webfetch": "deny", "websearch": "deny",
                            "task": task_map},
         }
         if "temperature" in rs: team["temperature"] = rs["temperature"]

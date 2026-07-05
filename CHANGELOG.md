@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`team` is now truly delegation-only.** Its permission block denied only `edit`/`bash`,
+  but OpenCode gates the read-only tools (`read`/`grep`/`glob`/`list`) under their own
+  permission keys that default to *allow* — so the orchestrator could (and did) grep/read
+  files directly instead of delegating. The team now denies **every** tool category
+  (`read`/`grep`/`glob`/`list`/`edit`/`bash`/`webfetch`/`websearch`); the only action it
+  can take is `task` (spawn a worker). Re-run `omw sync` to apply. (Uses `permission`, the
+  supported mechanism — the old `tools` field is deprecated in OpenCode.)
+
 ### Added
 - **`omw proxy` — a debug proxy that logs OpenCode ↔ model traffic** (stdlib only):
   - `omw proxy on [<model>]` — route live models through the proxy with **no `--upstream`

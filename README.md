@@ -79,13 +79,15 @@ Built from `AGENT_SPECS`, with per-mode sampling from omodel-manager's configs:
 | `research`      | Tab        | reason   | read-only + web        |
 | `code`          | Tab        | code     | edit/bash **ask** + web |
 | `agent`         | Tab        | agent    | full (edit/bash allow) |
-| `team`          | Tab        | orchestrator | read-only, delegates |
+| `team`          | Tab        | orchestrator | delegation-only (no tools) |
 | `agent-plan`    | hidden     | reason   | read-only + web        |
 | `agent-code`    | hidden     | code     | full                   |
 | `agent-instruct`| hidden     | instruct | full                   |
 
-`team` is a read-only orchestrator that **delegates** to the three hidden
-`agent-*` workers (`permission.task` is limited to them). The hidden workers carry a
+`team` is a **delegation-only** orchestrator: every tool category is denied
+(`read`/`grep`/`glob`/`list`/`edit`/`bash`/`webfetch`/`websearch`), so the only thing it
+can do is **delegate** to the three hidden `agent-*` workers via `task` (its
+`permission.task` is limited to them). The hidden workers carry a
 "worker prompt" that forces a non-empty final summary — a workaround for an OpenCode
 bug where the orchestrator otherwise receives an empty result. The visible agents
 stay clean (no worker prompt) so they're pleasant to drive by hand.

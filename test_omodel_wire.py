@@ -244,8 +244,10 @@ class TestAgentBuilding(unittest.TestCase):
         team = agents["team"]
         self.assertEqual(team["mode"], "primary")
         self.assertEqual(team["color"], m.TEAM_COLOR)
-        self.assertEqual(team["permission"]["edit"], "deny")
-        self.assertEqual(team["permission"]["bash"], "deny")
+        # delegation-only: EVERY tool category denied except `task`
+        for tool in ("read", "grep", "glob", "list", "edit", "bash", "webfetch", "websearch"):
+            self.assertEqual(team["permission"][tool], "deny",
+                             f"team should not be able to use {tool}")
         task = team["permission"]["task"]
         self.assertEqual(task["*"], "deny")
         for t in m.TEAM_TARGETS:
