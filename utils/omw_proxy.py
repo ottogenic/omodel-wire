@@ -301,6 +301,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _handle(self):
         try:
             self._proxy()
+        except ConnectionResetError:
+            pass
         except Exception as e:                       # never let one request kill the thread
             self._fail(502, f"omw-proxy error: {e}")
 
