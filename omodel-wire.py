@@ -386,23 +386,23 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
             prefs = (default_models.get("agents") or {}).get(agent_name, [])
         
         if prefs:
-            # Walk prefs IN ORDER and take the first that resolves:
-            #   * a live local served id (present in available_model_ids), OR
-            #   * a remote provider ref (openai/…, anthropic/…) OpenCode routes directly.
-            # A local served id that merely contains a slash (unsloth/qwen3-coder-next-fp8) is
-            # NOT remote -- it counts only when actually live; otherwise we fall through to the
-            # next preference (so a local-first, cloud-fallback list behaves as written).
+            # Resolve this agent's model by walking its preferences IN ORDER and taking the FIRST
+            # that resolves — either a live DGX model (matched against the local pool) or a
+            # cloud/remote provider ref OpenCode routes (openai/…, anthropic/…, google/… — see
+            # REMOTE_PROVIDERS). List order is authoritative: [local-A, cloud-B, local-C] with A
+            # down but B up resolves to B (we never skip an earlier resolvable cloud model to reach
+            # a later local one). If nothing in the list resolves, fall back to any live DGX model.
+            # A served id that merely contains a slash (unsloth/qwen3-coder-next-fp8) is a DGX model
+            # — it matches ONLY the local-pool check and is NEVER sent to a cloud provider.
             preferred = None
             for pref in prefs:
-                if pref in available_model_ids:
-                    preferred = pref            # live local model
+                if pref in available_model_ids:                 # live DGX model
+                    preferred = pref
                     break
-                if pref.split("/", 1)[0] in REMOTE_PROVIDERS:
-                    preferred = pref            # remote provider model -- use directly
+                if pref.split("/", 1)[0] in REMOTE_PROVIDERS:   # cloud/remote provider ref
+                    preferred = pref
                     break
-
-            # Nothing resolved -> first available local model.
-            if preferred is None and available_model_ids:
+            if preferred is None and available_model_ids:       # nothing matched -> any live DGX
                 preferred = available_model_ids[0]
             
             if preferred:

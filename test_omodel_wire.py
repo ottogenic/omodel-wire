@@ -611,6 +611,11 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertEqual(
             resolve(["qwen3.6-35b-a3b-fp8", "qwen3-coder-next-fp8", "openai/gpt-5.5"]),
             "dgx-103-8000/qwen3-coder-next-fp8")
+        # strict order: [local-down, cloud-up, local-up] -> the cloud model, because it's the
+        # first that resolves (we do NOT skip it to reach the later live local)
+        self.assertEqual(
+            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5", "qwen3-coder-next-fp8"]),
+            "openai/gpt-5.5")
         # no listed local live -> the listed remote provider ref is used directly
         self.assertEqual(
             resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]), "openai/gpt-5.5")
