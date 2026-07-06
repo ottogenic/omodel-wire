@@ -511,6 +511,8 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("gh_token_coder", js)       # reads the coder token
             self.assertIn("GH_TOKEN_REVIEWER", js)    # exposes the reviewer token
             self.assertIn("insteadOf", js)            # HTTPS routing (no SSH)
+            self.assertIn("GIT_AUTHOR_EMAIL", js)     # commits authored as the bot
+            self.assertIn("gh_coder_identity", js)    # ...from the resolved-identity file
 
     def test_missing_gh_token_roles(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -529,17 +531,44 @@ class TestSyncEndToEnd(unittest.TestCase):
     def test_set_gh_token_writes_and_clears(self):
         with tempfile.TemporaryDirectory() as tmp:
             coder = os.path.join(tmp, "otools", "gh_token_coder")
-            saved = m.GH_TOKEN_CODER_FILE
+            ident = os.path.join(tmp, "otools", "gh_coder_identity")
+            saved = (m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE, m._resolve_gh_identity)
             try:
-                m.GH_TOKEN_CODER_FILE = coder
-                m._set_gh_token("coder", "ghp_secret123")
+                m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE = coder, ident
+                m._resolve_gh_identity = lambda t: None      # offline: no network in unit tests
+                with quiet():
+                    m._set_gh_token("coder", "ghp_secret123")
                 self.assertEqual(open(coder).read(), "ghp_secret123")   # trimmed, no newline
                 if os.name == "posix":                                  # 0600 only meaningful on POSIX
                     self.assertEqual(oct(os.stat(coder).st_mode & 0o777), "0o600")
-                m._set_gh_token("coder", "none")                        # clear
+                with quiet():
+                    m._set_gh_token("coder", "none")                    # clear
                 self.assertFalse(os.path.exists(coder))
             finally:
-                m.GH_TOKEN_CODER_FILE = saved
+                m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE, m._resolve_gh_identity = saved
+
+    def test_set_coder_token_resolves_and_writes_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            coder = os.path.join(tmp, "otools", "gh_token_coder")
+            ident = os.path.join(tmp, "otools", "gh_coder_identity")
+            saved = (m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE, m._resolve_gh_identity)
+            try:
+                m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE = coder, ident
+                # stub the API so the test is offline + deterministic
+                m._resolve_gh_identity = lambda t: {
+                    "name": "ottogenic-bot",
+                    "email": "999+ottogenic-bot@users.noreply.github.com"}
+                with quiet():
+                    m._set_gh_token("coder", "ghp_bot")
+                who = json.load(open(ident))
+                self.assertEqual(who["name"], "ottogenic-bot")
+                self.assertIn("@users.noreply.github.com", who["email"])
+                # clearing the token also removes the resolved identity
+                with quiet():
+                    m._set_gh_token("coder", "none")
+                self.assertFalse(os.path.exists(ident))
+            finally:
+                m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE, m._resolve_gh_identity = saved
 
     def test_non_reasoning_only_fleet_still_builds_roster(self):
         # Regression: a fleet with NO reasoning models must still rebuild the roster

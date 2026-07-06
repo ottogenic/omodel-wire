@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows
 - **`omw config --set-gh-token-coder` / `--set-gh-token-reviewer`** to store those tokens (writes the
   file with 0600 perms). Pass the token inline, omit it to be prompted with hidden input, or pass
   `none` to clear. `omw config` (no args) now shows each token's set/unset state and path.
+- **Commits are authored as the bot too, not just pushed by it.** Setting the coder token resolves the
+  bot's login + id from the GitHub API once and caches `~/.config/otools/gh_coder_identity`
+  (`{name, email}`, using the attributable `<id>+<login>@users.noreply.github.com`); the plugin reads
+  that file and exports `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (no network in the per-shell hot path). Fully
+  best-effort — if GitHub is unreachable, pushes/PRs still work and `omw sync` retries the resolve.
 
 ### Changed
 - **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved
