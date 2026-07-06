@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **PR-review tooling:** the `REVIEW.md` checks and the `pr-review` skill now use `python3` (the
+  WSL env has no `python`), and the skill documents worktree-safe PR checkout plus a fallback for
+  `gh pr merge`'s local post-merge error when `main` is checked out in a sibling worktree.
+
 ### Changed
 - **Built-in OpenCode and Hugging Face providers are disabled by default.** The tool now writes a
   top-level `disabled_providers` array (e.g., `["opencode", "huggingface"]`) to `opencode.json`.
