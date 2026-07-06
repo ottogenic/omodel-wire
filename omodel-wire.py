@@ -507,8 +507,6 @@ When the work is finished, send a final plain-text message that summarizes what 
 - Never stop on a bare tool call or an empty message -- always finish with a text summary.
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
-
-When asked to review a PR, delegate to agent-review via the task tool (call it by name -- `@agent-review` only works when a human types it), and reuse the same task_id to coordinate fixes across review/re-review iterations.
 """
 
 # Review prompt for agent-review. Written next to opencode.json; edit there to tune.

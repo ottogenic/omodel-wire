@@ -27,8 +27,10 @@ All notable changes to this project are documented here. The format follows
 - **`AGENTS.md` now tells agents to *delegate* PR reviews to `agent-review`** (via the `task` tool,
   by name) instead of reviewing inline. Placed in `AGENTS.md` — which augments every agent's context —
   so it reaches the prompt-free `code`/`agent` primaries too, without clobbering their default prompt
-  (setting a per-agent `prompt` would replace it). Makes "please review this PR" route to `agent-review`
-  from any agent, not just `team`.
+  (setting a per-agent `prompt` would replace it). Wording is **capability-neutral** ("if you have the
+  `task` tool, delegate…") since AGENTS.md is read by every agent but only some can delegate; it does
+  not tell agents to route fixes to `agent-code` (only `team` can reach it). Also drops the incorrect
+  "delegate to agent-review" line from the worker prompt (`agent-plan` is read-only and cannot delegate).
 - **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved
   to the `pr-review` skill.** `REVIEW.md` keeps only the checks, invariants, and merge conditions;
   the skill holds the process — review first, hand the parent agent an itemized list of issues +
