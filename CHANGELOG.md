@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`team-orchestration` skill** (written to the global `<config-dir>/skills/`, which OpenCode
+  auto-scans) holds the Team Lead's methodology — decompose, **dispatch independent work to
+  subagents in parallel**, sequence only true dependencies, verify. Scoped to `team` via
+  `permission.skill` (denied to every other agent). `TEAM_PROMPT` is slimmed to identity +
+  delegation mechanics + "load this skill," mirroring the `agent-review`/`pr-review`
+  thin-prompt-plus-skill pattern. (Verified live via `opencode debug skill`; note OpenCode
+  auto-loads project `.agents/skills/` and global `~/.config/opencode/skills/`, so no
+  `skills.paths` config is needed.)
 - **Per-agent GitHub identity via an auto-generated OpenCode plugin.** `omw sync` writes
   `plugins/otools-git-identity.js` (a `shell.env` hook): every coding agent gets `GH_TOKEN` = the
   **coder** token (shared bot account), so commits/PRs are the bot; `agent-review` uses
@@ -24,6 +32,13 @@ All notable changes to this project are documented here. The format follows
   best-effort — if GitHub is unreachable, pushes/PRs still work and `omw sync` retries the resolve.
 
 ### Changed
+- **`AGENTS.md` now tells agents to *delegate* PR reviews to `agent-review`** (via the `task` tool,
+  by name) instead of reviewing inline. Placed in `AGENTS.md` — which augments every agent's context —
+  so it reaches the prompt-free `code`/`agent` primaries too, without clobbering their default prompt
+  (setting a per-agent `prompt` would replace it). Wording is **capability-neutral** ("if you have the
+  `task` tool, delegate…") since AGENTS.md is read by every agent but only some can delegate; it does
+  not tell agents to route fixes to `agent-code` (only `team` can reach it). Also drops the incorrect
+  "delegate to agent-review" line from the worker prompt (`agent-plan` is read-only and cannot delegate).
 - **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved
   to the `pr-review` skill.** `REVIEW.md` keeps only the checks, invariants, and merge conditions;
   the skill holds the process — review first, hand the parent agent an itemized list of issues +
