@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Built-in OpenCode and Hugging Face providers are disabled by default.** The tool now writes a
+  top-level `disabled_providers` array (e.g., `["opencode", "huggingface"]`) to `opencode.json`.
+  These providers remain in the config but their models are hidden from the `/models` picker.
+  Pass `--add-default-providers` to enable them (e.g., if you're using their API keys).
+- **`disabled_providers` uses OpenCode's native schema.** The tool now uses the documented
+  `disabled_providers` array rather than model-level `blacklist`, which is the proper way to
+  hide providers at the provider level.
+
+### Added
+- **`--add-default-providers` flag.** Enable built-in OpenCode and Hugging Face providers when
+  they are disabled by default.
+
 ### Fixed
 - **`default_models.json` preference resolution now walks the list in order and no longer
   misclassifies local served ids.** Two bugs surfaced when a preference list mixed local models
