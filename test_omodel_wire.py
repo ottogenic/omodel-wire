@@ -1488,6 +1488,59 @@ class TestDisabledProviders(unittest.TestCase):
             self.assertNotIn("opencode", disabled, "opencode should NOT be in disabled_providers with flag")
             self.assertNotIn("huggingface", disabled, "huggingface should NOT be in disabled_providers with flag")
 
+    def test_disable_then_enable_removes_disabled(self):
+        """Disable then enable: --add-default-providers should remove opencode/huggingface from disabled_providers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "opencode.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({
+                    "disabled_providers": ["opencode", "huggingface"],
+                    "provider": {
+                        "opencode": {
+                            "options": {"baseURL": "https://opencode.ai/v1"},
+                            "models": {"qwen3-coder-next-fp8": {"name": "Qwen3 Coder"}}
+                        }
+                    }
+                }, f)
+            
+            # First sync (default, should keep disabled)
+            args, _ = self._sync(tmp)
+            with open(cfg, "r", encoding="utf-8") as f:
+                result1 = json.load(f)
+            disabled1 = result1.get("disabled_providers", [])
+            self.assertIn("opencode", disabled1, "opencode should be disabled after first sync")
+            
+            # Second sync with flag (should remove from disabled)
+            args, _ = self._sync(tmp, add_default_providers=True)
+            with open(cfg, "r", encoding="utf-8") as f:
+                result2 = json.load(f)
+            disabled2 = result2.get("disabled_providers", [])
+            self.assertNotIn("opencode", disabled2, "opencode should be enabled with flag")
+            self.assertNotIn("huggingface", disabled2, "huggingface should be enabled with flag")
+
+    def test_preserves_user_disabled_providers(self):
+        """User-authored disabled_providers entries should be preserved across both paths."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "opencode.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({
+                    "disabled_providers": ["opencode", "my-custom-provider"],
+                    "provider": {
+                        "opencode": {
+                            "options": {"baseURL": "https://opencode.ai/v1"},
+                            "models": {"qwen3-coder-next-fp8": {"name": "Qwen3 Coder"}}
+                        }
+                    }
+                }, f)
+            
+            # Sync with flag (should remove opencode but keep my-custom-provider)
+            args, _ = self._sync(tmp, add_default_providers=True)
+            with open(cfg, "r", encoding="utf-8") as f:
+                result = json.load(f)
+            disabled = result.get("disabled_providers", [])
+            self.assertNotIn("opencode", disabled, "opencode should be enabled with flag")
+            self.assertIn("my-custom-provider", disabled, "user-authored provider should be preserved")
+
     def test_huggingface_disabled_by_default(self):
         """Without --add-default-providers, huggingface is in disabled_providers."""
         with tempfile.TemporaryDirectory() as tmp:

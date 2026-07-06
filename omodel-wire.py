@@ -1130,21 +1130,13 @@ export const DgxSampling = async () => {{
 # OpenCode configurator
 # ============================================================================
 def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
-                       tool_call=True, recipes=None, verbose=True,
-                       disabled_providers=None):
+                       tool_call=True, recipes=None, verbose=True):
     """Discover endpoints; return (providers dict, flat refs list, reasoning_caps).
 
     Capabilities (reasoning / thinking-knob / vision) are DECLARED in the matched
     per-model config (omodel-manager's configs/*.toml) -- no live probing here.
     reasoning_caps maps a model ref -> its synthesized caps dict, so the caller
-    can build matching agents.
-    
-    Args:
-        disabled_providers: set of provider names to disable (blacklist all models).
-                           Currently supports: 'opencode', 'huggingface'."""
-    if disabled_providers is None:
-        disabled_providers = set()
-    
+    can build matching agents."""
     providers = {}
     refs = []
     reasoning_caps = {}
@@ -1209,13 +1201,6 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
                         {"input": ["text", "image"], "output": ["text"]}
                     if verbose:
                         print(f"    vision: {m['id']} -> ENABLED (declared)")
-
-                # ---- disable provider: blacklist all models -------------------
-                provider_name = host_label(host)
-                if provider_name in disabled_providers:
-                    entry["blacklist"] = ["*"]
-                    if verbose:
-                        print(f"    disabled: {m['id']} -> blacklisted (provider={provider_name})")
 
                 model_entries[m["id"]] = entry
                 refs.append(f"{key}/{m['id']}")
@@ -1675,18 +1660,10 @@ def oc_sync(args, sampling, detected_installed):
 
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
     
-    # Build set of providers to disable (blacklist all models)
-    disabled_providers = set()
-    if not args.add_default_providers:
-        # Disable opencode and huggingface by default
-        disabled_providers.add("opencode")
-        disabled_providers.add("huggingface")
-    
     print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
     providers, refs, reasoning_caps, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling,
-        profiles=args.profiles, tool_call=not args.no_tool_call, recipes=configs,
-        disabled_providers=disabled_providers)
+        profiles=args.profiles, tool_call=not args.no_tool_call, recipes=configs)
 
     if not providers:
         print("  (no live endpoints found)")
@@ -1704,16 +1681,19 @@ def oc_sync(args, sampling, detected_installed):
     
     # Use disabled_providers array to disable built-in providers (OpenCode and Hugging Face)
     # This is the proper OpenCode way to hide providers at the provider level
-    disabled_providers_list = []
-    if not args.add_default_providers:
-        # When disabled, add opencode and huggingface to disabled list
-        disabled_providers_list = ["opencode", "huggingface"]
+    # Managed providers we control: always remove them from existing_disabled first,
+    # then add back only when the flag is absent (to preserve user-authored entries)
+    MANAGED_DISABLED = {"opencode", "huggingface"}
+    existing_disabled = set(cfg.get("disabled_providers", []))
     
-    # Preserve any existing disabled_providers and merge with ours
-    existing_disabled = cfg.get("disabled_providers", [])
-    disabled_providers_list = list(set(existing_disabled + disabled_providers_list))
+    if args.add_default_providers:
+        # Remove managed providers from disabled list (enable them)
+        disabled_providers_list = sorted(existing_disabled - MANAGED_DISABLED)
+    else:
+        # Add managed providers to disabled list (disable them), preserving user entries
+        disabled_providers_list = sorted(existing_disabled | MANAGED_DISABLED)
     
-    cfg["disabled_providers"] = disabled_providers_list
+    cfg["disabled_providers"] = disabled_providers_list if disabled_providers_list else []
     
     cfg["provider"] = kept
 
