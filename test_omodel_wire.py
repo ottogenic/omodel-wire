@@ -501,6 +501,31 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
+    def test_writes_git_identity_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            plugin = os.path.join(tmp, "plugins", "otools-git-identity.js")
+            self.assertTrue(os.path.exists(plugin), "otools-git-identity.js not written")
+            js = open(plugin, encoding="utf-8").read()
+            self.assertIn('"shell.env"', js)         # the injecting hook
+            self.assertIn("gh_token_coder", js)       # reads the coder token
+            self.assertIn("GH_TOKEN_REVIEWER", js)    # exposes the reviewer token
+            self.assertIn("insteadOf", js)            # HTTPS routing (no SSH)
+
+    def test_missing_gh_token_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            coder = os.path.join(tmp, "coder"); rev = os.path.join(tmp, "rev")
+            saved = (m.GH_TOKEN_CODER_FILE, m.GH_TOKEN_REVIEWER_FILE)
+            try:
+                m.GH_TOKEN_CODER_FILE, m.GH_TOKEN_REVIEWER_FILE = coder, rev
+                self.assertEqual(set(m._missing_gh_token_roles()), {"coder", "reviewer"})
+                open(coder, "w").write("x")
+                self.assertEqual(m._missing_gh_token_roles(), ["reviewer"])
+                open(rev, "w").write("x")
+                self.assertEqual(m._missing_gh_token_roles(), [])
+            finally:
+                m.GH_TOKEN_CODER_FILE, m.GH_TOKEN_REVIEWER_FILE = saved
+
     def test_non_reasoning_only_fleet_still_builds_roster(self):
         # Regression: a fleet with NO reasoning models must still rebuild the roster
         # onto a live model, not leave the agents empty/stale pointing at a model

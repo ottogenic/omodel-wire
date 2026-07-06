@@ -51,7 +51,9 @@ via the `skill` tool).
 | Modify how the tool generates OpenCode config (agent/permission fields, vetted gotchas, plugin dir, doc pointers) | **`opencode-reference`** |
 | Prove the generated sampling actually reaches the model server | **`validate-opencode`** |
 | Commit + open a pull request | **`open-a-pr`** |
+| Review / approve / merge an open PR | **`pr-review`** |
 
 Other docs (read directly when relevant): `README.md` (user-facing), `CHANGELOG.md`.
 
-**Reviewer (Claude):** to review/approve/merge open PRs, follow **`REVIEW.md`**.
+**Reviewing a PR?** Load the **`pr-review`** skill — it holds the process; `REVIEW.md` is the
+repo's bar it checks against.
