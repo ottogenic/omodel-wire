@@ -501,13 +501,6 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
-    def test_registers_agents_skills_path(self):
-        # OpenCode doesn't auto-scan .agents/; sync must register it in skills.paths
-        # so the repo's committed skills (pr-review, team-orchestration, ...) load.
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._sync(tmp)
-            self.assertIn(".agents/skills", cfg.get("skills", {}).get("paths", []))
-
     def test_writes_team_orchestration_skill_globally(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)

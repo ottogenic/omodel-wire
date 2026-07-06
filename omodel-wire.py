@@ -1670,14 +1670,6 @@ def oc_sync(args, sampling, detected_installed):
 
     cfg = oc_load_config(config_path)
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
-    # Register this project's committed skills. OpenCode only auto-scans
-    # <config-dir>/skill(s); `.agents/` is not a config dir, so add it to skills.paths.
-    # The path is RELATIVE -> resolves against whatever project you run OpenCode in,
-    # so each repo's `.agents/skills/<name>/SKILL.md` is discovered there. Non-destructive.
-    skills_cfg = cfg.setdefault("skills", {})
-    skill_paths = skills_cfg.setdefault("paths", [])
-    if ".agents/skills" not in skill_paths:
-        skill_paths.append(".agents/skills")
     existing = cfg.get("provider", {})
     kept = {k: v for k, v in existing.items() if not oc_is_managed(k)}
     removed = [k for k in existing if oc_is_managed(k)]
