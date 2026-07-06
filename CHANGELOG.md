@@ -24,6 +24,11 @@ All notable changes to this project are documented here. The format follows
   best-effort — if GitHub is unreachable, pushes/PRs still work and `omw sync` retries the resolve.
 
 ### Changed
+- **`AGENTS.md` now tells agents to *delegate* PR reviews to `agent-review`** (via the `task` tool,
+  by name) instead of reviewing inline. Placed in `AGENTS.md` — which augments every agent's context —
+  so it reaches the prompt-free `code`/`agent` primaries too, without clobbering their default prompt
+  (setting a per-agent `prompt` would replace it). Makes "please review this PR" route to `agent-review`
+  from any agent, not just `team`.
 - **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved
   to the `pr-review` skill.** `REVIEW.md` keeps only the checks, invariants, and merge conditions;
   the skill holds the process — review first, hand the parent agent an itemized list of issues +

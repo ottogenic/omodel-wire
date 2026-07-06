@@ -51,9 +51,13 @@ via the `skill` tool).
 | Modify how the tool generates OpenCode config (agent/permission fields, vetted gotchas, plugin dir, doc pointers) | **`opencode-reference`** |
 | Prove the generated sampling actually reaches the model server | **`validate-opencode`** |
 | Commit + open a pull request | **`open-a-pr`** |
-| Review / approve / merge an open PR | **`pr-review`** |
+| Review / approve / merge an open PR | delegate to **`agent-review`** (it runs **`pr-review`**) |
 
 Other docs (read directly when relevant): `README.md` (user-facing), `CHANGELOG.md`.
 
-**Reviewing a PR?** Load the **`pr-review`** skill — it holds the process; `REVIEW.md` is the
-repo's bar it checks against.
+**Asked to review / approve / merge a PR?** Delegate to the **`agent-review`** subagent via the
+`task` tool (call it by name — `@agent-review` is only for when a human types it). It runs the
+**`pr-review`** skill against `REVIEW.md` (the repo's bar), hands back an itemized list of issues +
+suggested fixes, and merges only when the review is clean. Don't review it yourself — route any
+fixes to `agent-code`, then re-delegate to `agent-review` with the **same task_id** to re-review.
+*(If you **are** `agent-review`: load the `pr-review` skill and follow it end-to-end.)*
