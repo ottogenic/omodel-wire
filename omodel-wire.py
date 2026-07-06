@@ -240,7 +240,7 @@ AGENT_SPECS = [
     ("agent-plan",     "reason",   "subagent", True, "readonly", "#22c55e", "[worker] research & reasoning, read-only + web"),
     ("agent-code",     "code",     "subagent", True, "full",     "#f97316", "[worker] coding / implementation / debugging, full access"),
     ("agent-instruct", "instruct", "subagent", True, "full",     "#eab308", "[worker] fast mechanical subtasks, no thinking"),
-    ("agent-review",   "reason",   "subagent", True, "readonly", "#3b82f6", "[worker] handles reviewing Pull Requests"),
+    ("agent-review",   "reason",   "subagent", True, "full", "#3b82f6", "[worker] handles reviewing Pull Requests"),
 ]
 # Hidden workers the team may delegate to (its permission.task allowlist).
 TEAM_TARGETS = ["agent-plan", "agent-code", "agent-instruct", "agent-review"]
