@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Skill discovery is now wired up.** `omw sync` registers `.agents/skills` in the generated
+  config's `skills.paths` (a *relative* path → resolves against whatever project you run OpenCode
+  in), so each repo's committed `.agents/skills/<name>/SKILL.md` (pr-review, code-changes, …) is
+  actually discovered by OpenCode's `skill` tool. Previously OpenCode only auto-scanned
+  `<config-dir>/skill(s)`, so `.agents/skills/*` skills were invisible.
+- **`team-orchestration` skill** (written globally to `<config-dir>/skills/`, auto-scanned) holds the
+  Team Lead's methodology — decompose, **dispatch independent work to subagents in parallel**,
+  sequence only true dependencies, verify. Scoped to `team` via `permission.skill` (denied to every
+  other agent). `TEAM_PROMPT` is slimmed to identity + delegation mechanics + "load this skill,"
+  mirroring the `agent-review`/`pr-review` thin-prompt-plus-skill pattern.
 - **Per-agent GitHub identity via an auto-generated OpenCode plugin.** `omw sync` writes
   `plugins/otools-git-identity.js` (a `shell.env` hook): every coding agent gets `GH_TOKEN` = the
   **coder** token (shared bot account), so commits/PRs are the bot; `agent-review` uses

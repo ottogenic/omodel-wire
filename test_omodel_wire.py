@@ -501,6 +501,32 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
+    def test_registers_agents_skills_path(self):
+        # OpenCode doesn't auto-scan .agents/; sync must register it in skills.paths
+        # so the repo's committed skills (pr-review, team-orchestration, ...) load.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._sync(tmp)
+            self.assertIn(".agents/skills", cfg.get("skills", {}).get("paths", []))
+
+    def test_writes_team_orchestration_skill_globally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            skill = os.path.join(tmp, "skills", "team-orchestration", "SKILL.md")
+            self.assertTrue(os.path.exists(skill), "team-orchestration SKILL.md not written")
+            body = open(skill, encoding="utf-8").read()
+            self.assertIn("name: team-orchestration", body)   # frontmatter -> discoverable
+            self.assertIn("PARALLEL", body)                    # the batching guidance
+
+    def test_team_orchestration_scoped_to_team_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ag = self._sync(tmp)["agent"]
+            # every non-team agent denies the team skill...
+            for k in ("research", "code", "agent", "agent-plan", "agent-code",
+                      "agent-instruct", "agent-review"):
+                self.assertEqual(ag[k]["permission"]["skill"], {"team-orchestration": "deny"})
+            # ...and team does NOT (so it alone can load it)
+            self.assertNotIn("skill", ag["team"]["permission"])
+
     def test_writes_git_identity_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)

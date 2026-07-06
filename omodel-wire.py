@@ -219,13 +219,19 @@ LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provi
 #   readonly: no edits/bash/delegation (research only)
 #   ask:      full access but PROMPTS for confirmation on edits/bash
 #   full:     edits/bash run without prompting (autonomous)
+# `team-orchestration` is the team lead's methodology skill (written globally by sync);
+# deny it to every non-team agent so it only surfaces for `team` (team has its own
+# permission block below and does NOT carry this deny).
 PERM = {
     "readonly": {"edit": "deny",  "bash": "deny",  "task": "deny",
-                 "websearch": "allow", "webfetch": "allow"},
+                 "websearch": "allow", "webfetch": "allow",
+                 "skill": {"team-orchestration": "deny"}},
     "ask":      {"edit": "ask",   "bash": "ask",   "websearch": "allow", "webfetch": "allow",
-                 "task": {"*": "deny", "agent-review": "allow"}},
+                 "task": {"*": "deny", "agent-review": "allow"},
+                 "skill": {"team-orchestration": "deny"}},
     "full":     {"edit": "allow", "bash": "allow", "websearch": "allow", "webfetch": "allow",
-                 "task": {"*": "deny", "agent-review": "allow"}},
+                 "task": {"*": "deny", "agent-review": "allow"},
+                 "skill": {"team-orchestration": "deny"}},
 }
 # Each spec: (key, preset role, mode, is_worker, perm profile, color, description).
 # color = FIXED hex by risk: green (read-only) -> yellow-green (ask) -> orange
@@ -445,38 +451,70 @@ only pick the subagent and write the instruction.
 
 Subagents you can delegate to (use the exact name as the task tool's subagent):
 - agent-plan     -- research & reasoning, READ-ONLY (web search/fetch + reading
-                    files; cannot edit or run commands). Use for: gathering info,
-                    reading docs/web, and reasoning through problems that need
-                    research BEFORE implementation.
-- agent-code     -- capable worker, full edit/shell + reasoning. Use for anything
-                    non-trivial: implementation, refactors, debugging, reading
-                    logs, investigating problems.
-- agent-instruct -- fast, no-reasoning worker. Use ONLY for simple, well-specified,
-                    mechanical subtasks: one obvious edit, rename, format,
-                    summarize a file/log, boilerplate.
-- agent-review   -- reviews a pull request against the repo's bar. Delegate to it when
-                    the user asks to review / approve / merge a PR. It returns an
-                    itemized list of issues + suggested fixes (route those to agent-code
-                    to fix, then re-delegate to agent-review with the SAME task_id to
-                    re-review); it merges only when the review comes back clean.
+                    files; cannot edit or run commands). For gathering info and
+                    reasoning through problems BEFORE implementation.
+- agent-code     -- capable worker, full edit/shell + reasoning. For anything
+                    non-trivial: implementation, refactors, debugging, investigating.
+- agent-instruct -- fast, no-reasoning worker. ONLY for simple, well-specified,
+                    mechanical subtasks: one obvious edit, rename, format, boilerplate.
+- agent-review   -- reviews a pull request against the repo's bar. Delegate when the
+                    user asks to review / approve / merge a PR. It returns issues +
+                    suggested fixes (route those to agent-code, then re-delegate with
+                    the SAME task_id to re-review); it merges only when clean.
 
-For every request:
-1. Restate the goal in one line and list explicit acceptance criteria.
-2. Decompose into the smallest independent subtasks.
-3. For each, call the task tool with the right subagent name and a SELF-CONTAINED
-   instruction -- exact files/paths, what to do, and acceptance criteria. The
-   worker cannot see this conversation, so include everything it needs.
-4. Sequence only true dependencies; keep subtasks independent where possible.
-5. When workers report back, check results against the acceptance criteria. If
-   something is missing or wrong, delegate a focused follow-up -- never fix it
-   yourself.
-6. When all criteria are met, give the user a concise summary + any follow-ups.
-
-Rules: never edit/run directly; route research/info-gathering -> agent-plan,
-hard/ambiguous implementation -> agent-code, trivial mechanical -> agent-instruct;
-keep every delegated instruction scoped and verifiable; if the request is
-ambiguous, ask one round of clarifying questions before delegating.
+**Before you plan, load the `team-orchestration` skill and follow it** -- it holds how to
+decompose a request, dispatch independent work to subagents in PARALLEL, sequence only
+true dependencies, and verify results. Never edit or run anything yourself; if the request
+is ambiguous, ask one round of clarifying questions before delegating.
 """
+
+
+# `team-orchestration` skill -- the Team Lead's methodology. Written GLOBALLY by sync to
+# <opencode-config>/skills/team-orchestration/SKILL.md (auto-scanned), and scoped to `team`
+# via permission.skill (see PERM). Thin prompt + this skill = the agent-review/pr-review pattern.
+TEAM_ORCHESTRATION_SKILL = """---
+name: team-orchestration
+description: How the Team Lead decomposes a request into subtasks, dispatches independent work to subagents in PARALLEL, sequences only true dependencies, and verifies results. Load at the start of every request you orchestrate.
+---
+
+# Orchestrating a request
+
+You are the Team Lead. You do not do the work yourself -- you decompose it, delegate each
+piece to the right subagent via the `task` tool, and verify what comes back.
+
+## The loop
+1. **Restate the goal** in one line and list explicit, checkable acceptance criteria.
+2. **Decompose** into the smallest independent subtasks.
+3. **Parallelize first.** Identify every subtask that does NOT depend on another's output and
+   dispatch them *together* (multiple `task` calls in one turn) rather than one at a time.
+   Prefer a wide first wave of independent work over a serial chain -- this is the single
+   biggest lever on wall-clock time.
+4. **Sequence only true dependencies.** A subtask waits only if it genuinely needs a prior
+   result; everything else runs concurrently.
+5. **Write self-contained instructions.** Each worker cannot see this conversation -- put the
+   exact files/paths, what to do, and the acceptance criteria in the task itself.
+6. **Verify against the criteria.** When workers report back, check their results. If
+   something is missing or wrong, delegate a focused follow-up -- never fix it yourself.
+7. **Summarize** for the user once all criteria are met, plus any follow-ups.
+
+## Routing
+- research / info-gathering / reading docs -> **agent-plan** (read-only)
+- implementation / refactors / debugging / anything non-trivial -> **agent-code**
+- one obvious mechanical edit (rename, format, boilerplate) -> **agent-instruct**
+- review / approve / merge a PR -> **agent-review** (it returns issues+fixes; route fixes to
+  agent-code, then re-delegate to agent-review with the SAME task_id)
+
+## Rules
+- You have no read/edit/shell tools -- never try to do the work yourself.
+- Keep every delegated instruction scoped and independently verifiable.
+- Spend your delegation budget (task_budget) on the widest set of independent subtasks that
+  cleanly separate -- don't serialize work that could run in parallel.
+- If the request is ambiguous, ask ONE round of clarifying questions before delegating.
+"""
+
+
+def _team_skill_path(cfg_path):
+    return os.path.join(os.path.dirname(cfg_path), "skills", "team-orchestration", "SKILL.md")
 
 
 def team_prompt_text(task_budget=None):
@@ -1632,6 +1670,14 @@ def oc_sync(args, sampling, detected_installed):
 
     cfg = oc_load_config(config_path)
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
+    # Register this project's committed skills. OpenCode only auto-scans
+    # <config-dir>/skill(s); `.agents/` is not a config dir, so add it to skills.paths.
+    # The path is RELATIVE -> resolves against whatever project you run OpenCode in,
+    # so each repo's `.agents/skills/<name>/SKILL.md` is discovered there. Non-destructive.
+    skills_cfg = cfg.setdefault("skills", {})
+    skill_paths = skills_cfg.setdefault("paths", [])
+    if ".agents/skills" not in skill_paths:
+        skill_paths.append(".agents/skills")
     existing = cfg.get("provider", {})
     kept = {k: v for k, v in existing.items() if not oc_is_managed(k)}
     removed = [k for k in existing if oc_is_managed(k)]
@@ -1858,9 +1904,13 @@ def oc_sync(args, sampling, detected_installed):
 
     # ---- Team orchestrator + worker prompt files ----------------------------
     team_prompt_path = None
+    team_skill_path = None
     if args.profiles and "team" in agents:
         team_prompt_path = os.path.join(os.path.dirname(config_path),
                                         "prompts", "otools-team.md")
+        # The team's methodology lives in a GLOBAL skill (auto-scanned from
+        # <config-dir>/skills); the thin team prompt tells it to load this.
+        team_skill_path = _team_skill_path(config_path)
     worker_prompt_path = None
     if args.profiles and any(k in agents for k in TEAM_TARGETS):
         worker_prompt_path = os.path.join(os.path.dirname(config_path),
@@ -1938,6 +1988,9 @@ def oc_sync(args, sampling, detected_installed):
         if review_prompt_path:
             print(f"\n--- DRY RUN: would write {review_prompt_path} ---")
             print(REVIEW_PROMPT)
+        if team_skill_path:
+            print(f"\n--- DRY RUN: would write {team_skill_path} ---")
+            print(TEAM_ORCHESTRATION_SKILL)
         return 0
 
     # Write config (+ one-shot backup)
@@ -1997,6 +2050,12 @@ def oc_sync(args, sampling, detected_installed):
         with open(team_prompt_path, "w") as f:
             f.write(team_prompt_text(team_budget))
         print(f"Wrote {team_prompt_path}")
+
+    if team_skill_path:
+        os.makedirs(os.path.dirname(team_skill_path), exist_ok=True)
+        with open(team_skill_path, "w") as f:
+            f.write(TEAM_ORCHESTRATION_SKILL)
+        print(f"Wrote {team_skill_path}")
 
     if worker_prompt_path:
         os.makedirs(os.path.dirname(worker_prompt_path), exist_ok=True)
