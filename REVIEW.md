@@ -6,8 +6,8 @@ is only the bar the skill checks against.
 
 ## Checks (must pass)
 
-    python -m py_compile omodel-wire.py
-    python -m unittest            # test_omodel_wire.py + test_configs.py — offline, no network
+    python3 -m py_compile omodel-wire.py
+    python3 -m unittest           # test_omodel_wire.py + test_configs.py — offline, no network
 
 ## Invariants — a diff that breaks any of these is NOT mergeable
 
