@@ -50,6 +50,17 @@ All notable changes to this project are documented here. The format follows
   supported mechanism — the old `tools` field is deprecated in OpenCode.)
 
 ### Added
+- **`agent-review` subagent.** A new hidden worker that handles reviewing Pull Requests. It uses
+  `anthropic/claude-opus-4-8` by default, delegates only to `agent-review`, and has a task budget
+  of 1. The review prompt is written to `prompts/otools-review.md` and guides the agent to
+  identify issues, provide fixes, and inform the parent agent when a PR is ready to merge. The
+  `code` and `agent` primaries now carry `task_budget = 1` and a `task` permission that allowlists
+  **only** `agent-review`, so they can hand a PR to the reviewer without opening up general
+  delegation.
+- **`pr-review` skill.** A new skill at `.agents/skills/pr-review/SKILL.md` that defines the
+  end-to-end workflow for reviewing and merging PRs against this repo. It follows the rules in
+  `REVIEW.md`, runs the repo's checks, reads the diff, and only merges when the review is clean.
+  PRs that fail checks, have security issues, or need design decisions get `--request-changes`.
 - **`default_models.json` — user-editable model preferences for agents/subagents.** `omw sync`
   selects the highest-preferred *available* model from `default_models.json` for each
   agent/subagent (ordered lists; fall back to the first available model if none match).
@@ -84,6 +95,11 @@ All notable changes to this project are documented here. The format follows
   scoped to what's actually running; it prints how many more are hidden and hints `--all`.
   `omw models --all` restores the every-declared-model table. `omw models <name>` detail is
   unchanged.
+- **`omw models` now emits one row per live *served instance*, not per config.** When the same
+  config is served under more than one id / on more than one endpoint, each instance gets its own
+  row (with its own `PROXY`/`SERVED`), so you can see every running copy. `--all` still lists the
+  full declared catalogue (offline configs included); live provider models with no matching config
+  surface under `--all` with capabilities shown as `-` (never guessed from the model name).
 - **CLI redesigned into `omm`-style subcommands.** The ~40 flat top-level flags are
   replaced by verbs: `omw` (guided home screen), `omw sync` (the roster sync — all former
   sync flags live here), `omw agents` / `omw subagents` / `omw models` (list/inspect + live
