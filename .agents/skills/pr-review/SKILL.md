@@ -14,7 +14,11 @@ Read this repo's **`REVIEW.md`** — its checks and invariants are the standard 
 
 ## 2. Review the PR (comprehensively — green tests are necessary, not sufficient)
 - `gh pr view <n>` and `gh pr diff <n>` — what it *claims* vs. what it *changes*.
-- `gh pr checkout <n>`, then run the checks from `REVIEW.md` (py_compile + `python -m unittest`).
+- Get the PR's code, then run the checks from `REVIEW.md` (py_compile + `python3 -m unittest` —
+  the env has `python3`, not `python`). Use `gh pr checkout <n>` when the clone has a GitHub
+  remote; if it doesn't (a worktree/clone made from a local path) fetch the ref directly with
+  `git fetch origin pull/<n>/head && git switch --detach FETCH_HEAD`, or if you're already on the
+  PR branch with a clean tree, just run the checks in place.
 - Read the diff yourself, looking for:
   - **correctness bugs / logic errors** — trace the changed paths and their callers;
   - **code quality** — clarity, matches the surrounding style, no dead code or debug leftovers;
@@ -46,6 +50,12 @@ genuine two-party review (GitHub lets a different account approve the coder's PR
 Conventional-Commit squash title, **no `Co-Authored-By` trailer**. If `$GH_TOKEN_REVIEWER` is
 unset, do **not** self-approve (GitHub blocks it) — post the summary with `gh pr comment` and
 tell the user to set the reviewer token.
+
+The merge is server-side. In a shared git worktree (with `main` checked out in a sibling
+worktree), `gh pr merge` may still print `fatal: 'main' is already used by worktree …` from its
+local post-merge step even though the PR merged. Confirm with `gh pr view <n> --json state,mergedAt`
+(expect `MERGED`); if `--delete-branch` was skipped, delete the remote ref yourself:
+`gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>`.
 
 Never push to `main` directly. Never merge anything touching `LICENSE`, `__version__` / tags, or
 `.github/` CI without explicit user approval.
