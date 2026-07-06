@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
   ops route over HTTPS+token per-shell (no SSH, no `~/.gitconfig` edits). Tokens live in
   `~/.config/otools/gh_token_coder` and `gh_token_reviewer` (chmod 600); `omw sync` warns if either
   is missing.
+- **`omw config --set-gh-token-coder` / `--set-gh-token-reviewer`** to store those tokens (writes the
+  file with 0600 perms). Pass the token inline, omit it to be prompted with hidden input, or pass
+  `none` to clear. `omw config` (no args) now shows each token's set/unset state and path.
 
 ### Changed
 - **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved

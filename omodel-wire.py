@@ -2193,6 +2193,19 @@ def cmd_config(args):
             save_settings(settings)
         editor = os.environ.get("EDITOR", "nano")
         sys.exit(subprocess.run([editor, WIRE_SETTINGS_FILE]).returncode)
+    handled_token = False
+    for role in ("coder", "reviewer"):
+        raw = getattr(args, f"set_gh_token_{role}", None)
+        if raw is None:
+            continue
+        handled_token = True
+        val = raw
+        if val == "__PROMPT__":
+            import getpass
+            val = getpass.getpass(f"Paste the {role} GitHub token (input hidden): ")
+        print(_set_gh_token(role, val))
+    if handled_token:
+        return
     if args.set:
         key, val = args.set
         if key not in SETTINGS_KEYS:
@@ -2215,7 +2228,14 @@ def cmd_config(args):
             print(f"  {k:16} {settings[k]}   ({desc})")
         else:
             print(f"  {k:16} (default: {dflt})   ({desc})")
-    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8")],
+    # GitHub identity (stored as token files, not in wire.json)
+    print("\nGitHub identity (used by the otools-git-identity OpenCode plugin):")
+    for role in ("coder", "reviewer"):
+        state = "set" if os.path.exists(_gh_token_path(role)) else "unset"
+        print(f"  gh_token_{role:8} {state}   ({_gh_token_path(role)})")
+    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8"),
+              ("Set the shared-bot GitHub token (prompts, hidden)", "omw config --set-gh-token-coder"),
+              ("Set your reviewer GitHub token", "omw config --set-gh-token-reviewer")],
              header="Set")
 
 
@@ -2683,18 +2703,46 @@ def _missing_gh_token_roles():
             if not os.path.exists(path)]
 
 
+def _gh_token_path(role):
+    return GH_TOKEN_CODER_FILE if role == "coder" else GH_TOKEN_REVIEWER_FILE
+
+
+def _set_gh_token(role, value):
+    """Persist (or clear) the coder/reviewer GitHub token file with 0600 perms.
+
+    Written via os.open with the restrictive mode up front so the token is never
+    briefly world-readable. Returns a human status string.
+    """
+    path = _gh_token_path(role)
+    if value is None or value.strip().lower() in ("", "none", "unset", "-", "clear"):
+        if os.path.exists(path):
+            os.remove(path)
+            return f"cleared {role} token ({path})"
+        return f"{role} token already unset ({path})"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, value.strip().encode())
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return f"set {role} token -> {path}  (reload OpenCode to apply)"
+
+
 def _warn_missing_gh_tokens():
     missing = _missing_gh_token_roles()
     if not missing:
         return
     print("\n⚠  GitHub identity not fully set — agents fall back to your logged-in gh account.")
-    print("   Create the missing token file(s), then reload OpenCode:")
+    print("   Set the missing token(s), then reload OpenCode:")
     for role in missing:
-        path = GH_TOKEN_CODER_FILE if role == "coder" else GH_TOKEN_REVIEWER_FILE
         who = ("shared bot account -- every coding agent commits/opens PRs as this"
                if role == "coder" else
                "your account -- you + @agent-review review & merge as this")
-        print(f"     umask 077; printf %s '<{role}-token>' > {path}   # {who}")
+        print(f"     omw config --set-gh-token-{role}   # {who} (prompts, input hidden)")
 
 
 def _plugin_js_path(cfg_path):
@@ -2947,6 +2995,14 @@ def _build_parser():
     pc.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"), help="persist one setting")
     pc.add_argument("--edit", action="store_true", help="open wire.json in $EDITOR")
     pc.add_argument("--path", action="store_true", help="print the settings file path")
+    pc.add_argument("--set-gh-token-coder", nargs="?", const="__PROMPT__", default=None,
+                    metavar="TOKEN", dest="set_gh_token_coder",
+                    help="store the shared-bot GitHub token (coding agents commit/PR as this); "
+                         "omit TOKEN to be prompted with hidden input, pass 'none' to clear")
+    pc.add_argument("--set-gh-token-reviewer", nargs="?", const="__PROMPT__", default=None,
+                    metavar="TOKEN", dest="set_gh_token_reviewer",
+                    help="store your GitHub token (agent-review approves/merges the bot's PRs as "
+                         "this); omit TOKEN to be prompted, pass 'none' to clear")
     pc.set_defaults(func=cmd_config)
 
     pag = sub.add_parser("agents", parents=[io_parent],

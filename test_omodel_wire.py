@@ -526,6 +526,21 @@ class TestSyncEndToEnd(unittest.TestCase):
             finally:
                 m.GH_TOKEN_CODER_FILE, m.GH_TOKEN_REVIEWER_FILE = saved
 
+    def test_set_gh_token_writes_and_clears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            coder = os.path.join(tmp, "otools", "gh_token_coder")
+            saved = m.GH_TOKEN_CODER_FILE
+            try:
+                m.GH_TOKEN_CODER_FILE = coder
+                m._set_gh_token("coder", "ghp_secret123")
+                self.assertEqual(open(coder).read(), "ghp_secret123")   # trimmed, no newline
+                if os.name == "posix":                                  # 0600 only meaningful on POSIX
+                    self.assertEqual(oct(os.stat(coder).st_mode & 0o777), "0o600")
+                m._set_gh_token("coder", "none")                        # clear
+                self.assertFalse(os.path.exists(coder))
+            finally:
+                m.GH_TOKEN_CODER_FILE = saved
+
     def test_non_reasoning_only_fleet_still_builds_roster(self):
         # Regression: a fleet with NO reasoning models must still rebuild the roster
         # onto a live model, not leave the agents empty/stale pointing at a model
