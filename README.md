@@ -132,6 +132,7 @@ model against its config.
 | `omw audit` | Offline side-by-side of the live config vs the known-good configs; flags drift. |
 | `omw verify` | Probe live endpoints and compare to the declared capabilities (slow, opt-in). |
 | `omw config [--set KEY VAL] [--edit] [--path]` | Show or persist settings in `~/.config/otools/wire.json`. |
+| `omw config --set-gh-token-coder` / `--set-gh-token-reviewer` | Store the two GitHub identity tokens (see below). Prompts with hidden input; pass `none` to clear. |
 | `omw proxy on [<model>]` / `off [<model>]` | Route live models through a local debug proxy that logs every request/response (no name = all; a name = one). |
 | `omw proxy read <id>` / `replay <id> [--output-curl]` / `status` | Read a logged exchange (colored, sectioned); re-issue it directly to the API (or emit curl); show proxy state. |
 | `omw detect` | Report which agentic-dev tools are installed. |
@@ -141,6 +142,27 @@ Every `--set-*` edit touches **only** `~/.config/opencode/` (opencode.json + the
 plugin) — the declared configs stay pristine, so `omw sync` always restores a known-good
 state and `omw audit` shows exactly what you've changed. Run `omw <command> --help` for
 the full flag list of any command.
+
+### GitHub identity (two tokens, then you're done)
+
+So agents commit and open PRs under a **shared bot** account while **you** review and
+merge them — real two-party review — `omw sync` writes an OpenCode plugin
+(`plugins/otools-git-identity.js`) that hands each shell a GitHub token. You set two tokens
+once:
+
+```bash
+omw config --set-gh-token-coder      # paste the BOT account's token (hidden input)
+omw config --set-gh-token-reviewer   # paste YOUR account's token
+```
+
+Each is a GitHub PAT with **Contents: Read/Write** + **Pull requests: Read/Write** on the
+repos. They're stored (chmod 600) at `~/.config/otools/gh_token_{coder,reviewer}`. Coding
+agents (research/team/code/agent/workers) commit and open PRs as the **coder** (bot);
+`agent-review` approves and merges as the **reviewer** (you). github.com git is routed over
+HTTPS+token automatically — no SSH keys, no `~/.gitconfig` edits. Until both are set,
+`omw sync` warns and agents fall back to your logged-in `gh`. Reload OpenCode after setting
+them. Verify from inside OpenCode: `gh api user --jq .login` (→ bot) and
+`GH_TOKEN="$GH_TOKEN_REVIEWER" gh api user --jq .login` (→ you).
 
 ### Debugging with the proxy
 
