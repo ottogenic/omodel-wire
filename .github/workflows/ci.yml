@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        # tomllib is stdlib 3.11+; the tool is stdlib-only, so 3.11 is the floor.
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 

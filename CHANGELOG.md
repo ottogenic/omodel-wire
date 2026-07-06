@@ -6,7 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Per-agent GitHub identity via an auto-generated OpenCode plugin.** `omw sync` writes
+  `plugins/otools-git-identity.js` (a `shell.env` hook): every coding agent gets `GH_TOKEN` = the
+  **coder** token (shared bot account), so commits/PRs are the bot; `agent-review` uses
+  `GH_TOKEN_REVIEWER` (your account) to review + merge — real two-party review. All github.com git
+  ops route over HTTPS+token per-shell (no SSH, no `~/.gitconfig` edits). Tokens live in
+  `~/.config/otools/gh_token_coder` and `gh_token_reviewer` (chmod 600); `omw sync` warns if either
+  is missing.
+- **`omw config --set-gh-token-coder` / `--set-gh-token-reviewer`** to store those tokens (writes the
+  file with 0600 perms). Pass the token inline, omit it to be prompted with hidden input, or pass
+  `none` to clear. `omw config` (no args) now shows each token's set/unset state and path.
+- **Commits are authored as the bot too, not just pushed by it.** Setting the coder token resolves the
+  bot's login + id from the GitHub API once and caches `~/.config/otools/gh_coder_identity`
+  (`{name, email}`, using the attributable `<id>+<login>@users.noreply.github.com`); the plugin reads
+  that file and exports `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (no network in the per-shell hot path). Fully
+  best-effort — if GitHub is unreachable, pushes/PRs still work and `omw sync` retries the resolve.
+
 ### Changed
+- **PR-review workflow split: `REVIEW.md` is now just the repo's *bar*; the review *process* moved
+  to the `pr-review` skill.** `REVIEW.md` keeps only the checks, invariants, and merge conditions;
+  the skill holds the process — review first, hand the parent agent an itemized list of issues +
+  suggested fixes, and merge (as the reviewer) only when clean. `agent-review`'s prompt is now thin
+  (it loads the skill), and the team delegates PR reviews to `agent-review` via the task tool (by
+  name, not `@`). Removes the process duplication across REVIEW.md / skill / prompt.
 - **`git-new-worktree --delete` now also cleans up orphaned worktree folders.** If a folder is a
   sibling of the repo but git no longer tracks it as a worktree (its registration was pruned — e.g.
   by a cross-OS `git worktree prune`), or it's just a stray sibling directory, `--delete` offers to

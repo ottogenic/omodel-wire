@@ -454,6 +454,11 @@ Subagents you can delegate to (use the exact name as the task tool's subagent):
 - agent-instruct -- fast, no-reasoning worker. Use ONLY for simple, well-specified,
                     mechanical subtasks: one obvious edit, rename, format,
                     summarize a file/log, boilerplate.
+- agent-review   -- reviews a pull request against the repo's bar. Delegate to it when
+                    the user asks to review / approve / merge a PR. It returns an
+                    itemized list of issues + suggested fixes (route those to agent-code
+                    to fix, then re-delegate to agent-review with the SAME task_id to
+                    re-review); it merges only when the review comes back clean.
 
 For every request:
 1. Restate the goal in one line and list explicit acceptance criteria.
@@ -503,20 +508,16 @@ When the work is finished, send a final plain-text message that summarizes what 
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
 
-When asked to review a PR, delegate to @agent-review and reuse the same task_id to coordinate fixes across iterations.
+When asked to review a PR, delegate to agent-review via the task tool (call it by name -- `@agent-review` only works when a human types it), and reuse the same task_id to coordinate fixes across review/re-review iterations.
 """
 
 # Review prompt for agent-review. Written next to opencode.json; edit there to tune.
 # This agent handles reviewing Pull Requests and provides feedback to the parent agent.
-REVIEW_PROMPT = """You are a code reviewer. Your role is to perform an in-depth code review of any open pull requests for the repository you are actively in.
+REVIEW_PROMPT = """You are agent-review -- the pull-request reviewer for whatever repository you're working in.
 
-When reviewing:
-1. Identify any issues, bugs, or potential problems in the code
-2. For each issue found, outline the problem and provide a recommended fix
-3. If there are no issues or only minor ones, provide a summary of your findings
-4. If the PR is ready to merge with no issues, inform the parent agent it can be merged
+Load the `pr-review` skill and follow it end-to-end. In short: review the open PR against the repo's REVIEW.md, then hand the parent agent an itemized list of issues, each with a suggested fix. You do NOT fix issues yourself, and you do NOT merge while any remain -- the parent's coding agents apply the fixes and delegate back to you (reuse the task_id) to re-review. Merge ONLY when the review is clean, and only as the REVIEWER account (`GH_TOKEN="$GH_TOKEN_REVIEWER" gh ...`, per the skill).
 
-Your final message should summarize the review findings and any recommended actions.
+Your final message is the review report the parent agent acts on.
 """
 
 # The blue test image + the word we expect a real vision model to say back.
@@ -1978,6 +1979,21 @@ def oc_sync(args, sampling, detected_installed):
         except OSError:
             pass
 
+    # Git identity plugin: coder token for all agents, reviewer token for agent-review.
+    # Always written (independent of sampling/roster); reads the token files at runtime.
+    identity_path = _git_identity_plugin_path(config_path)
+    os.makedirs(os.path.dirname(identity_path), exist_ok=True)
+    with open(identity_path, "w") as f:
+        f.write(GIT_IDENTITY_PLUGIN_JS)
+    print(f"Wrote {identity_path}")
+    # If the coder token is set but its commit identity hasn't been resolved yet
+    # (e.g. the token file was created by hand), resolve+cache it now (one API call).
+    if os.path.exists(GH_TOKEN_CODER_FILE) and not os.path.exists(GH_CODER_IDENTITY_FILE):
+        try:
+            _write_coder_identity(open(GH_TOKEN_CODER_FILE).read().strip(), quiet=True)
+        except OSError:
+            pass
+
     if team_prompt_path:
         os.makedirs(os.path.dirname(team_prompt_path), exist_ok=True)
         with open(team_prompt_path, "w") as f:
@@ -1996,6 +2012,7 @@ def oc_sync(args, sampling, detected_installed):
             f.write(REVIEW_PROMPT)
         print(f"Wrote {review_prompt_path}")
 
+    _warn_missing_gh_tokens()
     print("Restart / reload OpenCode to pick up the changes.")
     return 0
 
@@ -2183,6 +2200,21 @@ def cmd_config(args):
             save_settings(settings)
         editor = os.environ.get("EDITOR", "nano")
         sys.exit(subprocess.run([editor, WIRE_SETTINGS_FILE]).returncode)
+    handled_token = False
+    for role in ("coder", "reviewer"):
+        raw = getattr(args, f"set_gh_token_{role}", None)
+        if raw is None:
+            continue
+        handled_token = True
+        val = raw
+        if val == "__PROMPT__":
+            import getpass
+            val = getpass.getpass(f"Paste the {role} GitHub token (input hidden): ")
+        msg = _set_gh_token(role, val)
+        if msg:
+            print(msg)
+    if handled_token:
+        return
     if args.set:
         key, val = args.set
         if key not in SETTINGS_KEYS:
@@ -2205,7 +2237,14 @@ def cmd_config(args):
             print(f"  {k:16} {settings[k]}   ({desc})")
         else:
             print(f"  {k:16} (default: {dflt})   ({desc})")
-    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8")],
+    # GitHub identity (stored as token files, not in wire.json)
+    print("\nGitHub identity (used by the otools-git-identity OpenCode plugin):")
+    for role in ("coder", "reviewer"):
+        state = "set" if os.path.exists(_gh_token_path(role)) else "unset"
+        print(f"  gh_token_{role:8} {state}   ({_gh_token_path(role)})")
+    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8"),
+              ("Set the shared-bot GitHub token (prompts, hidden)", "omw config --set-gh-token-coder"),
+              ("Set your reviewer GitHub token", "omw config --set-gh-token-reviewer")],
              header="Set")
 
 
@@ -2612,6 +2651,176 @@ def _has_roster_mutation(args):
     return bool(getattr(args, "set_model", None)) or getattr(args, "set_work_budget", None) is not None
 
 
+# Two GitHub tokens (chmod 600), read by the identity plugin and checked by `omw sync`.
+GH_TOKEN_CODER_FILE = os.path.expanduser("~/.config/otools/gh_token_coder")
+GH_TOKEN_REVIEWER_FILE = os.path.expanduser("~/.config/otools/gh_token_reviewer")
+# Resolved bot identity ({name,email}) so agent COMMITS read as the bot, not just pushes/PRs.
+# Written when the coder token is set (one API call); the plugin only reads it (no net at runtime).
+GH_CODER_IDENTITY_FILE = os.path.expanduser("~/.config/otools/gh_coder_identity")
+
+# OpenCode plugin (shell.env hook) that gives agents a GitHub identity. Static —
+# reads the two token files at runtime, so re-syncing never needs the tokens present.
+GIT_IDENTITY_PLUGIN_JS = r'''// otools-git-identity -- auto-generated by `omw sync`; DO NOT EDIT (regenerated each sync).
+//
+// Gives OpenCode agents a GitHub identity via the shell.env hook, so there's no per-user
+// git config to juggle:
+//   * every agent shell gets GH_TOKEN = the CODER token -> commits & PRs are the coder
+//     (bot) account. All coding agents (research/team/code/agent/agent-*) use this.
+//   * GH_TOKEN_REVIEWER is also exposed; the `agent-review` subagent overrides GH_TOKEN
+//     with it to review + MERGE as your own account -> real two-party review (GitHub lets
+//     you approve a bot's PR).
+//   * github.com git ops are routed over HTTPS + token per-shell (no SSH, no remote edits,
+//     no ~/.gitconfig changes).
+//
+// Files (chmod 600), all under ~/.config/otools/ :
+//   gh_token_coder       (shared bot account token)
+//   gh_token_reviewer    (your account token)
+//   gh_coder_identity    (JSON {name,email} for the coder -- so COMMITS read as the bot too;
+//                         written by `omw config --set-gh-token-coder` / `omw sync`, no net here)
+import { readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+
+const cfg = (name) => join(homedir(), ".config", "otools", name);
+const tok = (name) => {
+  try { return readFileSync(cfg(name), "utf8").trim(); }
+  catch { return ""; }
+};
+const ident = () => {
+  try { return JSON.parse(readFileSync(cfg("gh_coder_identity"), "utf8")); }
+  catch { return null; }
+};
+
+export const OtoolsGitIdentity = async () => ({
+  "shell.env": async (_input, output) => {
+    const coder = tok("gh_token_coder");
+    const reviewer = tok("gh_token_reviewer");
+    if (coder) {
+      output.env.GH_TOKEN = coder;          // default: agents act as the coder (bot) account
+      output.env.GH_TOKEN_CODER = coder;
+      // route github.com over HTTPS + token, per shell -- no SSH, no ~/.gitconfig edits.
+      output.env.GIT_CONFIG_COUNT = "2";
+      output.env.GIT_CONFIG_KEY_0 = "url.https://github.com/.insteadOf";
+      output.env.GIT_CONFIG_VALUE_0 = "git@github.com:";
+      output.env.GIT_CONFIG_KEY_1 = "credential.https://github.com.helper";
+      output.env.GIT_CONFIG_VALUE_1 = '!f() { echo username=x; echo "password=$GH_TOKEN"; }; f';
+      // author/committer -> the bot, so the commit itself (not just the push/PR) reads as the bot.
+      const who = ident();
+      if (who && who.name && who.email) {
+        output.env.GIT_AUTHOR_NAME = who.name;
+        output.env.GIT_AUTHOR_EMAIL = who.email;
+        output.env.GIT_COMMITTER_NAME = who.name;
+        output.env.GIT_COMMITTER_EMAIL = who.email;
+      }
+    }
+    if (reviewer) output.env.GH_TOKEN_REVIEWER = reviewer;  // agent-review sets GH_TOKEN=$GH_TOKEN_REVIEWER
+  },
+});
+'''
+
+
+def _git_identity_plugin_path(cfg_path):
+    return os.path.join(os.path.dirname(cfg_path), "plugins", "otools-git-identity.js")
+
+
+def _missing_gh_token_roles():
+    """Which of the two token files are absent (for the sync warning). Testable."""
+    return [role for role, path in (("coder", GH_TOKEN_CODER_FILE),
+                                    ("reviewer", GH_TOKEN_REVIEWER_FILE))
+            if not os.path.exists(path)]
+
+
+def _gh_token_path(role):
+    return GH_TOKEN_CODER_FILE if role == "coder" else GH_TOKEN_REVIEWER_FILE
+
+
+def _write_private_file(path, content):
+    """Write `content` to `path` with 0600 perms from creation (never world-readable)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _resolve_gh_identity(token):
+    """Ask GitHub who a token belongs to. Returns {name,email} or None (best-effort, offline-safe).
+
+    email is the account's attributable no-reply address (`<id>+<login>@users.noreply.github.com`),
+    which links the commit to the account regardless of its email-privacy setting.
+    """
+    if not token:
+        return None
+    req = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "User-Agent": "otools-git-identity"})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            u = json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    login, uid = u.get("login"), u.get("id")
+    if not login or uid is None:
+        return None
+    return {"name": login, "email": f"{uid}+{login}@users.noreply.github.com"}
+
+
+def _write_coder_identity(token, quiet=False):
+    """Resolve the coder token's identity and cache it to GH_CODER_IDENTITY_FILE. Returns it or None."""
+    who = _resolve_gh_identity(token)
+    if who:
+        _write_private_file(GH_CODER_IDENTITY_FILE, json.dumps(who))
+        if not quiet:
+            print(f"   commits will be authored as {who['name']} <{who['email']}>")
+    elif not quiet:
+        print("   (couldn't reach GitHub to resolve the bot's commit identity — "
+              "pushes/PRs still work; re-run `omw sync` when online to set it)")
+    return who
+
+
+def _set_gh_token(role, value):
+    """Persist (or clear) the coder/reviewer GitHub token file with 0600 perms.
+
+    For the coder, also resolve+cache the bot's commit identity (one API call) so agent
+    COMMITS read as the bot too. Returns a human status string.
+    """
+    path = _gh_token_path(role)
+    if value is None or value.strip().lower() in ("", "none", "unset", "-", "clear"):
+        if os.path.exists(path):
+            os.remove(path)
+            if role == "coder" and os.path.exists(GH_CODER_IDENTITY_FILE):
+                os.remove(GH_CODER_IDENTITY_FILE)
+            return f"cleared {role} token ({path})"
+        return f"{role} token already unset ({path})"
+    token = value.strip()
+    _write_private_file(path, token)
+    if role == "coder":
+        print(f"set coder token -> {path}  (reload OpenCode to apply)")
+        _write_coder_identity(token)
+        return None  # already printed
+    return f"set {role} token -> {path}  (reload OpenCode to apply)"
+
+
+def _warn_missing_gh_tokens():
+    missing = _missing_gh_token_roles()
+    if not missing:
+        return
+    print("\n⚠  GitHub identity not fully set — agents fall back to your logged-in gh account.")
+    print("   Set the missing token(s), then reload OpenCode:")
+    for role in missing:
+        who = ("shared bot account -- every coding agent commits/opens PRs as this"
+               if role == "coder" else
+               "your account -- you + @agent-review review & merge as this")
+        print(f"     omw config --set-gh-token-{role}   # {who} (prompts, input hidden)")
+
+
 def _plugin_js_path(cfg_path):
     return os.path.join(os.path.dirname(cfg_path), "plugins", "dgx-sampling.js")
 
@@ -2862,6 +3071,14 @@ def _build_parser():
     pc.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"), help="persist one setting")
     pc.add_argument("--edit", action="store_true", help="open wire.json in $EDITOR")
     pc.add_argument("--path", action="store_true", help="print the settings file path")
+    pc.add_argument("--set-gh-token-coder", nargs="?", const="__PROMPT__", default=None,
+                    metavar="TOKEN", dest="set_gh_token_coder",
+                    help="store the shared-bot GitHub token (coding agents commit/PR as this); "
+                         "omit TOKEN to be prompted with hidden input, pass 'none' to clear")
+    pc.add_argument("--set-gh-token-reviewer", nargs="?", const="__PROMPT__", default=None,
+                    metavar="TOKEN", dest="set_gh_token_reviewer",
+                    help="store your GitHub token (agent-review approves/merges the bot's PRs as "
+                         "this); omit TOKEN to be prompted, pass 'none' to clear")
     pc.set_defaults(func=cmd_config)
 
     pag = sub.add_parser("agents", parents=[io_parent],
