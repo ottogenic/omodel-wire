@@ -222,8 +222,10 @@ LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provi
 PERM = {
     "readonly": {"edit": "deny",  "bash": "deny",  "task": "deny",
                  "websearch": "allow", "webfetch": "allow"},
-    "ask":      {"edit": "ask",   "bash": "ask",   "websearch": "allow", "webfetch": "allow"},
-    "full":     {"edit": "allow", "bash": "allow", "websearch": "allow", "webfetch": "allow"},
+    "ask":      {"edit": "ask",   "bash": "ask",   "websearch": "allow", "webfetch": "allow",
+                 "task": {"*": "deny", "agent-review": "allow"}},
+    "full":     {"edit": "allow", "bash": "allow", "websearch": "allow", "webfetch": "allow",
+                 "task": {"*": "deny", "agent-review": "allow"}},
 }
 # Each spec: (key, preset role, mode, is_worker, perm profile, color, description).
 # color = FIXED hex by risk: green (read-only) -> yellow-green (ask) -> orange
@@ -238,9 +240,10 @@ AGENT_SPECS = [
     ("agent-plan",     "reason",   "subagent", True, "readonly", "#22c55e", "[worker] research & reasoning, read-only + web"),
     ("agent-code",     "code",     "subagent", True, "full",     "#f97316", "[worker] coding / implementation / debugging, full access"),
     ("agent-instruct", "instruct", "subagent", True, "full",     "#eab308", "[worker] fast mechanical subtasks, no thinking"),
+    ("agent-review",   "reason",   "subagent", True, "readonly", "#3b82f6", "[worker] handles reviewing Pull Requests"),
 ]
 # Hidden workers the team may delegate to (its permission.task allowlist).
-TEAM_TARGETS = ["agent-plan", "agent-code", "agent-instruct"]
+TEAM_TARGETS = ["agent-plan", "agent-code", "agent-instruct", "agent-review"]
 # Built-in agents we disable (can't be overridden; replaced by research/code).
 BUILTIN_DISABLE = ["build", "plan"]
 TEAM_COLOR = "#ef4444"   # red -- highest risk (orchestrates, spends $, delegates)
@@ -248,7 +251,7 @@ TEAM_COLOR = "#ef4444"   # red -- highest risk (orchestrates, spends $, delegate
 # stale ones on re-sync -- incl. old plan/build OVERRIDES and old names -- so
 # re-syncing converges. Won't touch the user's own agents.
 MANAGED_AGENTS = {"research", "code", "agent", "team",
-                  "agent-plan", "agent-code", "agent-instruct",
+                  "agent-plan", "agent-code", "agent-instruct", "agent-review",
                   "plan", "build", "instruct", "architect", "reason", "chat", "fast",
                   "general", "webdev", "agentic"}
 
@@ -279,7 +282,7 @@ def _create_default_models_template():
     """Create default_models.json with template (all agents set to qwen3-coder-next-fp8)."""
     template = {
         "agents": {
-            "Team": ["qwen3-coder-next-fp8"],
+            "team": ["qwen3-coder-next-fp8"],
             "research": ["qwen3-coder-next-fp8"],
             "code": ["qwen3-coder-next-fp8"],
             "agent": ["qwen3-coder-next-fp8"]
@@ -287,7 +290,8 @@ def _create_default_models_template():
         "subagents": {
             "agent-plan": ["qwen3-coder-next-fp8"],
             "agent-code": ["qwen3-coder-next-fp8"],
-            "agent-instruct": ["qwen3-coder-next-fp8"]
+            "agent-instruct": ["qwen3-coder-next-fp8"],
+            "agent-review": ["qwen3-coder-next-fp8"]
         }
     }
     try:
@@ -371,12 +375,32 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
             prefs = (default_models.get("agents") or {}).get(agent_name, [])
         
         if prefs:
-            preferred = get_preferred_model(available_model_ids, prefs)
+            # First check for remote models that are NOT in available models
+            # These are models from other providers (e.g., openai/gpt-5.5)
+            # We allow them to be used directly since they exist in OpenCode
+            preferred = None
+            for pref in prefs:
+                if "/" in pref and pref not in available_model_ids:
+                    # Remote model not in local pool - use it directly
+                    preferred = pref
+                    break
+            
+            # If no remote-only preference, check for local availability
+            if preferred is None:
+                for pref in prefs:
+                    if pref in available_model_ids:
+                        preferred = pref
+                        break
+            
+            # Fall back to first available model if nothing matches
+            if preferred is None and available_model_ids:
+                preferred = available_model_ids[0]
+            
             if preferred:
                 # Find the full model_ref for the preferred model
                 # Prefer reasoning_caps if the model is reasoning, otherwise use available_models
                 model_ref = None
-                if reasoning_caps and preferred in available_model_ids:
+                if preferred in available_model_ids:
                     for ref, caps in reasoning_caps.items():
                         mid = ref.split("/", 1)[1] if "/" in ref else ref
                         if mid == preferred:
@@ -392,6 +416,9 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
                 
                 if model_ref:
                     agent_cfg["model"] = model_ref
+                elif "/" in preferred:
+                    # Remote model reference (e.g., openai/gpt-5.5) - use directly
+                    agent_cfg["model"] = preferred
                 else:
                     # Fallback: keep the provider from current model
                     current_ref = agent_cfg.get("model", "")
@@ -475,6 +502,19 @@ When the work is finished, send a final plain-text message that summarizes what 
 - Never stop on a bare tool call or an empty message -- always finish with a text summary.
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
+"""
+
+# Review prompt for agent-review. Written next to opencode.json; edit there to tune.
+# This agent handles reviewing Pull Requests and provides feedback to the parent agent.
+REVIEW_PROMPT = """You are a code reviewer. Your role is to perform an in-depth code review of any open pull requests for the repository you are actively in.
+
+When reviewing:
+1. Identify any issues, bugs, or potential problems in the code
+2. For each issue found, outline the problem and provide a recommended fix
+3. If there are no issues or only minor ones, provide a summary of your findings
+4. If the PR is ready to merge with no issues, inform the parent agent it can be merged
+
+Your final message should summarize the review findings and any recommended actions.
 """
 
 # The blue test image + the word we expect a real vision model to say back.
@@ -944,13 +984,20 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         # non-empty results summary (works around OpenCode #18423). The VISIBLE
         # twins (plan/build/agent) stay prompt-free for clean direct use.
         if is_worker:
-            agent["prompt"] = "{file:./prompts/otools-worker.md}"
+            # agent-review has its own review prompt; others use worker prompt
+            if key == "agent-review":
+                agent["prompt"] = "{file:./prompts/otools-review.md}"
+            else:
+                agent["prompt"] = "{file:./prompts/otools-worker.md}"
         # Reliable sampling lives in the agent config too (correct even without the
         # plugin); the plugin additionally enforces top_k/min_p/penalties/maxOutput.
         if "temperature" in s: agent["temperature"] = s["temperature"]
         if "top_p" in s: agent["top_p"] = s["top_p"]
         if not preset.get("thinking") and not caps["can_disable"] and not recipe.get("soft_switch"):
             agent["description"] += "  [WARN: endpoint can't disable thinking]"
+        # code and agent need task_budget to delegate (only to agent-review)
+        if key in ("code", "agent"):
+            agent["task_budget"] = 1
         agents[key] = agent
         agent_sampling[key] = _vec_for(preset)
 
@@ -1590,6 +1637,15 @@ def oc_sync(args, sampling, detected_installed):
     kept.update(providers)
     cfg["provider"] = kept
 
+    # Collect all available models from both local probes AND existing config
+    # This allows default_models.json to reference models from other providers
+    all_available_models = dict(available_models)
+    for prov_key, prov_cfg in existing.items():
+        if prov_key in kept:  # only include providers we're keeping
+            models = prov_cfg.get("models", {})
+            for mid, mcfg in models.items():
+                all_available_models[f"{prov_key}/{mid}"] = {}
+
     # Default model handling
     if args.set_default:
         cfg["model"] = args.set_default
@@ -1622,7 +1678,31 @@ def oc_sync(args, sampling, detected_installed):
         # of leaving stale agents pointing at a model that is no longer served.
         cur = cfg.get("model")
         pool = reasoning_caps if reasoning_caps else available_models
-        agent_model_ref = cur if cur in pool else sorted(pool)[0]
+        
+        # Build available_model_ids for remote model detection
+        available_model_ids = []
+        for model_ref in available_models.keys():
+            model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+            available_model_ids.append(model_id)
+        
+        # Check if user prefers a remote model (e.g., openai/gpt-5.5) for team
+        default_models = load_default_models()
+        team_prefs = (default_models.get("agents") or {}).get("team", [])
+        
+        # Prefer a reasoning model first, then check team preferences
+        agent_model_ref = None
+        if reasoning_caps:
+            agent_model_ref = cur if cur in reasoning_caps else sorted(reasoning_caps)[0]
+        else:
+            # No reasoning models - check if team preference is a remote model
+            for pref in team_prefs:
+                if "/" in pref and pref not in available_model_ids:
+                    # Remote model - use it as the base
+                    agent_model_ref = pref
+                    break
+            
+            if not agent_model_ref:
+                agent_model_ref = cur if cur in pool else sorted(pool)[0]
         model_id = agent_model_ref.split("/", 1)[1] if "/" in agent_model_ref else agent_model_ref
         matched_recipe = match_recipe(model_id, configs)
         # Reasoning models carry declared caps; a non-reasoning model derives them
@@ -1661,7 +1741,7 @@ def oc_sync(args, sampling, detected_installed):
 
         # Apply default models preferences to agents
         default_models = load_default_models()
-        agents = _apply_default_models(agents, default_models, reasoning_caps, available_models)
+        agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models)
 
         # Per-(model, agent) sampling: one table per discovered model, so switching
         # an agent onto another model applies THAT model's card sampling (10+ models
@@ -1785,6 +1865,10 @@ def oc_sync(args, sampling, detected_installed):
     if args.profiles and any(k in agents for k in TEAM_TARGETS):
         worker_prompt_path = os.path.join(os.path.dirname(config_path),
                                           "prompts", "otools-worker.md")
+    review_prompt_path = None
+    if args.profiles and "agent-review" in agents:
+        review_prompt_path = os.path.join(os.path.dirname(config_path),
+                                          "prompts", "otools-review.md")
 
     # ---- Web search / tool exposure -----------------------------------------
     web_notes = oc_apply_web_search(cfg, args)
@@ -1851,6 +1935,9 @@ def oc_sync(args, sampling, detected_installed):
         if worker_prompt_path:
             print(f"\n--- DRY RUN: would write {worker_prompt_path} ---")
             print(WORKER_PROMPT)
+        if review_prompt_path:
+            print(f"\n--- DRY RUN: would write {review_prompt_path} ---")
+            print(REVIEW_PROMPT)
         return 0
 
     # Write config (+ one-shot backup)
@@ -1901,6 +1988,12 @@ def oc_sync(args, sampling, detected_installed):
         with open(worker_prompt_path, "w") as f:
             f.write(WORKER_PROMPT)
         print(f"Wrote {worker_prompt_path}")
+
+    if review_prompt_path:
+        os.makedirs(os.path.dirname(review_prompt_path), exist_ok=True)
+        with open(review_prompt_path, "w") as f:
+            f.write(REVIEW_PROMPT)
+        print(f"Wrote {review_prompt_path}")
 
     print("Restart / reload OpenCode to pick up the changes.")
     return 0
@@ -2328,7 +2421,8 @@ def _roster_view(args, want_subagent):
     rows = []
     for name, a in picked.items():
         vec = _agent_vec(name, a, plugin)
-        budget = a.get("task_budget", "-") if name == "team" else "-"
+        # Show task_budget for team and agents that can delegate (code, agent)
+        budget = a.get("task_budget", "-") if name in ("team", "code", "agent") else "-"
         rows.append((name, _short_model(a.get("model")), _fmt(vec["temperature"]),
                      _fmt(vec["enable_thinking"]), _perm_label(a.get("permission")), budget))
     print(f"{'Sub-agents (delegation workers)' if want_subagent else 'Primary agents (Tab cycle)'} "
@@ -2429,7 +2523,8 @@ def cmd_models(args):
 
     # list
     # Full catalogue; LIVE/PROXY/SERVED reflect what's actually running now.
-    # served id -> is its provider proxied (loopback baseURL)?
+    # Show 1 row per model (not per config) so different instances of same model name
+    # on different endpoints are shown separately.
     live_proxied = {}
     for pv in (cfg.get("provider") or {}).values():
         prox = _is_loopback((pv.get("options") or {}).get("baseURL", ""))
@@ -2438,26 +2533,57 @@ def cmd_models(args):
     rows = []
     total = 0
     show_all = getattr(args, "all", False)
+    
+    # Build map of model_id -> matching config info
+    model_config_map = {}
     for r in configs.get("recipes", []):
-        total += 1
-        title = (r.get("match") or ["?"])[0]
-        cap = r.get("capabilities", {}) or {}
         pats = r.get("match") or []
         pats = [pats] if isinstance(pats, str) else pats
-        matched = [mid for mid in live_proxied
-                   if any(str(p).lower() in mid.lower() for p in pats)]
-        if not matched and not show_all:
-            continue  # LIVE-only by default; --all shows the full catalogue
-        live = "yes" if matched else "-"
-        proxy = ("on" if any(live_proxied[m] for m in matched) else "off") if matched else "-"
-        served = ", ".join(matched) if matched else "-"
-        rows.append((title, _fmt(bool(cap.get("reasoning"))), _fmt(bool(cap.get("vision"))),
-                     live, proxy, served, r.get("_file", "")))
-    if not total:
+        for mid in live_proxied:
+            if any(str(p).lower() in mid.lower() for p in pats):
+                model_config_map[mid] = r
+    
+    # Also track which configs have at least one live model
+    configs_with_live = set()
+    for mid, r in model_config_map.items():
+        configs_with_live.add(r.get('_file'))
+    
+    # Process each live model individually
+    for mid in sorted(live_proxied.keys()):
+        r = model_config_map.get(mid)
+        if not r and not show_all:
+            continue  # LIVE-only by default; --all shows all configs
+        if r:
+            title = mid  # Use actual model name, not config's first match
+            cap = r.get("capabilities", {}) or {}
+            total += 1
+        else:
+            # No matching config - show model with (no config match)
+            # Only if there are configs with live matches
+            if not configs_with_live:
+                continue  # No configs with live models
+            title = mid
+            cap = {}
+            total += 1
+        
+        # Determine if this model is "live" (has a config match)
+        live = "yes" if r else "-"
+        proxy = "on" if live_proxied[mid] else "off"
+        served = mid if r else mid  # Show just this model in SERVED
+        is_reasoning = bool(cap.get("reasoning")) if r else ("gemma4" in mid.lower() or "deepseek" in mid.lower() or "qwen3" in mid.lower())
+        is_vision = bool(cap.get("vision")) if r else ("vl" in mid.lower() or "vision" in mid.lower() or "multimodal" in mid.lower())
+        config_file = r.get("_file", "(no config match)") if r else "(no config match)"
+        
+        rows.append((title, _fmt(is_reasoning), _fmt(is_vision),
+                     live, proxy, served, config_file))
+    # Track if we have configs and if any matched
+    has_configs = len(configs.get("recipes", [])) > 0
+    if not has_configs:
         print("No model configs found.")
         _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
         return
-    if not rows:  # configs exist, but nothing live and no --all
+    # If no matches and not showing all, show "no models live" message
+    if not rows and not show_all:
         print("No models are live right now.")
         _suggest([("Show every declared model", "omw models --all")])
         return

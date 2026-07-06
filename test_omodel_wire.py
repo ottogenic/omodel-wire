@@ -224,8 +224,10 @@ class TestAgentBuilding(unittest.TestCase):
         # visible agents carry no worker prompt; hidden workers do.
         for k in ("research", "code", "agent"):
             self.assertNotIn("prompt", agents[k], f"visible {k} should be prompt-free")
-        for k in m.TEAM_TARGETS:
+        # agent-review has its own review prompt; other workers use worker prompt
+        for k in ("agent-plan", "agent-code", "agent-instruct"):
             self.assertEqual(agents[k].get("prompt"), "{file:./prompts/otools-worker.md}")
+        self.assertEqual(agents["agent-review"].get("prompt"), "{file:./prompts/otools-review.md}")
 
         # permission tiers landed on the right agents
         self.assertEqual(agents["research"]["permission"]["edit"], "deny")

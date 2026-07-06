@@ -45,6 +45,14 @@ All notable changes to this project are documented here. The format follows
   supported mechanism — the old `tools` field is deprecated in OpenCode.)
 
 ### Added
+- **`agent-review` subagent.** A new hidden worker that handles reviewing Pull Requests. It uses
+  `anthropic/claude-opus-4-8` by default, delegates only to `agent-review`, and has a task budget
+  of 1. The review prompt is written to `prompts/otools-review.md` and guides the agent to
+  identify issues, provide fixes, and inform the parent agent when a PR is ready to merge.
+- **`pr-review` skill.** A new skill at `.agents/skills/pr-review/SKILL.md` that defines the
+  end-to-end workflow for reviewing and merging PRs against this repo. It follows the rules in
+  `REVIEW.md`, runs the repo's checks, reads the diff, and only merges when the review is clean.
+  PRs that fail checks, have security issues, or need design decisions get `--request-changes`.
 - **`default_models.json` — user-editable model preferences for agents/subagents.** `omw sync`
   selects the highest-preferred *available* model from `default_models.json` for each
   agent/subagent (ordered lists; fall back to the first available model if none match).
