@@ -294,6 +294,27 @@ class TestApplyDefaultModels(unittest.TestCase):
         # Remote models are now supported (e.g., openai/gpt-5.5 from OpenCode's built-in provider)
         self.assertEqual(result["Team"]["model"], "anthropic/claude-opus")
 
+    def test_remote_model_present_in_pool_uses_full_ref(self):
+        """A remote model surfaced via the existing-config pool (full slug key)
+        is applied with that full provider/model ref."""
+        agents = {"team": {"model": "dgx-n1-8000/some-model", "mode": "primary"}}
+        default_models = {"agents": {"team": ["openai/gpt-5.5", "dgx-n1-8000/qwen3"]}}
+        reasoning_caps = {}
+        # all_available_models includes the remote provider's model under its full slug
+        available_models = {"dgx-n1-8000/qwen3": {}, "openai/gpt-5.5": {}}
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
+
+    def test_agent_review_remote_subagent_preference(self):
+        """agent-review can prefer a remote reviewer model (anthropic/claude-opus-4-8)."""
+        agents = {"agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}}
+        default_models = {"subagents": {
+            "agent-review": ["anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}}
+        reasoning_caps = {}
+        available_models = {"dgx-n1-8000/qwen3-coder-next-fp8": {}}
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["agent-review"]["model"], "anthropic/claude-opus-4-8")
+
 
 if __name__ == "__main__":
     unittest.main()

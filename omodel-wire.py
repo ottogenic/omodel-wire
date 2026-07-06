@@ -1741,8 +1741,7 @@ def oc_sync(args, sampling, detected_installed):
             agents, agent_sampling = oc_build_agents(
                 agent_model_ref, caps, sampling.get("repetition_detection"))
 
-        # Apply default models preferences to agents
-        default_models = load_default_models()
+        # Apply default models preferences to agents (default_models already loaded above)
         agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models)
 
         # Per-(model, agent) sampling: one table per discovered model, so switching
@@ -2525,72 +2524,58 @@ def cmd_models(args):
 
     # list
     # Full catalogue; LIVE/PROXY/SERVED reflect what's actually running now.
-    # Show 1 row per model (not per config) so different instances of same model name
-    # on different endpoints are shown separately.
+    # We iterate the DECLARED recipes (so --all shows the full catalogue, incl.
+    # offline models), then emit ONE row per live served instance of each config
+    # -- so the same config served on two endpoints shows as two rows. Configs
+    # with no live instance collapse to a single row (served "-"), shown only
+    # under --all. Capabilities always come from the config; never guessed.
     live_proxied = {}
     for pv in (cfg.get("provider") or {}).values():
         prox = _is_loopback((pv.get("options") or {}).get("baseURL", ""))
         for mid in (pv.get("models") or {}):
             live_proxied[mid] = prox
     rows = []
-    total = 0
+    total = 0            # declared configs seen (drives the "N more not live" hint)
+    live_configs = 0     # declared configs with at least one live instance
     show_all = getattr(args, "all", False)
-    
-    # Build map of model_id -> matching config info
-    model_config_map = {}
+    matched_ids = set()  # live ids that matched some config (to find orphans)
     for r in configs.get("recipes", []):
+        total += 1
+        cap = r.get("capabilities", {}) or {}
         pats = r.get("match") or []
         pats = [pats] if isinstance(pats, str) else pats
-        for mid in live_proxied:
-            if any(str(p).lower() in mid.lower() for p in pats):
-                model_config_map[mid] = r
-    
-    # Also track which configs have at least one live model
-    configs_with_live = set()
-    for mid, r in model_config_map.items():
-        configs_with_live.add(r.get('_file'))
-    
-    # Process each live model individually
-    for mid in sorted(live_proxied.keys()):
-        r = model_config_map.get(mid)
-        if not r and not show_all:
-            continue  # LIVE-only by default; --all shows all configs
-        if r:
-            title = mid  # Use actual model name, not config's first match
-            cap = r.get("capabilities", {}) or {}
-            total += 1
-        else:
-            # No matching config - show model with (no config match)
-            # Only if there are configs with live matches
-            if not configs_with_live:
-                continue  # No configs with live models
-            title = mid
-            cap = {}
-            total += 1
-        
-        # Determine if this model is "live" (has a config match)
-        live = "yes" if r else "-"
-        proxy = "on" if live_proxied[mid] else "off"
-        served = mid if r else mid  # Show just this model in SERVED
-        is_reasoning = bool(cap.get("reasoning")) if r else ("gemma4" in mid.lower() or "deepseek" in mid.lower() or "qwen3" in mid.lower())
-        is_vision = bool(cap.get("vision")) if r else ("vl" in mid.lower() or "vision" in mid.lower() or "multimodal" in mid.lower())
-        config_file = r.get("_file", "(no config match)") if r else "(no config match)"
-        
-        rows.append((title, _fmt(is_reasoning), _fmt(is_vision),
-                     live, proxy, served, config_file))
-    # Track if we have configs and if any matched
-    has_configs = len(configs.get("recipes", [])) > 0
-    if not has_configs:
+        matched = sorted(mid for mid in live_proxied
+                         if any(str(p).lower() in mid.lower() for p in pats))
+        matched_ids.update(matched)
+        reason = _fmt(bool(cap.get("reasoning")))
+        vision = _fmt(bool(cap.get("vision")))
+        if matched:
+            live_configs += 1
+            # One row per served instance; MODEL is the actual served id.
+            for mid in matched:
+                proxy = "on" if live_proxied[mid] else "off"
+                rows.append((mid, reason, vision, "yes", proxy, mid, r.get("_file", "")))
+        elif show_all:
+            title = (r.get("match") or ["?"])[0]
+            rows.append((title, reason, vision, "-", "-", "-", r.get("_file", "")))
+    # Live provider models with NO declared config -- surfaced under --all only, so
+    # they're not silently invisible, but without guessing their capabilities.
+    if show_all:
+        for mid in sorted(live_proxied.keys()):
+            if mid in matched_ids:
+                continue
+            proxy = "on" if live_proxied[mid] else "off"
+            rows.append((mid, "-", "-", "yes", proxy, mid, "(no config match)"))
+    if not total:
         print("No model configs found.")
         _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
         return
-    # If no matches and not showing all, show "no models live" message
-    if not rows and not show_all:
+    if not rows:  # configs exist, but nothing live and no --all
         print("No models are live right now.")
         _suggest([("Show every declared model", "omw models --all")])
         return
     scope = "declared in the omodel-manager configs" if show_all else "live now"
-    hidden = "" if show_all else f"  ({total - len(rows)} more not live; --all to show)"
+    hidden = "" if show_all else f"  ({total - live_configs} more not live; --all to show)"
     print(f"Models {scope} (LIVE/PROXY/SERVED = live state):{hidden}\n")
     _table(("MODEL", "REASON", "VISION", "LIVE", "PROXY", "SERVED", "CONFIG"), rows)
     _suggest([("Show a model's per-role sampling", "omw models <name>"),

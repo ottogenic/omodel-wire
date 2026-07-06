@@ -255,6 +255,21 @@ class TestAgentBuilding(unittest.TestCase):
         for t in m.TEAM_TARGETS:
             self.assertEqual(task[t], "allow", f"team can't delegate to {t}")
 
+    def test_code_agent_can_delegate_to_review(self):
+        # code/agent get a task_budget so they can hand a PR to agent-review, and
+        # their task permission allowlists ONLY agent-review (everything else denied).
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        for k in ("code", "agent"):
+            self.assertEqual(agents[k].get("task_budget"), 1,
+                             f"{k} needs a task_budget to delegate")
+            task = agents[k]["permission"]["task"]
+            self.assertEqual(task["*"], "deny")
+            self.assertEqual(task["agent-review"], "allow")
+        # visible research (readonly) and the workers never get a task budget.
+        self.assertNotIn("task_budget", agents["research"])
+        self.assertNotIn("task_budget", agents["agent-plan"])
+
     def test_thinking_knob_on(self):
         # reason/code/agent are thinking:true -> enable_thinking + graded effort.
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
@@ -1198,6 +1213,70 @@ class TestProxyCli(unittest.TestCase):
         prov = self._load(cfg)["provider"]
         self.assertFalse(m._is_loopback(prov["dgx-n1-8000"]["options"]["baseURL"]))
         self.assertTrue(m._is_loopback(prov["dgx-n2-8000"]["options"]["baseURL"]))
+
+
+class TestModelsListCatalogue(unittest.TestCase):
+    """omw models: --all shows the full declared catalogue (incl. offline models),
+    the live view emits one row per served instance, hint math counts declared
+    configs, and unmatched live models never get guessed capabilities."""
+
+    def _cfg(self, tmp, provider):
+        path = os.path.join(tmp, "opencode.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"provider": provider}, f)
+        return path
+
+    def test_all_shows_declared_but_not_live(self):
+        # Nothing live -> --all still lists BOTH fixture configs (qwen + nemotron).
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {})
+            out = _capture(m.cmd_models, _cli_args(cfg, all=True))
+            self.assertIn("Qwen3.6-27B-NVFP4", out)
+            self.assertIn("NVIDIA-Nemotron-3-Super-120B", out)
+            # offline rows carry LIVE/PROXY/SERVED = "-"
+            nemo = [ln for ln in out.splitlines() if "Nemotron" in ln][0]
+            self.assertIn("nemotron", nemo)
+
+    def test_default_live_only_hides_offline(self):
+        # Only qwen live -> default view shows qwen, not nemotron, and the hint
+        # counts the offline config ("1 more not live").
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {"dgx-n1-8000": {
+                "options": {"baseURL": "http://127.0.0.1:8000/v1"},
+                "models": {"Qwen3.6-27B-NVFP4": {}}}})
+            out = _capture(m.cmd_models, _cli_args(cfg, all=False))
+            self.assertIn("Qwen3.6-27B-NVFP4", out)
+            self.assertNotIn("Nemotron", out)
+            self.assertIn("1 more not live", out)
+
+    def test_one_row_per_served_instance(self):
+        # Two served ids matching the SAME config (on two endpoints) -> two rows,
+        # one proxied (loopback) and one direct.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {
+                "dgx-a": {"options": {"baseURL": "http://127.0.0.1:8000/v1"},
+                          "models": {"Qwen3.6-27B-NVFP4": {}}},
+                "dgx-b": {"options": {"baseURL": "http://198.51.100.5:8000/v1"},
+                          "models": {"Qwen3.6-27B": {}}}})
+            out = _capture(m.cmd_models, _cli_args(cfg, all=False))
+            self.assertIn("Qwen3.6-27B-NVFP4", out)
+            # both instances of the single qwen config appear as separate rows
+            rows = [ln for ln in out.splitlines() if "Qwen3.6-27B" in ln and "yes" in ln]
+            self.assertEqual(len(rows), 2, f"expected 2 served rows, got: {rows}")
+
+    def test_unmatched_live_model_not_guessed(self):
+        # A live provider model with no declared config is surfaced only under
+        # --all, with capabilities shown as "-" (never guessed from the name).
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {"dgx-n1-8000": {
+                "options": {"baseURL": "http://127.0.0.1:8000/v1"},
+                "models": {"totally-unknown-model": {}}}})
+            live = _capture(m.cmd_models, _cli_args(cfg, all=False))
+            self.assertNotIn("totally-unknown-model", live)  # hidden by default
+            allout = _capture(m.cmd_models, _cli_args(cfg, all=True))
+            row = [ln for ln in allout.splitlines() if "totally-unknown-model" in ln]
+            self.assertTrue(row, "unmatched model should appear under --all")
+            self.assertIn("(no config match)", row[0])
 
 
 class TestModelsProxyColumn(unittest.TestCase):
