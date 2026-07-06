@@ -1659,6 +1659,7 @@ def oc_sync(args, sampling, detected_installed):
     config_path = os.path.expanduser(args.config)
 
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
+    
     print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
     providers, refs, reasoning_caps, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling,
@@ -1677,6 +1678,23 @@ def oc_sync(args, sampling, detected_installed):
     kept = {k: v for k, v in existing.items() if not oc_is_managed(k)}
     removed = [k for k in existing if oc_is_managed(k)]
     kept.update(providers)
+    
+    # Use disabled_providers array to disable built-in providers (OpenCode and Hugging Face)
+    # This is the proper OpenCode way to hide providers at the provider level
+    # Managed providers we control: always remove them from existing_disabled first,
+    # then add back only when the flag is absent (to preserve user-authored entries)
+    MANAGED_DISABLED = {"opencode", "huggingface"}
+    existing_disabled = set(cfg.get("disabled_providers", []))
+    
+    if args.add_default_providers:
+        # Remove managed providers from disabled list (enable them)
+        disabled_providers_list = sorted(existing_disabled - MANAGED_DISABLED)
+    else:
+        # Add managed providers to disabled list (disable them), preserving user entries
+        disabled_providers_list = sorted(existing_disabled | MANAGED_DISABLED)
+    
+    cfg["disabled_providers"] = disabled_providers_list if disabled_providers_list else []
+    
     cfg["provider"] = kept
 
     # Collect all available models from both local probes AND existing config
@@ -2391,6 +2409,8 @@ def _add_sync_args(p):
     # Tool calling + web search
     p.add_argument("--no-tool-call", action="store_true",
                    help="don't declare tool_call (OpenCode then sends NO tools to these models)")
+    p.add_argument("--add-default-providers", action="store_true",
+                   help="enable built-in OpenCode and Hugging Face providers (by default, they are disabled)")
     p.add_argument("--web-search", choices=["none", "exa", "mcp"], default=None,
                    help="expose a web-search tool. exa: keyless Exa; mcp: an MCP server "
                         "(default: wire.json web_search, else none)")

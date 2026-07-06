@@ -104,6 +104,23 @@ it with `omw config --set team_model anthropic/claude-opus-4-8`; workers stay lo
 defaults it to the worker model's declared `concurrency` (its `max-num-seqs`) so it won't
 spawn more parallel workers than the server has sequence slots.
 
+### Disabled providers by default
+
+By default, the built-in **OpenCode** and **Hugging Face** providers are **disabled** using
+OpenCode's `disabled_providers` array. This keeps the provider definitions in your config
+but prevents users from accidentally selecting them.
+
+To enable these providers (e.g., if you're using their API keys), pass `--add-default-providers`:
+
+```bash
+omw sync --add-default-providers
+```
+
+This is idempotent: re-running without the flag re-applies the disabled list; with the flag,
+providers are enabled. The providers remain managed by `omw` and will be pruned on the next
+sync unless they're also running on your DGX endpoints (in which case they're kept as DGX
+providers with their own `dgx-*` keys).
+
 ### Model configs
 
 Curated capabilities + per-mode sampling live in **omodel-manager**'s `configs/*.toml`
@@ -123,6 +140,7 @@ model against its config.
 | ------- | ------------ |
 | `omw` | Home screen: status + suggested next steps. |
 | `omw sync` | Build/refresh the OpenCode roster from the model configs. Carries all the sync knobs (`--hosts/--ports`, `--team-model/--team-task-budget/--team-reasoning`, `--default-agent/--keep-builtins`, `--web-search`, `--sampling …`, `--dry-run`, …). This is the "reset to known-good" button. |
+| `omw sync --add-default-providers` | Enable built-in OpenCode and Hugging Face providers (by default, these are disabled and their models are hidden from the picker). |
 | `omw agents [<name>]` | List primary agents; show one in detail. |
 | `omw agents <name> --set-model REF` | Live-set an agent's model. |
 | `omw agents team --set-work-budget N` | Live-set the team's delegation budget. |
@@ -189,6 +207,9 @@ omw proxy off                      # restore config, stop the proxy
 - **Non-destructive merge.** The tool merges into your existing `opencode.json`; it
   only prunes agents it manages (`MANAGED_AGENTS`), leaving your hand-written agents
   and providers alone.
+- **Disabled providers by default.** The built-in OpenCode and Hugging Face providers
+  are disabled by default using the `disabled_providers` array. Pass `--add-default-providers`
+  to enable them (e.g., if you're using their API keys).
 - **Anthropic config is preserved.** A previously-set frontier team model — and its
   reasoning budget and task budget — survive re-syncs even without re-passing the flags,
   so your cloud config isn't wiped.
