@@ -41,12 +41,12 @@ class TestLoadDefaultModels(unittest.TestCase):
                 self.assertIn("agents", result)
                 self.assertIn("subagents", result)
                 
-                # Should have Team and agent-code defaults
-                self.assertIn("Team", result["agents"])
+                # Should have team and agent-code defaults
+                self.assertIn("team", result["agents"])
                 self.assertIn("agent-code", result["subagents"])
                 
                 # Should have qwen3-coder-next-fp8 as default
-                self.assertEqual(result["agents"]["Team"], ["qwen3-coder-next-fp8"])
+                self.assertEqual(result["agents"]["team"], ["qwen3-coder-next-fp8"])
                 self.assertEqual(result["subagents"]["agent-code"], ["qwen3-coder-next-fp8"])
             finally:
                 m.DEFAULT_MODELS_FILE = original
@@ -56,9 +56,9 @@ class TestLoadDefaultModels(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_file = os.path.join(tmpdir, "default_models.json")
             
-            # Create a custom config
+            # Create a custom config with lowercase keys matching actual agent names
             custom_config = {
-                "agents": {"Team": ["custom-model"]},
+                "agents": {"team": ["custom-model"]},
                 "subagents": {"agent-code": ["another-model"]}
             }
             with open(fake_file, "w") as f:
@@ -72,7 +72,7 @@ class TestLoadDefaultModels(unittest.TestCase):
                 result = m.load_default_models()
                 
                 # Should return the existing config
-                self.assertEqual(result["agents"]["Team"], ["custom-model"])
+                self.assertEqual(result["agents"]["team"], ["custom-model"])
                 self.assertEqual(result["subagents"]["agent-code"], ["another-model"])
             finally:
                 m.DEFAULT_MODELS_FILE = original
@@ -274,8 +274,8 @@ class TestApplyDefaultModels(unittest.TestCase):
         self.assertEqual(result["agent-code"]["model"], "dgx-n1-8000/model2")
         self.assertEqual(result["agent-plan"]["model"], "dgx-n1-8000/model1")
 
-    def test_non_dgx_model_not_selected(self):
-        """Should not select non-DGX models (not in reasoning_caps)."""
+    def test_non_dgx_model_selected_when_remote(self):
+        """Should select remote models (not in available_models) when they're preferences."""
         agents = {
             "Team": {"model": "dgx-n1-8000/some-model", "mode": "primary"}
         }
@@ -291,8 +291,29 @@ class TestApplyDefaultModels(unittest.TestCase):
         }
         result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
         
-        # Should only pick from DGX models
-        self.assertEqual(result["Team"]["model"], "dgx-n1-8000/qwen3")
+        # Remote models are now supported (e.g., openai/gpt-5.5 from OpenCode's built-in provider)
+        self.assertEqual(result["Team"]["model"], "anthropic/claude-opus")
+
+    def test_remote_model_present_in_pool_uses_full_ref(self):
+        """A remote model surfaced via the existing-config pool (full slug key)
+        is applied with that full provider/model ref."""
+        agents = {"team": {"model": "dgx-n1-8000/some-model", "mode": "primary"}}
+        default_models = {"agents": {"team": ["openai/gpt-5.5", "dgx-n1-8000/qwen3"]}}
+        reasoning_caps = {}
+        # all_available_models includes the remote provider's model under its full slug
+        available_models = {"dgx-n1-8000/qwen3": {}, "openai/gpt-5.5": {}}
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
+
+    def test_agent_review_remote_subagent_preference(self):
+        """agent-review can prefer a remote reviewer model (anthropic/claude-opus-4-8)."""
+        agents = {"agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}}
+        default_models = {"subagents": {
+            "agent-review": ["anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}}
+        reasoning_caps = {}
+        available_models = {"dgx-n1-8000/qwen3-coder-next-fp8": {}}
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["agent-review"]["model"], "anthropic/claude-opus-4-8")
 
 
 if __name__ == "__main__":
