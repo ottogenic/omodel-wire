@@ -589,6 +589,36 @@ class TestSyncEndToEnd(unittest.TestCase):
             finally:
                 m.GH_TOKEN_CODER_FILE, m.GH_CODER_IDENTITY_FILE, m._resolve_gh_identity = saved
 
+    def test_default_model_prefs_ordered_and_slash_safe(self):
+        # Preference resolution walks the list IN ORDER; a served id that contains a slash
+        # (unsloth/qwen3-coder-next-fp8) is a LOCAL model, not a remote provider ref.
+        avail = {
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8": {},
+            "dgx-103-8000/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-x/placeholder"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # top local live -> picked (full ref), even though a remote is later in the list
+        self.assertEqual(
+            resolve(["unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "openai/gpt-5.5"]),
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+        # top local NOT live -> fall THROUGH to the next live local (slash id not misclassified,
+        # not jumped to the remote)
+        self.assertEqual(
+            resolve(["qwen3.6-35b-a3b-fp8", "qwen3-coder-next-fp8", "openai/gpt-5.5"]),
+            "dgx-103-8000/qwen3-coder-next-fp8")
+        # no listed local live -> the listed remote provider ref is used directly
+        self.assertEqual(
+            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]), "openai/gpt-5.5")
+        # a cloud-only list resolves to the remote even though locals are live
+        self.assertEqual(
+            resolve(["anthropic/claude-opus-4-8", "openai/gpt-5.5"], mode="subagent"),
+            "anthropic/claude-opus-4-8")
+
     def test_non_reasoning_only_fleet_still_builds_roster(self):
         # Regression: a fleet with NO reasoning models must still rebuild the roster
         # onto a live model, not leave the agents empty/stale pointing at a model
@@ -944,11 +974,21 @@ class TestCliViews(unittest.TestCase):
             self.assertIn("--all", live)  # hint to see the rest
 
 
-def _sync_fixture(tmp, **over):
+def _sync_fixture(tmp, default_models=None, **over):
+    # Tests must NOT depend on the developer's personal default_models.json (editing prefs
+    # shouldn't break the suite). Default to neutral prefs -> agents fall back to the live
+    # fixture model; pass default_models=... to exercise the preference logic explicitly.
     args = make_args(tmp, **over)
     sampling = m.build_sampling(args)
-    with FakeProbes(), quiet():
-        m.oc_sync(args, sampling, {"opencode"})
+    orig = m.load_default_models
+    m.load_default_models = lambda: (default_models
+                                     if default_models is not None
+                                     else {"agents": {}, "subagents": {}})
+    try:
+        with FakeProbes(), quiet():
+            m.oc_sync(args, sampling, {"opencode"})
+    finally:
+        m.load_default_models = orig
     return args.config
 
 
