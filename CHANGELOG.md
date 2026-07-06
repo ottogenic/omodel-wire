@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`default_models.json` preference resolution now walks the list in order and no longer
+  misclassifies local served ids.** Two bugs surfaced when a preference list mixed local models
+  first with a cloud fallback last: (1) any preference containing a `/` that wasn't in the local
+  pool was treated as a remote provider ref — so a DGX served id like `unsloth/qwen3-coder-next-fp8`
+  (an HF org/model id) pointed the roster at a non-existent `unsloth` provider whenever that model
+  was down; (2) the old two-pass logic grabbed the first cloud model in the list regardless of
+  order, so a local-first list still resolved to `openai/gpt-5.5` even with a local model live and
+  listed first. Now a single ordered pass takes the first live-local **or** known-remote-provider
+  preference (see `REMOTE_PROVIDERS`), falling back to the first available local only if nothing in
+  the list resolves. (Tests no longer depend on the developer's personal `default_models.json`.)
+
+### Changed
+- **`default_models.json` updated** with per-agent preference lists: the coding/reasoning agents
+  prefer local DGX models (`unsloth/qwen3-coder-next-fp8` → the fp8/nvfp4 coders → the 35B-A3B pair)
+  then cloud (`openai/gpt-5.5`, `google/gemini-3.5-flash`); `agent-review` prefers
+  `anthropic/claude-opus-4-8` then the two cloud models.
+
 ### Added
 - **`team-orchestration` skill** (written to the global `<config-dir>/skills/`, which OpenCode
   auto-scans) holds the Team Lead's methodology — decompose, **dispatch independent work to
