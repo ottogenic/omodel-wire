@@ -187,6 +187,11 @@ DEFAULT_CONTEXT = 200000              # used if endpoint doesn't report max_mode
 DEFAULT_OUTPUT = 65536               # OpenCode requires limit.output
 API_KEY = "sglang"                    # dummy; vLLM/SGLang ignore it
 PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
+# Cloud providers OpenCode routes to directly. Lets a default_models.json preference tell a
+# real remote ref (openai/gpt-5.5) apart from a DGX served-model-id that merely contains a
+# slash (e.g. unsloth/qwen3-coder-next-fp8 -- an HF org/model id, NOT a provider ref).
+REMOTE_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "azure",
+                    "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex"}
 # vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
 # token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
 # Three knobs (vLLM's own defaults in parens):
@@ -381,25 +386,23 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
             prefs = (default_models.get("agents") or {}).get(agent_name, [])
         
         if prefs:
-            # First check for remote models that are NOT in available models
-            # These are models from other providers (e.g., openai/gpt-5.5)
-            # We allow them to be used directly since they exist in OpenCode
+            # Resolve this agent's model by walking its preferences IN ORDER and taking the FIRST
+            # that resolves — either a live DGX model (matched against the local pool) or a
+            # cloud/remote provider ref OpenCode routes (openai/…, anthropic/…, google/… — see
+            # REMOTE_PROVIDERS). List order is authoritative: [local-A, cloud-B, local-C] with A
+            # down but B up resolves to B (we never skip an earlier resolvable cloud model to reach
+            # a later local one). If nothing in the list resolves, fall back to any live DGX model.
+            # A served id that merely contains a slash (unsloth/qwen3-coder-next-fp8) is a DGX model
+            # — it matches ONLY the local-pool check and is NEVER sent to a cloud provider.
             preferred = None
             for pref in prefs:
-                if "/" in pref and pref not in available_model_ids:
-                    # Remote model not in local pool - use it directly
+                if pref in available_model_ids:                 # live DGX model
                     preferred = pref
                     break
-            
-            # If no remote-only preference, check for local availability
-            if preferred is None:
-                for pref in prefs:
-                    if pref in available_model_ids:
-                        preferred = pref
-                        break
-            
-            # Fall back to first available model if nothing matches
-            if preferred is None and available_model_ids:
+                if pref.split("/", 1)[0] in REMOTE_PROVIDERS:   # cloud/remote provider ref
+                    preferred = pref
+                    break
+            if preferred is None and available_model_ids:       # nothing matched -> any live DGX
                 preferred = available_model_ids[0]
             
             if preferred:
