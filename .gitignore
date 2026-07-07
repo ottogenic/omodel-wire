@@ -24,7 +24,8 @@ Thumbs.db
 # run locally; they are not part of omodel-wire and should never be committed.
 CLAUDE.md
 CLAUDE.local.md
-.claude/
+.claude/*
+!.claude/skills/
 .cursor/
 .cursorrules
 .windsurfrules
