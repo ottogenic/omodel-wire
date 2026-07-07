@@ -12,6 +12,14 @@ All notable changes to this project are documented here. The format follows
   the roster) for Claude to walk a new user through, with copy-paste commands at each step.
 
 ### Fixed
+- **`omw agents <name> --set-model` now round-trips with the names `omw models` shows.** The
+  models list printed the bare served id (e.g. `unsloth/qwen3-coder-next-fp8`), but passing that
+  to `--set-model` split it into a non-existent `unsloth` provider (broken config), and a bare
+  name silently resolved to the first tail match (possibly the wrong host). Now `omw models`
+  prints the **host-qualified ref** (`dgx-<host>/<served-id>`) as the MODEL column — one row per
+  live instance, so the same model on two hosts is two distinct refs — and `--set-model` accepts
+  that ref, resolves a slash-containing served id to its host, and **errors with the exact choices**
+  when a name maps to more than one host instead of guessing.
 - **PR-review tooling:** the `REVIEW.md` checks and the `pr-review` skill now use `python3` (the
   WSL env has no `python`), and the skill documents worktree-safe PR checkout plus a fallback for
   `gh pr merge`'s local post-merge error when `main` is checked out in a sibling worktree.
