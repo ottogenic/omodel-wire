@@ -2640,43 +2640,46 @@ def cmd_models(args):
     # -- so the same config served on two endpoints shows as two rows. Configs
     # with no live instance collapse to a single row (served "-"), shown only
     # under --all. Capabilities always come from the config; never guessed.
-    live_proxied = {}
-    for pv in (cfg.get("provider") or {}).values():
+    # One entry per live served instance -- (provider_key, served_id, is_proxied) -- so the
+    # SAME model on two hosts shows as two rows with distinct, host-qualified refs.
+    live_instances = []
+    for pk, pv in (cfg.get("provider") or {}).items():
         prox = _is_loopback((pv.get("options") or {}).get("baseURL", ""))
         for mid in (pv.get("models") or {}):
-            live_proxied[mid] = prox
+            live_instances.append((pk, mid, prox))
     rows = []
     total = 0            # declared configs seen (drives the "N more not live" hint)
     live_configs = 0     # declared configs with at least one live instance
     show_all = getattr(args, "all", False)
-    matched_ids = set()  # live ids that matched some config (to find orphans)
+    matched_keys = set()  # (provider, served_id) instances that matched some config
     for r in configs.get("recipes", []):
         total += 1
         cap = r.get("capabilities", {}) or {}
         pats = r.get("match") or []
         pats = [pats] if isinstance(pats, str) else pats
-        matched = sorted(mid for mid in live_proxied
+        matched = sorted((pk, mid, prox) for (pk, mid, prox) in live_instances
                          if any(str(p).lower() in mid.lower() for p in pats))
-        matched_ids.update(matched)
+        matched_keys.update((pk, mid) for pk, mid, _ in matched)
         reason = _fmt(bool(cap.get("reasoning")))
         vision = _fmt(bool(cap.get("vision")))
         if matched:
             live_configs += 1
-            # One row per served instance; MODEL is the actual served id.
-            for mid in matched:
-                proxy = "on" if live_proxied[mid] else "off"
-                rows.append((mid, reason, vision, "yes", proxy, mid, r.get("_file", "")))
+            # One row per served instance. MODEL is the full host-qualified ref you pass to
+            # `--set-model`; SERVED is the bare served id (same model, different hosts differ).
+            for pk, mid, prox in matched:
+                proxy = "on" if prox else "off"
+                rows.append((f"{pk}/{mid}", reason, vision, "yes", proxy, mid, r.get("_file", "")))
         elif show_all:
             title = (r.get("match") or ["?"])[0]
             rows.append((title, reason, vision, "-", "-", "-", r.get("_file", "")))
-    # Live provider models with NO declared config -- surfaced under --all only, so
+    # Live provider instances with NO declared config -- surfaced under --all only, so
     # they're not silently invisible, but without guessing their capabilities.
     if show_all:
-        for mid in sorted(live_proxied.keys()):
-            if mid in matched_ids:
+        for pk, mid, prox in sorted(live_instances):
+            if (pk, mid) in matched_keys:
                 continue
-            proxy = "on" if live_proxied[mid] else "off"
-            rows.append((mid, "-", "-", "yes", proxy, mid, "(no config match)"))
+            proxy = "on" if prox else "off"
+            rows.append((f"{pk}/{mid}", "-", "-", "yes", proxy, mid, "(no config match)"))
     if not total:
         print("No model configs found.")
         _suggest([("Point at omodel-manager's configs", "omw config --set configs_dir PATH")])
@@ -2687,11 +2690,12 @@ def cmd_models(args):
         return
     scope = "declared in the omodel-manager configs" if show_all else "live now"
     hidden = "" if show_all else f"  ({total - live_configs} more not live; --all to show)"
-    print(f"Models {scope} (LIVE/PROXY/SERVED = live state):{hidden}\n")
+    print(f"Models {scope} (MODEL = the host-qualified ref for --set-model):{hidden}\n")
     _table(("MODEL", "REASON", "VISION", "LIVE", "PROXY", "SERVED", "CONFIG"), rows)
-    _suggest([("Show a model's per-role sampling", "omw models <name>"),
+    _suggest([("Pin an agent to a model", "omw agents code --set-model dgx-<host>/<served-id>"),
+              ("Show a model's per-role sampling", "omw models <served-id>"),
               ("List every declared model", "omw models --all")] if not show_all
-             else [("Show a model's per-role sampling", "omw models <name>")])
+             else [("Show a model's per-role sampling", "omw models <served-id>")])
 
 
 def _find_model_config_live(recipe, live_ids):
@@ -2920,65 +2924,70 @@ def _write_plugin(cfg_path, plugin, cfg):
         f.write(oc_agent_sampling_plugin_js(plugin, _default_model_id(cfg)))
 
 
+def _managed_instances(cfg):
+    """[(provider_key, served_id), ...] over every model on a managed (dgx-) provider.
+
+    One entry per served instance, so the SAME served id on two hosts yields two entries
+    with distinct provider keys -- which is how we tell them apart and refuse to guess."""
+    return [(pk, mid)
+            for pk, pv in (cfg.get("provider") or {}).items()
+            if str(pk).startswith(PROVIDER_PREFIX)
+            for mid in (pv.get("models") or {})]
+
+
 def _resolve_model_ref(ref, cfg, configs=None):
-    """Convert a bare model name to full provider/model-id reference if needed.
-    Returns (resolved_ref, provider) or (None, None) if model not found.
-    
-    If configs is provided (omodel-manager recipes), uses match patterns to find
-    the correct provider/model-id for bare model names."""
+    """Resolve a model name to a full ``provider/served-id`` reference.
+
+    Returns ``(resolved_ref, provider)``. When the name is AMBIGUOUS -- it maps to the same
+    served model on more than one live host -- returns ``(None, [candidate_full_refs...])`` so
+    the caller can list the choices instead of silently picking one (which used to produce a
+    broken config). Returns ``(None, None)`` when the name can't be resolved at all.
+
+    Accepted, in order: a full managed ref (``dgx-.../served-id``); a cloud provider ref
+    (``openai/…``, ``anthropic/…`` -- OpenCode routes these directly); a whole served id,
+    INCLUDING one that itself contains a slash such as ``unsloth/qwen3-coder-next-fp8``; a bare
+    model name matched against served-id tails; finally an omodel-manager recipe match-pattern."""
+    instances = _managed_instances(cfg)
     if "/" in ref:
         prov, mid = ref.split("/", 1)
-        if prov.startswith(PROVIDER_PREFIX):
-            models = ((cfg.get("provider") or {}).get(prov) or {}).get("models") or {}
-            if mid in models:
-                return ref, prov
-        return None, None
-    
+        if (prov, mid) in instances:            # exact full managed ref
+            return ref, prov
+        if prov in REMOTE_PROVIDERS:            # cloud ref -- routed directly by OpenCode
+            return ref, prov
     n = ref.lower()
-    
-    # First, try to match against model IDs in provider config
-    for prov_key, prov_entry in (cfg.get("provider") or {}).items():
-        if not prov_key.startswith(PROVIDER_PREFIX):
-            continue
-        models = (prov_entry.get("models") or {})
-        for mid in models:
-            mid_lower = mid.lower()
-            bare_mid = mid.split("/", 1)[-1].lower() if "/" in mid else mid_lower
-            if bare_mid == n:
-                return f"{prov_key}/{mid}", prov_key
-    
-    # If no match found and configs provided, try match patterns from omodel-manager
+
+    def pick(hits):
+        if len(hits) == 1:
+            pk, mid = hits[0]
+            return f"{pk}/{mid}", pk
+        if len(hits) > 1:
+            return None, sorted(f"{pk}/{mid}" for pk, mid in hits)
+        return None, None
+
+    # whole ref == a served id (covers served ids that themselves contain a slash)
+    hit = pick([(pk, mid) for pk, mid in instances if mid.lower() == n])
+    if hit != (None, None):
+        return hit
+    # bare name == a served id's tail (the part after the last slash)
+    hit = pick([(pk, mid) for pk, mid in instances if mid.rsplit("/", 1)[-1].lower() == n])
+    if hit != (None, None):
+        return hit
+    # omodel-manager recipe match-pattern -> its target served id
     if configs:
-        recipes = configs.get("recipes", [])
-        for recipe in recipes:
-            match_pats = recipe.get("match", [])
-            match_pats = [match_pats] if isinstance(match_pats, str) else match_pats
-            for pat in match_pats:
-                if pat.lower() == n:
-                    # Find the provider/model-id pattern in this recipe (if any)
-                    target_bare = None
-                    for p in match_pats:
-                        if "/" in p:
-                            _, mid = p.split("/", 1)
-                            target_bare = mid.split("/", 1)[-1] if "/" in mid else mid
-                            target_bare_lower = target_bare.lower()
-                            break
-                    
-                    # If no provider/model-id pattern, use the matched pattern's bare name
-                    if target_bare is None:
-                        target_bare_lower = n
-                    else:
-                        target_bare_lower = target_bare.lower()
-                    
-                    # Find the model by bare name in all providers
-                    for prov_key, prov_entry in (cfg.get("provider") or {}).items():
-                        if not prov_key.startswith(PROVIDER_PREFIX):
-                            continue
-                        models = (prov_entry.get("models") or {})
-                        for mid in models:
-                            bare_mid = mid.split("/", 1)[-1] if "/" in mid else mid
-                            if bare_mid.lower() == target_bare_lower:
-                                return f"{prov_key}/{mid}", prov_key
+        for recipe in configs.get("recipes", []):
+            pats = recipe.get("match", [])
+            pats = [pats] if isinstance(pats, str) else pats
+            if not any(str(p).lower() == n for p in pats):
+                continue
+            target = n
+            for p in pats:
+                if "/" in str(p):
+                    target = str(p).rsplit("/", 1)[-1].lower()
+                    break
+            hit = pick([(pk, mid) for pk, mid in instances
+                        if mid.rsplit("/", 1)[-1].lower() == target])
+            if hit != (None, None):
+                return hit
     return None, None
 
 
@@ -3037,9 +3046,16 @@ def _mutate_roster(args, want_subagent):
     
     # Load omodel-manager configs to support bare model name resolution
     configs = load_configs(getattr(args, "configs", None))
-    resolved_ref, _ = _resolve_model_ref(ref, cfg, configs)
+    resolved_ref, info = _resolve_model_ref(ref, cfg, configs)
     if resolved_ref:
         ref = resolved_ref
+    elif isinstance(info, list):   # ambiguous -- the same model on multiple hosts
+        print(f"'{ref}' matches more than one live model -- pass the full host-qualified ref:",
+              file=sys.stderr)
+        for r in info:
+            print(f"    {r}", file=sys.stderr)
+        print("(see `omw models` for the exact refs)", file=sys.stderr)
+        sys.exit(1)
     else:
         warn = _validate_ref(ref, cfg)
         if warn:

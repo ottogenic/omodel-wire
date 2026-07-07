@@ -1147,6 +1147,48 @@ class TestBareModelNameResolution(unittest.TestCase):
         self.assertEqual(ref, "dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4")
         self.assertEqual(prov, "dgx-n1-8000")
 
+    def _cfg_unsloth_and_plain(self):
+        # unsloth (served id contains a slash) on one host; the plain model on another
+        return {"provider": {
+            "dgx-102-8000": {"models": {"unsloth/qwen3-coder-next-fp8": {}}},
+            "dgx-103-8000": {"models": {"qwen3-coder-next-fp8": {}}},
+        }}
+
+    def test_resolve_model_ref_slash_served_id_resolves_to_host(self):
+        # Regression: unsloth/qwen3-coder-next-fp8 used to split to a non-existent 'unsloth'
+        # provider -> broken config. It must resolve to the host that actually serves it.
+        cfg = self._cfg_unsloth_and_plain()
+        ref, prov = m._resolve_model_ref("unsloth/qwen3-coder-next-fp8", cfg)
+        self.assertEqual(ref, "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+        self.assertEqual(prov, "dgx-102-8000")
+        # the plain served id resolves to the OTHER host, not the unsloth one
+        ref2, _ = m._resolve_model_ref("qwen3-coder-next-fp8", cfg)
+        self.assertEqual(ref2, "dgx-103-8000/qwen3-coder-next-fp8")
+
+    def test_resolve_model_ref_ambiguous_returns_choices(self):
+        # Same served id on two hosts -> refuse to guess; return the host-qualified choices.
+        cfg = {"provider": {
+            "dgx-102-8000": {"models": {"qwen3-coder-next-fp8": {}}},
+            "dgx-103-8000": {"models": {"qwen3-coder-next-fp8": {}}},
+        }}
+        ref, info = m._resolve_model_ref("qwen3-coder-next-fp8", cfg)
+        self.assertIsNone(ref)
+        self.assertEqual(info, ["dgx-102-8000/qwen3-coder-next-fp8",
+                                "dgx-103-8000/qwen3-coder-next-fp8"])
+
+    def test_resolve_model_ref_cloud_ref_passthrough(self):
+        ref, prov = m._resolve_model_ref("anthropic/claude-opus-4-8",
+                                         self._cfg_unsloth_and_plain())
+        self.assertEqual(ref, "anthropic/claude-opus-4-8")
+        self.assertEqual(prov, "anthropic")
+
+    def test_models_list_shows_host_qualified_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            lst = _capture(m.cmd_models, _cli_args(cfg))
+            # MODEL column is now the full ref (provider/served-id), not the bare served id
+            self.assertRegex(lst, r"dgx-\S+/Qwen3\.6-27B-NVFP4")
+
     def test_validate_ref_accepts_bare_name_if_model_exists(self):
         cfg = self._make_cfg_with_providers()
         warn = m._validate_ref("Qwen3.6-35B-A3B-NVFP4", cfg)
