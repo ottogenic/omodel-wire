@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`.claude/skills/getting-started` onboarding skill** — an end-to-end setup guide (shell aliases,
+  DGX provisioning, launching a first model, the HF token, installing OpenCode, syncing + tweaking
+  the roster) for Claude to walk a new user through, with copy-paste commands at each step.
+
 ### Fixed
 - **`omw agents <name> --set-model` now round-trips with the names `omw models` shows.** The
   models list printed the bare served id (e.g. `unsloth/qwen3-coder-next-fp8`), but passing that
