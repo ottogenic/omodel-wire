@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`.claude/skills/getting-started` onboarding skill** — an end-to-end setup guide (shell aliases,
+  DGX provisioning, launching a first model, the HF token, installing OpenCode, syncing + tweaking
+  the roster) for Claude to walk a new user through, with copy-paste commands at each step.
+
 ### Fixed
 - **PR-review tooling:** the `REVIEW.md` checks and the `pr-review` skill now use `python3` (the
   WSL env has no `python`), and the skill documents worktree-safe PR checkout plus a fallback for
