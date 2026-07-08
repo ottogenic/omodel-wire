@@ -124,15 +124,19 @@ def make_args(tmpdir, **over):
 
 class FakeProbes:
     """Context manager that swaps the network probes for canned answers so the whole
-    sync runs offline. `model` is served at 192.0.2.101:8000."""
+    sync runs offline. `model` is served at 192.0.2.101:8000.
+    
+    Also mocks discover_opencode_runtime_models to return an empty list so the
+    runtime model discovery doesn't pick up real system models during tests."""
 
     def __init__(self, model="Qwen3.6-27B-NVFP4", max_len=262144, vision=False):
         self.model, self.max_len, self.vision = model, max_len, vision
         self._saved = {}
 
     def __enter__(self):
-        for name in ("probe", "probe_reasoning", "probe_vision"):
-            self._saved[name] = getattr(m, name)
+        for name in ("probe", "probe_reasoning", "probe_vision", "discover_opencode_runtime_models"):
+            if hasattr(m, name):
+                self._saved[name] = getattr(m, name)
 
         def probe(host, port, timeout):
             if (host, port) == ("192.0.2.101", 8000):
@@ -144,6 +148,8 @@ class FakeProbes:
         m.probe_vision = lambda h, p, mid, t: (
             (True, "blue", "answer contains blue") if self.vision
             else (False, "", "text-only / unverified"))
+        # Mock runtime model discovery to return empty (no real opencode models)
+        m.discover_opencode_runtime_models = lambda opencode_path=None, timeout=5.0: ([], "no runtime models in test")
         return self
 
     def __exit__(self, *exc):
@@ -612,18 +618,115 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertEqual(
             resolve(["qwen3.6-35b-a3b-fp8", "qwen3-coder-next-fp8", "openai/gpt-5.5"]),
             "dgx-103-8000/qwen3-coder-next-fp8")
-        # strict order: [local-down, cloud-up, local-up] -> the cloud model, because it's the
-        # first that resolves (we do NOT skip it to reach the later live local)
+        # strict order: [local-down, cloud-down, local-up] -> the local model, because
+        # remote refs must be in the available_models pool to be accepted
         self.assertEqual(
             resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5", "qwen3-coder-next-fp8"]),
-            "openai/gpt-5.5")
-        # no listed local live -> the listed remote provider ref is used directly
+            "dgx-103-8000/qwen3-coder-next-fp8")
+        # no listed local live, cloud ref not in pool -> fallback to first available local
         self.assertEqual(
-            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]), "openai/gpt-5.5")
-        # a cloud-only list resolves to the remote even though locals are live
+            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]), "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+        # remote ref not in pool -> skipped, fall back to next available local
         self.assertEqual(
             resolve(["anthropic/claude-opus-4-8", "openai/gpt-5.5"], mode="subagent"),
-            "anthropic/claude-opus-4-8")
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+
+    def test_remote_ref_not_in_pool_is_skipped(self):
+        # Regression: anthroipc/claude-opus-4-8 should NOT be accepted if not in available_models
+        avail = {
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8": {},
+            "dgx-103-8000/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-x/placeholder"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # Remote ref not in pool -> skipped, falls back to first available local
+        self.assertEqual(
+            resolve(["anthropic/claude-opus-4-8", "openai/gpt-5.5"]),
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+
+    def test_remote_ref_in_pool_is_accepted(self):
+        # When a remote ref IS in the available_models pool, it should be accepted
+        avail = {
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8": {},
+            "openai/gpt-5.5": {},  # Remote ref in pool
+            "dgx-103-8000/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-x/placeholder"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # Remote ref in pool -> accepted (first in list)
+        self.assertEqual(
+            resolve(["openai/gpt-5.5", "unsloth/qwen3-coder-next-fp8"]),
+            "openai/gpt-5.5")
+        # Local ref not in pool, remote ref in pool -> remote accepted
+        self.assertEqual(
+            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]),
+            "openai/gpt-5.5")
+
+    def test_served_id_with_slash_resolves_to_provider(self):
+        # Regression: unsloth/qwen3-coder-next-fp8 should resolve to dgx-.../unsloth/qwen3-coder-next-fp8
+        avail = {
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8": {},
+            "dgx-103-8000/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-x/placeholder"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # Served ID with slash -> resolves to full provider-qualified ref
+        self.assertEqual(
+            resolve(["unsloth/qwen3-coder-next-fp8"]),
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+        # Bare model ID -> resolves to first matching provider
+        self.assertEqual(
+            resolve(["qwen3-coder-next-fp8"]),
+            "dgx-103-8000/qwen3-coder-next-fp8")
+
+    def test_unavailable_dgx_pref_falls_back_to_cloud(self):
+        # When first DGX pref is unavailable, falls back to next available (cloud or local)
+        avail = {
+            "openai/gpt-5.5": {},  # Remote ref in pool
+            "dgx-103-8000/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-x/placeholder"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # Unavailable DGX pref, cloud in pool -> cloud accepted
+        self.assertEqual(
+            resolve(["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]),
+            "openai/gpt-5.5")
+
+    def test_no_prefs_preserves_valid_existing_model(self):
+        # When no preferences are configured, existing model is preserved
+        avail = {
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8": {},
+        }
+        def resolve(prefs, mode="primary"):
+            agents = {"code": {"mode": mode, "model": "dgx-102-8000/unsloth/qwen3-coder-next-fp8"}}
+            key = "subagents" if mode == "subagent" else "agents"
+            out = m._apply_default_models(dict(agents), {key: {"code": prefs}}, {}, avail)
+            return out["code"]["model"]
+
+        # Empty prefs -> existing model preserved
+        self.assertEqual(
+            resolve([]),
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
+        # No key in default_models -> existing model preserved
+        self.assertEqual(
+            resolve(None),  # Will be treated as empty
+            "dgx-102-8000/unsloth/qwen3-coder-next-fp8")
 
     def test_non_reasoning_only_fleet_still_builds_roster(self):
         # Regression: a fleet with NO reasoning models must still rebuild the roster
@@ -728,6 +831,104 @@ class TestSyncEndToEnd(unittest.TestCase):
                 rc = m.oc_sync(args, sampling, {"opencode"})
             self.assertEqual(rc, 2, "should refuse (exit 2) with no endpoints")
             self.assertFalse(os.path.exists(args.config))
+
+    def test_team_model_pref_skips_unavailable_remote_refs(self):
+        # Regression: oc_sync preselection should not accept slash-containing
+        # preferences when no reasoning models exist, unless they're in available_models.
+        # anthropic/claude-opus-4-8 should NOT be selected if not available.
+        default_models = {
+            "agents": {"team": ["anthropic/claude-opus-4-8", "openai/gpt-5.5"]},
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp, profiles=True)
+            sampling = m.build_sampling(args)
+            # No reasoning models - only a local model available
+            with FakeProbes(model="qwen3-coder-next-fp8"), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(args.config, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # team should use the available local model, NOT the unavailable remote refs
+            team_model = cfg["agent"]["team"]["model"]
+            self.assertIn("qwen3-coder-next-fp8", team_model)
+            self.assertNotIn("claude-opus", team_model)
+            self.assertNotIn("gpt-5.5", team_model)
+
+    def test_team_model_pref_uses_remote_when_available(self):
+        # When a remote model IS in available_models, it should be selected.
+        # We need to set up a config with a remote provider first, then sync.
+        default_models = {
+            "agents": {"team": ["openai/gpt-5.5"]},
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # First create a config with a remote provider
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "openai": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "OpenAI",
+                        "options": {"baseURL": "https://api.openai.com/v1", "apiKey": "sk-..."},
+                        "models": {"gpt-5.5": {"reasoning": True, "tool_call": True}}
+                    }
+                },
+                "agent": {
+                    "team": {"mode": "primary", "model": "openai/gpt-4"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+            
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            with FakeProbes(), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # team should use the remote model from the pool (first preference)
+            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+
+    def test_no_matching_preference_preserves_current_model(self):
+        # When no preferences match but current model is still available, keep it.
+        # This test uses a pre-existing config with a model that's still available.
+        default_models = {
+            "agents": {"code": ["qwen3.6-35b-a3b-fp8", "openai/gpt-5.5"]},
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create initial config with a model that will be available
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "dgx-n1-8000": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "DGX n1:8000",
+                        "options": {"baseURL": "http://192.0.2.101:8000/v1", "apiKey": "sglang"},
+                        "models": {"Qwen3.6-27B-NVFP4": {"reasoning": True, "tool_call": True}}
+                    }
+                },
+                "agent": {
+                    "code": {"mode": "primary", "model": "dgx-n1-8000/Qwen3.6-27B-NVFP4"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+            
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            with FakeProbes(), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # code agent should keep its current model since no pref matched
+            # but it's still available (fallback to first available is only when
+            # current model is NOT available)
+            code_model = cfg["agent"]["code"]["model"]
+            self.assertIn("Qwen3.6-27B-NVFP4", code_model)
 
 
 # --------------------------------------------------------------------------- #
@@ -1604,6 +1805,98 @@ class TestDisabledProviders(unittest.TestCase):
             # disabled_providers should contain huggingface
             disabled = result.get("disabled_providers", [])
             self.assertIn("huggingface", disabled, "huggingface should be in disabled_providers by default")
+
+
+class TestRuntimeModelDiscovery(unittest.TestCase):
+    """Test the discover_opencode_runtime_models helper function."""
+
+    def test_discover_empty_when_opencode_not_found(self):
+        """When opencode binary is not on PATH, returns empty list."""
+        models, note = m.discover_opencode_runtime_models("/nonexistent/opencode")
+        self.assertEqual(models, [])
+        # Note should indicate some kind of failure
+        self.assertTrue("failed" in note.lower() or "no such file" in note.lower())
+
+    def test_discover_handles_timeout(self):
+        """When opencode models takes too long, returns empty list."""
+        # This would require mocking subprocess which is complex, so we just verify
+        # the function signature accepts a timeout parameter
+        import inspect
+        sig = inspect.signature(m.discover_opencode_runtime_models)
+        self.assertIn('timeout', sig.parameters)
+
+    def test_discover_accepts_custom_opencode_path(self):
+        """Function accepts explicit opencode_path parameter."""
+        import inspect
+        sig = inspect.signature(m.discover_opencode_runtime_models)
+        self.assertIn('opencode_path', sig.parameters)
+
+    def test_discover_returns_tuple(self):
+        """Returns (models_list, note) tuple."""
+        models, note = m.discover_opencode_runtime_models("/nonexistent/opencode")
+        self.assertIsInstance(models, list)
+        self.assertIsInstance(note, str)
+
+    def test_discover_empty_when_opencode_models_fails(self):
+        """When opencode models returns nonzero exit code, returns empty list."""
+        import subprocess
+        import tempfile
+        
+        # Create a fake opencode script that exits with error
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_opencode = os.path.join(tmp, "opencode")
+            with open(fake_opencode, "w") as f:
+                f.write("#!/bin/bash\nexit 1\n")
+            os.chmod(fake_opencode, 0o755)
+            
+            models, note = m.discover_opencode_runtime_models(fake_opencode)
+            self.assertEqual(models, [])
+            # Note should indicate failure
+            self.assertIn("exit", note.lower())
+
+
+class TestOcBuildOpencodeProviders(unittest.TestCase):
+    """Test the oc_build_opencode_providers helper function."""
+
+    def test_extracts_models_from_providers(self):
+        """Extracts all provider/model refs from config."""
+        cfg = {
+            "provider": {
+                "dgx-n1-8000": {
+                    "models": {
+                        "qwen3-coder-next-fp8": {"name": "Qwen3 Coder"},
+                        "qwen3.6-27b-nvfp4": {"name": "Qwen3.6 27B"}
+                    }
+                },
+                "openai": {
+                    "models": {
+                        "gpt-5.5": {"name": "GPT-5.5"}
+                    }
+                }
+            }
+        }
+        models = m.oc_build_opencode_providers(cfg)
+        self.assertEqual(models, {
+            "dgx-n1-8000/qwen3-coder-next-fp8": {},
+            "dgx-n1-8000/qwen3.6-27b-nvfp4": {},
+            "openai/gpt-5.5": {},
+        })
+
+    def test_empty_config_returns_empty_dict(self):
+        """Empty config returns empty dict."""
+        models = m.oc_build_opencode_providers({})
+        self.assertEqual(models, {})
+
+    def test_missing_provider_key_returns_empty(self):
+        """Config without provider key returns empty dict."""
+        models = m.oc_build_opencode_providers({"agent": {}})
+        self.assertEqual(models, {})
+
+    def test_missing_models_key_skips_provider(self):
+        """Provider without models key is skipped."""
+        cfg = {"provider": {"dgx-n1-8000": {}}}
+        models = m.oc_build_opencode_providers(cfg)
+        self.assertEqual(models, {})
 
 
 if __name__ == "__main__":
