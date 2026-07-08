@@ -275,7 +275,7 @@ class TestApplyDefaultModels(unittest.TestCase):
         self.assertEqual(result["agent-plan"]["model"], "dgx-n1-8000/model1")
 
     def test_non_dgx_model_selected_when_remote(self):
-        """Should select remote models (not in available_models) when they're preferences."""
+        """Should select remote models when in available_models pool."""
         agents = {
             "Team": {"model": "dgx-n1-8000/some-model", "mode": "primary"}
         }
@@ -286,12 +286,29 @@ class TestApplyDefaultModels(unittest.TestCase):
             "dgx-n1-8000/qwen3": {"reasoning": True}
         }
         
+        # Remote model NOT in pool -> skipped, falls back to first available
         available_models = {
             "dgx-n1-8000/qwen3": {}
         }
         result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["Team"]["model"], "dgx-n1-8000/qwen3")
+
+    def test_remote_model_in_pool_accepted(self):
+        """Remote models in available_models pool are accepted."""
+        agents = {
+            "Team": {"model": "dgx-n1-8000/some-model", "mode": "primary"}
+        }
+        default_models = {
+            "agents": {"Team": ["anthropic/claude-opus", "dgx-n1-8000/qwen3"]}
+        }
+        reasoning_caps = {}
         
-        # Remote models are now supported (e.g., openai/gpt-5.5 from OpenCode's built-in provider)
+        # Remote model IN pool -> accepted as first preference
+        available_models = {
+            "anthropic/claude-opus": {},
+            "dgx-n1-8000/qwen3": {}
+        }
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
         self.assertEqual(result["Team"]["model"], "anthropic/claude-opus")
 
     def test_remote_model_present_in_pool_uses_full_ref(self):
@@ -306,14 +323,107 @@ class TestApplyDefaultModels(unittest.TestCase):
         self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
 
     def test_agent_review_remote_subagent_preference(self):
-        """agent-review can prefer a remote reviewer model (anthropic/claude-opus-4-8)."""
+        """agent-review can prefer a remote reviewer model (anthropic/claude-opus-4-8) if in pool."""
         agents = {"agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}}
         default_models = {"subagents": {
             "agent-review": ["anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}}
         reasoning_caps = {}
+        # Remote model NOT in pool -> skipped, falls back to first available
         available_models = {"dgx-n1-8000/qwen3-coder-next-fp8": {}}
         result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["agent-review"]["model"], "dgx-n1-8000/qwen3-coder-next-fp8")
+
+    def test_agent_review_remote_in_pool(self):
+        """agent-review accepts remote reviewer model when in available_models pool."""
+        agents = {"agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}}
+        default_models = {"subagents": {
+            "agent-review": ["anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}}
+        reasoning_caps = {}
+        # Remote model IN pool -> accepted as first preference
+        available_models = {"anthropic/claude-opus-4-8": {}, "dgx-n1-8000/qwen3-coder-next-fp8": {}}
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
         self.assertEqual(result["agent-review"]["model"], "anthropic/claude-opus-4-8")
+
+    def test_all_available_models_merged_pool(self):
+        """Simulates the oc_sync scenario where all_available_models includes both
+        local probes and remote models from existing config. Team and agent-review
+        should both prefer remote models when they're in the merged pool."""
+        agents = {
+            "team": {"model": "dgx-n1-8000/qwen3", "mode": "primary"},
+            "agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}
+        }
+        default_models = {
+            "agents": {"team": ["openai/gpt-5.5", "anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]},
+            "subagents": {"agent-review": ["anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}
+        }
+        reasoning_caps = {}
+        
+        # all_available_models = merged pool (local probes + existing config providers)
+        # This simulates what oc_sync builds at line 1752-1758
+        all_available_models = {
+            "dgx-n1-8000/qwen3-coder-next-fp8": {},  # local model
+            "openai/gpt-5.5": {},  # remote model from existing config
+            "anthropic/claude-opus-4-8": {}  # remote model from existing config
+        }
+        
+        result = m._apply_default_models(agents, default_models, reasoning_caps, all_available_models)
+        
+        # Team should get openai/gpt-5.5 (first preference that's in pool)
+        self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
+        # agent-review should get anthropic/claude-opus-4-8 (first preference that's in pool)
+        self.assertEqual(result["agent-review"]["model"], "anthropic/claude-opus-4-8")
+
+    def test_all_available_models_skips_unavailable_remote_ref(self):
+        """When a remote ref is NOT in all_available_models, it should be skipped
+        and the next preference should be tried."""
+        agents = {
+            "team": {"model": "dgx-n1-8000/qwen3", "mode": "primary"}
+        }
+        default_models = {
+            "agents": {"team": ["openai/gpt-5.5", "anthropic/claude-opus-4-8", "qwen3-coder-next-fp8"]}
+        }
+        reasoning_caps = {}
+        
+        # openai/gpt-5.5 is NOT in pool, but anthropic/claude-opus-4-8 is
+        all_available_models = {
+            "dgx-n1-8000/qwen3-coder-next-fp8": {},
+            "anthropic/claude-opus-4-8": {}
+        }
+        
+        result = m._apply_default_models(agents, default_models, reasoning_caps, all_available_models)
+        
+        # openai/gpt-5.5 is skipped (not in pool), anthropic/claude-opus-4-8 is accepted
+        self.assertEqual(result["team"]["model"], "anthropic/claude-opus-4-8")
+
+    def test_agent_review_skips_anthropic_selects_openai(self):
+        """Regression test: agent-review should skip unavailable anthropic and select
+        available openai/gpt-5.5 when both are in preferences."""
+        agents = {
+            "agent-review": {"model": "dgx-n1-8000/qwen3-coder-next-fp8", "mode": "subagent"}
+        }
+        default_models = {
+            "subagents": {
+                "agent-review": ["anthropic/claude-opus-4-8", "openai/gpt-5.5", "google/gemini-3.5-flash"]
+            }
+        }
+        reasoning_caps = {}
+        
+        # Runtime models include openai/gpt-5.5 but NOT Anthropic
+        # This simulates the real scenario where opencode models shows openai/gpt-5.5
+        # but anthropic/claude-opus-4-8 is not available
+        all_available_models = {
+            "dgx-n1-8000/qwen3-coder-next-fp8": {},  # local model
+            "openai/gpt-5.5": {},  # runtime model (available)
+            "google/gemini-3.5-flash": {}  # also available
+        }
+        
+        model_notes = []
+        result = m._apply_default_models(agents, default_models, reasoning_caps, all_available_models, model_notes)
+        
+        # anthropic/claude-opus-4-8 should be skipped (not in pool)
+        # openai/gpt-5.5 should be selected (first available preference)
+        self.assertEqual(result["agent-review"]["model"], "openai/gpt-5.5")
+        self.assertIn("Pref skipped (not available): anthropic/claude-opus-4-8", model_notes)
 
 
 if __name__ == "__main__":

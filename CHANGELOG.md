@@ -38,6 +38,14 @@ All notable changes to this project are documented here. The format follows
   they are disabled by default.
 
 ### Fixed
+- **OpenCode runtime model discovery via `opencode models`.** The tool now discovers available
+  OpenCode built-in providers (e.g., `openai/`, `anthropic/`) at runtime via `opencode models`,
+  so `default_models.json` preferences can fall through from unavailable cloud refs (e.g.,
+  `anthropic/claude-opus-4-8` offline) to available ones (e.g., `openai/gpt-5.5`). The roster
+  is rebuilt from the live endpoints even when no reasoning model is running — a coder-only
+  fleet (all non-reasoning) gets a full, valid roster instead of leaving agents pointing at
+  a model that's no longer served (which OpenCode rejected as "not valid"). `opencode.json` is
+  no longer treated as authoritative for remote models.
 - **`default_models.json` preference resolution now walks the list in order and no longer
   misclassifies local served ids.** Two bugs surfaced when a preference list mixed local models
   first with a cloud fallback last: (1) any preference containing a `/` that wasn't in the local
@@ -155,6 +163,11 @@ All notable changes to this project are documented here. The format follows
   — a coder-only fleet (all non-reasoning) gets a full, valid roster instead of leaving agents
   pointing at a model that's no longer served (which OpenCode rejected as "not valid").
   Per-model sampling is emitted for non-reasoning models too. Template auto-created on first run.
+- **Runtime discovery/failure tests.** `test_default_models.py` now covers the merged-pool scenario
+  where local probes and remote models from `opencode models` are combined; tests validate that
+  unavailable cloud refs (e.g., `anthropic/claude-opus-4-8`) are skipped and the first available
+  preference (e.g., `openai/gpt-5.5`) is selected. Tests also verify that remote models in the
+  pool are accepted as preferences, not just local DGX models.
 - **`omw proxy` — a debug proxy that logs OpenCode ↔ model traffic** (stdlib only):
   - `omw proxy on [<model>]` — route live models through the proxy with **no `--upstream`
     needed**: rewrites the `dgx-` provider baseURLs to `127.0.0.1:<port>/<route>` and maps
