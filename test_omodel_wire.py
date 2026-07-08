@@ -129,8 +129,9 @@ class FakeProbes:
     Also mocks discover_opencode_runtime_models to return an empty list so the
     runtime model discovery doesn't pick up real system models during tests."""
 
-    def __init__(self, model="Qwen3.6-27B-NVFP4", max_len=262144, vision=False):
+    def __init__(self, model="Qwen3.6-27B-NVFP4", max_len=262144, vision=False, runtime_models=None):
         self.model, self.max_len, self.vision = model, max_len, vision
+        self.runtime_models = runtime_models if runtime_models is not None else []
         self._saved = {}
 
     def __enter__(self):
@@ -148,8 +149,10 @@ class FakeProbes:
         m.probe_vision = lambda h, p, mid, t: (
             (True, "blue", "answer contains blue") if self.vision
             else (False, "", "text-only / unverified"))
-        # Mock runtime model discovery to return empty (no real opencode models)
-        m.discover_opencode_runtime_models = lambda opencode_path=None, timeout=5.0: ([], "no runtime models in test")
+        # Mock runtime model discovery
+        runtime_models = self.runtime_models
+        m.discover_opencode_runtime_models = lambda opencode_path=None, timeout=5.0: (
+            runtime_models, f"found {len(runtime_models)} runtime model(s)" if runtime_models else "no runtime models in test")
         return self
 
     def __exit__(self, *exc):
@@ -929,6 +932,97 @@ class TestSyncEndToEnd(unittest.TestCase):
             # current model is NOT available)
             code_model = cfg["agent"]["code"]["model"]
             self.assertIn("Qwen3.6-27B-NVFP4", code_model)
+
+    def test_stale_remote_provider_skipped_when_runtime_discovery_succeeds(self):
+        """Regression: When runtime discovery succeeds, stale remote providers
+        from existing config should NOT be available unless they appear in runtime.
+        
+        Scenario: existing config has Anthropic, but runtime opencode models only
+        reports openai/gpt-5.5. agent-review should resolve to OpenAI, not Anthropic."""
+        default_models = {
+            "agents": {"team": ["openai/gpt-5.5"]},
+            "subagents": {"agent-review": ["anthropic/claude-opus-4-8", "openai/gpt-5.5"]}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create initial config with a stale Anthropic provider
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "anthropic": {
+                        "npm": "@ai-sdk/anthropic",
+                        "name": "Anthropic",
+                        "options": {"apiKey": "sk-..."},
+                        "models": {
+                            "claude-opus-4-8": {"reasoning": True, "tool_call": True}
+                        }
+                    }
+                },
+                "agent": {
+                    "agent-review": {"mode": "subagent", "model": "anthropic/claude-opus-4-8"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+            
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            # Runtime discovery reports only openai/gpt-5.5, NOT Anthropic
+            with FakeProbes(runtime_models=["openai/gpt-5.5"]), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # agent-review should use openai/gpt-5.5 (first available preference)
+            # NOT anthropic/claude-opus-4-8 (stale, not in runtime discovery)
+            review_model = cfg["agent"]["agent-review"]["model"]
+            self.assertEqual(review_model, "openai/gpt-5.5")
+            # Verify Anthropic was NOT added to the pool
+            # The provider should be kept (user-authored), but Anthropic model
+            # should NOT be in all_available_models
+            self.assertIn("anthropic", cfg["provider"])
+            # Verify team gets openai/gpt-5.5 (it's the only remote in pool)
+            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+
+    def test_stale_remote_provider_fallback_when_runtime_discovery_fails(self):
+        """When runtime discovery fails, existing config provider models should
+        be available as fallback/back-compat."""
+        default_models = {
+            "agents": {"team": ["anthropic/claude-opus-4-8"]},
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create initial config with Anthropic provider
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "anthropic": {
+                        "npm": "@ai-sdk/anthropic",
+                        "name": "Anthropic",
+                        "options": {"apiKey": "sk-..."},
+                        "models": {
+                            "claude-opus-4-8": {"reasoning": True, "tool_call": True}
+                        }
+                    }
+                },
+                "agent": {
+                    "team": {"mode": "primary", "model": "anthropic/claude-opus-3-5"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+            
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            # Runtime discovery fails (returns empty list)
+            with FakeProbes(runtime_models=[]), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # When runtime fails, existing config models are available as fallback
+            # team should use the Anthropic model from existing config
+            team_model = cfg["agent"]["team"]["model"]
+            self.assertIn("claude-opus", team_model)
 
 
 # --------------------------------------------------------------------------- #

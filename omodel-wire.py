@@ -1837,7 +1837,8 @@ def oc_sync(args, sampling, detected_installed):
     
     # Discover OpenCode runtime models (built-in providers like openai/, anthropic/)
     runtime_models, runtime_note = discover_opencode_runtime_models()
-    if runtime_models:
+    runtime_success = bool(runtime_models)
+    if runtime_success:
         for ref in runtime_models:
             all_available_models[ref] = {}
         print(f"  runtime: {runtime_note}")
@@ -1845,13 +1846,24 @@ def oc_sync(args, sampling, detected_installed):
         print(f"  runtime: {runtime_note}")
     
     # Also include models from existing config providers (for fallback/back-compat)
+    # For REMOTE_PROVIDERS, only include if runtime discovery succeeded AND the model
+    # appears in runtime_models. If runtime discovery failed, include all existing
+    # config models as fallback. Local managed providers (dgx-) are unaffected by
+    # runtime discovery and use live probe results.
     for prov_key, prov_cfg in existing.items():
         if prov_key in kept:  # only include providers we're keeping
             models = prov_cfg.get("models", {})
             for mid, mcfg in models.items():
                 ref = f"{prov_key}/{mid}"
-                if ref not in all_available_models:
-                    all_available_models[ref] = {}
+                if ref in all_available_models:
+                    continue  # already added (from local probes or runtime)
+                # For remote providers, only include if runtime discovery succeeded
+                # AND this model is in the runtime list. If runtime failed, include
+                # existing config models as fallback/back-compat.
+                if prov_key in REMOTE_PROVIDERS:
+                    if runtime_success and ref not in runtime_models:
+                        continue  # stale remote model not in runtime discovery
+                all_available_models[ref] = {}
 
     # Default model handling
     if args.set_default:
