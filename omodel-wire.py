@@ -183,6 +183,80 @@ def caps_from_capabilities(recipe):
     }
 
 
+def discover_opencode_runtime_models(opencode_path=None, timeout=5.0):
+    """Discover OpenCode runtime models by running `opencode models` and parsing output.
+    
+    Returns:
+        (models_list, note) where models_list is a list of provider/model refs
+        (e.g., ["openai/gpt-5.5", "anthropic/claude-opus-4-8"]) and note is a
+        human-readable status string.
+    
+    The helper is safe: it handles missing binary, nonzero exit, timeout, and
+    unexpected output without crashing; returns ([], note) on any failure."""
+    if opencode_path is None:
+        # Try to find opencode on PATH
+        opencode_path = shutil.which("opencode")
+        if not opencode_path:
+            return [], "no opencode binary found on PATH"
+    
+    # Run `opencode models` with a short timeout
+    try:
+        result = subprocess.run(
+            [opencode_path, "models"],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return [], f"opencode models failed: {e}"
+    
+    # Check for nonzero exit
+    if result.returncode != 0:
+        return [], f"opencode models exited with code {result.returncode}"
+    
+    # Parse output lines that look like provider/model refs
+    # Expected format: lines with "provider/model" pattern (e.g., "openai/gpt-5.5")
+    models = []
+    seen = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Look for provider/model pattern (must have a known provider prefix)
+        # Pattern: provider/model where provider is in REMOTE_PROVIDERS or starts with dgx-
+        parts = line.split("/")
+        if len(parts) == 2:
+            provider, model = parts[0].strip(), parts[1].strip()
+            # Only accept if provider is a known remote provider or dgx provider
+            if provider in REMOTE_PROVIDERS or provider.startswith("dgx-"):
+                ref = f"{provider}/{model}"
+                if ref not in seen:
+                    seen.add(ref)
+                    models.append(ref)
+    
+    if not models:
+        return [], "no provider/model refs found in opencode models output"
+    
+    return models, f"found {len(models)} runtime model(s)"
+
+
+def oc_build_opencode_providers(cfg):
+    """Extract models from OpenCode's existing config providers.
+    
+    Returns dict of {provider/model_ref: {}} for all models in managed and
+    unmanaged providers in the config. This is used as a fallback/back-compat
+    source when runtime discovery fails or to augment the runtime pool."""
+    providers = cfg.get("provider", {}) or {}
+    models = {}
+    for prov_key, prov_cfg in providers.items():
+        if not isinstance(prov_cfg, dict):
+            continue
+        model_entries = prov_cfg.get("models", {}) or {}
+        for mid in model_entries.keys():
+            models[f"{prov_key}/{mid}"] = {}
+    return models
+
+
 DEFAULT_CONTEXT = 200000              # used if endpoint doesn't report max_model_len
 DEFAULT_OUTPUT = 65536               # OpenCode requires limit.output
 API_KEY = "sglang"                    # dummy; vLLM/SGLang ignore it
@@ -314,6 +388,57 @@ def _create_default_models_template():
     return template
 
 
+def _resolve_model_ref_from_prefs(pref, available_models):
+    """Resolve a model preference to its full provider-qualified ref if available.
+    
+    Args:
+        pref: model preference string - can be:
+            - Full ref: "openai/gpt-5.5" (must match exactly in available_models)
+            - Served ID with slash: "unsloth/qwen3-coder-next-fp8" (DGX model, must match model ID)
+            - Bare model ID: "qwen3-coder-next-fp8" (must match model ID)
+        available_models: dict mapping full refs to {} (e.g., {"dgx-1-8000/qwen3.6-27b": {}})
+    
+    Returns:
+        Full provider-qualified ref if resolvable, None otherwise.
+    """
+    if not pref or not available_models:
+        return None
+    
+    # Check if pref is already a full ref (contains / with a known provider)
+    if "/" in pref:
+        provider_part = pref.split("/", 1)[0]
+        # If it's a known remote provider or dgx provider, check exact match in available_models
+        if provider_part in REMOTE_PROVIDERS or provider_part.startswith("dgx-"):
+            if pref in available_models:
+                return pref
+            return None
+    
+    # pref is a bare model ID or served ID without a known provider - match against model IDs
+    # For served IDs like "unsloth/qwen3-coder-next-fp8", we need to match the full served ID
+    # For bare IDs like "qwen3-coder-next-fp8", we match just the model part
+    
+    # First, check if pref contains a slash - if so, it's a served ID that should match exactly
+    if "/" in pref:
+        # This is a served ID like "unsloth/qwen3-coder-next-fp8"
+        # Look for an available model that ends with this served ID
+        for model_ref in available_models.keys():
+            if model_ref.endswith("/" + pref):
+                return model_ref
+        return None
+    
+    # Bare model ID - match against model ID part of refs
+    pref_model_id = pref
+    
+    # Find a matching ref in available_models
+    for model_ref in available_models.keys():
+        # Extract model ID from the ref (everything after the first /)
+        ref_model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+        if ref_model_id == pref_model_id:
+            return model_ref
+    
+    return None
+
+
 def get_preferred_model(available_models, preferences):
     """Pick the best model from preferences that's in available_models.
     
@@ -337,7 +462,7 @@ def get_preferred_model(available_models, preferences):
     return available_models[0]
 
 
-def _apply_default_models(agents, default_models, reasoning_caps, available_models=None):
+def _apply_default_models(agents, default_models, reasoning_caps, available_models=None, notes=None):
     """Apply user's default model preferences to agents based on available models.
     
     Args:
@@ -345,6 +470,7 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
         default_models: loaded default_models.json data
         reasoning_caps: dict mapping model_ref -> caps (for reasoning models)
         available_models: dict mapping model_ref -> {} (all models, including non-reasoning)
+        notes: optional list to append warning/notes messages
     
     Returns:
         agents dict with models updated according to preferences
@@ -363,7 +489,7 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
     if not model_refs:
         return agents
     
-    # Build list of available model IDs
+    # Build list of available model IDs and refs for fallback
     available_model_ids = []
     for model_ref in model_refs:
         # Extract just the model ID part (after /)
@@ -372,6 +498,9 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
     
     if not available_model_ids:
         return agents
+    
+    # Build a set of available refs for quick lookup
+    available_refs_set = set(model_refs)
     
     # Apply preferences for each agent
     agents_copy = dict(agents)
@@ -387,55 +516,50 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
         
         if prefs:
             # Resolve this agent's model by walking its preferences IN ORDER and taking the FIRST
-            # that resolves — either a live DGX model (matched against the local pool) or a
-            # cloud/remote provider ref OpenCode routes (openai/…, anthropic/…, google/… — see
-            # REMOTE_PROVIDERS). List order is authoritative: [local-A, cloud-B, local-C] with A
-            # down but B up resolves to B (we never skip an earlier resolvable cloud model to reach
-            # a later local one). If nothing in the list resolves, fall back to any live DGX model.
-            # A served id that merely contains a slash (unsloth/qwen3-coder-next-fp8) is a DGX model
-            # — it matches ONLY the local-pool check and is NEVER sent to a cloud provider.
+            # that resolves against the available_models pool. List order is authoritative.
+            # A served ID that contains a slash (unsloth/qwen3-coder-next-fp8) is a DGX model
+            # — it matches ONLY the local-pool check. Remote refs (openai/..., anthropic/...)
+            # must appear EXACTLY in available_models to be accepted.
             preferred = None
+            resolved_ref = None
             for pref in prefs:
-                if pref in available_model_ids:                 # live DGX model
-                    preferred = pref
+                resolved = _resolve_model_ref_from_prefs(pref, available_models)
+                if resolved is not None:
+                    preferred = pref  # Use the original preference string for display
+                    resolved_ref = resolved
                     break
-                if pref.split("/", 1)[0] in REMOTE_PROVIDERS:   # cloud/remote provider ref
-                    preferred = pref
-                    break
-            if preferred is None and available_model_ids:       # nothing matched -> any live DGX
-                preferred = available_model_ids[0]
+                # Pref is not available - emit a visible warning
+                if notes is not None:
+                    notes.append(f"Pref skipped (not available): {pref}")
             
-            if preferred:
-                # Find the full model_ref for the preferred model
-                # Prefer reasoning_caps if the model is reasoning, otherwise use available_models
-                model_ref = None
-                if preferred in available_model_ids:
-                    for ref, caps in reasoning_caps.items():
-                        mid = ref.split("/", 1)[1] if "/" in ref else ref
-                        if mid == preferred:
-                            model_ref = ref
-                            break
-                
-                if not model_ref and available_models:
-                    for ref in available_models.keys():
-                        mid = ref.split("/", 1)[1] if "/" in ref else ref
-                        if mid == preferred:
-                            model_ref = ref
-                            break
-                
-                if model_ref:
-                    agent_cfg["model"] = model_ref
-                elif "/" in preferred:
-                    # Remote model reference (e.g., openai/gpt-5.5) - use directly
-                    agent_cfg["model"] = preferred
+            if preferred is None:
+                # Nothing matched - check if current model is still available
+                current_ref = agent_cfg.get("model", "")
+                if current_ref and current_ref in available_refs_set:
+                    # Current model is still available - keep it
+                    if notes is not None:
+                        notes.append(f"Using current model: {current_ref} (no preference resolved)")
+                elif available_model_ids:
+                    # Fall back to first available model
+                    preferred = available_model_ids[0]
+                    resolved_ref = _resolve_model_ref_from_prefs(preferred, available_models)
+                    if notes is not None:
+                        notes.append(f"Fallback to first available: {preferred}")
+                # If no available models, leave unchanged (no update to agent_cfg)
+            
+            if resolved_ref:
+                agent_cfg["model"] = resolved_ref
+            elif preferred and "/" in preferred:
+                # Remote model reference (e.g., openai/gpt-5.5) - use directly
+                agent_cfg["model"] = preferred
+            elif preferred:
+                # Fallback: keep the provider from current model
+                current_ref = agent_cfg.get("model", "")
+                if "/" in current_ref:
+                    provider = current_ref.split("/", 1)[0]
+                    agent_cfg["model"] = f"{provider}/{preferred}"
                 else:
-                    # Fallback: keep the provider from current model
-                    current_ref = agent_cfg.get("model", "")
-                    if "/" in current_ref:
-                        provider = current_ref.split("/", 1)[0]
-                        agent_cfg["model"] = f"{provider}/{preferred}"
-                    else:
-                        agent_cfg["model"] = preferred
+                    agent_cfg["model"] = preferred
     
     return agents_copy
 
@@ -1697,14 +1821,49 @@ def oc_sync(args, sampling, detected_installed):
     
     cfg["provider"] = kept
 
-    # Collect all available models from both local probes AND existing config
-    # This allows default_models.json to reference models from other providers
+    # Collect all available models from multiple sources:
+    # 1. Local probes (DGX endpoints)
+    # 2. OpenCode runtime models (from `opencode models`)
+    # 3. Existing config providers (fallback/back-compat)
+    # 
+    # The runtime models source is authoritative for OpenCode's built-in providers
+    # (like openai/) that are NOT in opencode.json's provider block.
+    # 
+    # Build this BEFORE the profiles block so the condition check at line 1878
+    # can see remote models that are available via runtime discovery.
+    
+    # Start with local probes
     all_available_models = dict(available_models)
+    
+    # Discover OpenCode runtime models (built-in providers like openai/, anthropic/)
+    runtime_models, runtime_note = discover_opencode_runtime_models()
+    runtime_success = bool(runtime_models)
+    if runtime_success:
+        for ref in runtime_models:
+            all_available_models[ref] = {}
+        print(f"  runtime: {runtime_note}")
+    else:
+        print(f"  runtime: {runtime_note}")
+    
+    # Also include models from existing config providers (for fallback/back-compat)
+    # For REMOTE_PROVIDERS, only include if runtime discovery succeeded AND the model
+    # appears in runtime_models. If runtime discovery failed, include all existing
+    # config models as fallback. Local managed providers (dgx-) are unaffected by
+    # runtime discovery and use live probe results.
     for prov_key, prov_cfg in existing.items():
         if prov_key in kept:  # only include providers we're keeping
             models = prov_cfg.get("models", {})
             for mid, mcfg in models.items():
-                all_available_models[f"{prov_key}/{mid}"] = {}
+                ref = f"{prov_key}/{mid}"
+                if ref in all_available_models:
+                    continue  # already added (from local probes or runtime)
+                # For remote providers, only include if runtime discovery succeeded
+                # AND this model is in the runtime list. If runtime failed, include
+                # existing config models as fallback/back-compat.
+                if prov_key in REMOTE_PROVIDERS:
+                    if runtime_success and ref not in runtime_models:
+                        continue  # stale remote model not in runtime discovery
+                all_available_models[ref] = {}
 
     # Default model handling
     if args.set_default:
@@ -1731,17 +1890,24 @@ def oc_sync(args, sampling, detected_installed):
     matched_recipe = None
     env_notes = []
     team_budget = None
-    if args.profiles and available_models:
+    # Use all_available_models (merged pool) for the condition check so we can build
+    # the roster even when only remote models are available (via runtime discovery).
+    # Fall back to available_models (local-only) if all_available_models is empty.
+    roster_pool = all_available_models if all_available_models else available_models
+    if args.profiles and roster_pool:
         # Build the roster from whatever is LIVE. Prefer a reasoning model for the
         # primary ref when one exists; otherwise fall back to any live model (e.g. a
         # coder-only fleet) so the roster is rebuilt from the live endpoints instead
         # of leaving stale agents pointing at a model that is no longer served.
         cur = cfg.get("model")
-        pool = reasoning_caps if reasoning_caps else available_models
+        # Use all_available_models (merged pool of local probes + existing config providers)
+        # instead of available_models (local-only) so remote refs like openai/gpt-5.5
+        # from existing config are considered for team selection.
+        pool = reasoning_caps if reasoning_caps else all_available_models
         
         # Build available_model_ids for remote model detection
         available_model_ids = []
-        for model_ref in available_models.keys():
+        for model_ref in all_available_models.keys():
             model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
             available_model_ids.append(model_id)
         
@@ -1754,11 +1920,14 @@ def oc_sync(args, sampling, detected_installed):
         if reasoning_caps:
             agent_model_ref = cur if cur in reasoning_caps else sorted(reasoning_caps)[0]
         else:
-            # No reasoning models - check if team preference is a remote model
+            # No reasoning models - validate team preferences against all_available_models
+            # Use the same resolver logic as _apply_default_models so unavailable
+            # cloud refs like anthropic/claude-opus-4-8 and unavailable local served IDs
+            # are not selected.
             for pref in team_prefs:
-                if "/" in pref and pref not in available_model_ids:
-                    # Remote model - use it as the base
-                    agent_model_ref = pref
+                resolved = _resolve_model_ref_from_prefs(pref, all_available_models)
+                if resolved is not None:
+                    agent_model_ref = resolved
                     break
             
             if not agent_model_ref:
@@ -1800,7 +1969,10 @@ def oc_sync(args, sampling, detected_installed):
                 agent_model_ref, caps, sampling.get("repetition_detection"))
 
         # Apply default models preferences to agents (default_models already loaded above)
-        agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models)
+        model_notes = []
+        agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models, model_notes)
+        for note in model_notes:
+            print(f"  {note}")
 
         # Per-(model, agent) sampling: one table per discovered model, so switching
         # an agent onto another model applies THAT model's card sampling (10+ models
@@ -1864,11 +2036,18 @@ def oc_sync(args, sampling, detected_installed):
         # ---- Team model (frontier planner). Flag wins; else PRESERVE whatever
         # frontier model was already set (so we never wipe your anthropic choice).
         # Workers keep their own pinned local models, so they stay on the DGX. ----
+        # Check if team preference resolved to a valid model - if so, use that instead of preserving
+        team_agent_model = agents.get("team", {}).get("model") if agents else None
         team_model = args.team_model
-        if not team_model and prev_team_model and \
-                not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX):
-            team_model = prev_team_model
-            print(f"  team model preserved from existing config: {team_model}")
+        if not team_model:
+            # No flag passed - check if preference resolved to a valid model
+            if team_agent_model and team_agent_model != agent_model_ref:
+                # Preference resolved to a different model - use it
+                team_model = team_agent_model
+            elif prev_team_model and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX):
+                # No preference or preference is same as current - preserve existing
+                team_model = prev_team_model
+                print(f"  team model preserved from existing config: {team_model}")
         if team_model and "team" in agents:
             tm = cfg["agent"]["team"]
             tm["model"] = team_model
