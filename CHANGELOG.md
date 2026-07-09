@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GitHub Copilot CLI is now a sync target** — `omw sync --target copilot` (or `--target all`)
+  writes the agent roster to `~/.copilot/` as `.agent.md` files (Markdown + YAML frontmatter),
+  merges `settings.json` (`model`, `includeCoAuthoredBy: false`, `stream: true`), and emits an
+  `otools-copilot.env`/`.ps1` snippet for the BYOK provider endpoint. The config home is
+  **auto-detected**: native `~/.copilot` on Windows/macOS/Linux, or the Windows-side
+  `C:\Users\<you>\.copilot` (via `/mnt/c`) when `omw` runs in WSL but Copilot is on Windows;
+  `$COPILOT_HOME`/`--copilot-home` override. **Copilot's CLI takes a single
+  custom endpoint**, so the whole roster runs on ONE DGX model (the endpoint can't live in
+  `settings.json`, hence the env snippet). Delegation is Copilot-runtime-global by description and
+  subagents can't spawn subagents, so primaries → top-level agents, workers → subagents, and
+  `agent-review` is `disable-model-invocation: true` (explicit-invoke-only). VS Code multi-model
+  target is a planned follow-up.
 - **`.claude/skills/getting-started` onboarding skill** — an end-to-end setup guide (shell aliases,
   DGX provisioning, launching a first model, the HF token, installing OpenCode, syncing + tweaking
   the roster) for Claude to walk a new user through, with copy-paste commands at each step.

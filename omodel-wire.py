@@ -708,6 +708,13 @@ TOOLS = [
         "sync": "opencode",
     },
     {
+        "key": "copilot",
+        "display": "GitHub Copilot",
+        "cli": ["copilot"],
+        "config": "~/.copilot/  (agents/ + settings.json)",
+        "sync": "copilot",
+    },
+    {
         "key": "claude-code",
         "display": "Claude Code",
         "cli": ["claude"],
@@ -2517,6 +2524,357 @@ def cmd_verify(args):
     sys.exit(oc_verify(args))
 
 
+# ============================================================================
+# GitHub Copilot CLI target
+# ============================================================================
+# Copilot's config home is ~/.copilot (override: $COPILOT_HOME). It reads custom
+# agents from <home>/agents/<name>.agent.md (markdown + YAML frontmatter; the body
+# is the agent's system prompt) and user settings from <home>/settings.json.
+#
+# KEY CONSTRAINT: the custom model ENDPOINT is environment-variable-only
+# (COPILOT_PROVIDER_BASE_URL / _API_KEY / _TYPE) -- it can NOT be persisted in
+# settings.json -- and the CLI takes a SINGLE custom provider. So Copilot runs the
+# whole roster on ONE DGX model: we pick that model, write its name + behavior into
+# settings.json, write the roster as .agent.md files, and emit an env snippet for the
+# endpoint. Delegation in Copilot is runtime-global by description (no per-parent
+# allowlist), and subagents cannot spawn subagents -- so primaries become top-level
+# agents, workers become subagents, and agent-review is explicit-invoke-only.
+# Docs: docs.github.com/en/copilot/{how-tos/copilot-cli/customize-copilot/use-byok-models,
+#       reference/custom-agents-configuration, reference/copilot-cli-reference/cli-config-dir-reference}
+
+def _is_wsl():
+    """True when running under WSL (which looks like Linux but hosts Windows on /mnt/c)."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_windows_copilot_home():
+    """Under WSL, the Windows-side ~/.copilot (Copilot installed on Windows, not in WSL), or None.
+
+    Tries $USERPROFILE (if WSL interop exposes it), then /mnt/c/Users/<wsl-user>, then any single
+    real user under /mnt/c/Users that already has a `.copilot`."""
+    if not _is_wsl():
+        return None
+    cands = []
+    up = os.environ.get("USERPROFILE")            # e.g. C:\Users\Otto
+    if up and len(up) > 2 and up[1] == ":":
+        cands.append(f"/mnt/{up[0].lower()}{up[2:].replace(chr(92), '/')}/.copilot")
+    user = os.environ.get("USER")
+    if user:
+        cands.append(f"/mnt/c/Users/{user}/.copilot")
+    try:
+        for name in sorted(os.listdir("/mnt/c/Users")):
+            if name.lower() in ("public", "default", "default user", "all users", "defaultuser0"):
+                continue
+            cands.append(f"/mnt/c/Users/{name}/.copilot")
+    except OSError:
+        pass
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def copilot_home():
+    """Copilot CLI config home, auto-detected per platform.
+
+    Precedence: $COPILOT_HOME > a native ~/.copilot that already exists (Copilot is installed
+    right here -- correct on native Windows/macOS/Linux, where expanduser is already per-OS) >
+    a Windows-side ~/.copilot when running under WSL (Copilot installed on Windows) > native
+    ~/.copilot (created on first write)."""
+    env = os.environ.get("COPILOT_HOME")
+    if env:
+        return env
+    native = os.path.expanduser(os.path.join("~", ".copilot"))
+    if os.path.isdir(native):
+        return native
+    return _wsl_windows_copilot_home() or native
+
+
+def _copilot_home_for(args):
+    return getattr(args, "copilot_home", None) or copilot_home()
+
+
+# readonly agents are restricted to read/search/fetch; ask/full agents get all tools
+# (omitting `tools` in the frontmatter means "all tools available").
+COPILOT_READONLY_TOOLS = ["read", "search", "fetch"]
+
+
+def _copilot_tools_for(perm):
+    """A Copilot `tools:` list for a PERM tier, or None to mean 'all tools'."""
+    return list(COPILOT_READONLY_TOOLS) if perm == "readonly" else None
+
+
+def _yaml_frontmatter(fields):
+    """Emit YAML frontmatter for the flat scalar/bool/list values we use (order preserved)."""
+    lines = ["---"]
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            lines.append(f"{k}: {'true' if v else 'false'}")
+        elif isinstance(v, list):
+            lines.append(f"{k}: [{', '.join(json.dumps(x) for x in v)}]")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _copilot_agent_md(name, description, body, tools=None, model=None, disable_model_invocation=None):
+    """One Copilot custom-agent file: YAML frontmatter + markdown body (the system prompt)."""
+    fm = _yaml_frontmatter({
+        "name": name,
+        "description": description,
+        "tools": tools,
+        "model": model,
+        "disable-model-invocation": disable_model_invocation,
+    })
+    return f"{fm}\n\n{body.strip()}\n"
+
+
+# Copilot-appropriate agent bodies. Concise and tool-agnostic (Copilot's runtime
+# handles delegation), unlike the OpenCode prompts which reference the `task` tool.
+COPILOT_BODIES = {
+    "research": (
+        "You are a research & reasoning agent. Investigate the codebase, read docs and the web, and "
+        "reason problems through before any implementation. You are READ-ONLY: gather information and "
+        "explain your findings; do not edit files or run commands with side effects."),
+    "code": (
+        "You are an interactive coding agent. Implement, refactor, and debug. Prefer small, verifiable "
+        "changes, match the surrounding style, and confirm before destructive edits or commands with "
+        "side effects."),
+    "agent": (
+        "You are an autonomous coding agent with full access. Take the task from start to finish: edit "
+        "files, run commands, and VERIFY your work (build/tests) before reporting done."),
+    "agent-plan": (
+        "You are a read-only research/reasoning worker. Gather exactly the information asked for -- read "
+        "files, search, fetch docs -- and return a concrete, self-contained answer. Do not edit files or "
+        "run commands with side effects."),
+    "agent-code": (
+        "You are a full-access implementation worker. Complete the assigned change end to end and verify "
+        "it. Your final message must state what you changed and the concrete result: command output, "
+        "files touched, or the exact error if it failed."),
+    "agent-instruct": (
+        "You are a fast worker for simple, well-specified, mechanical tasks (one obvious edit, rename, "
+        "format, boilerplate). Do exactly what's asked and report the concrete result."),
+    "team": (
+        "You are the Team Lead -- an orchestrator. Break the request into the smallest independent "
+        "pieces and delegate each to the specialist subagent that fits: research -> agent-plan, "
+        "implementation -> agent-code, mechanical edits -> agent-instruct, PR review -> agent-review. "
+        "Verify their results against explicit acceptance criteria before reporting back, and prefer "
+        "dispatching independent work in parallel. Copilot routes delegation for you based on each "
+        "subagent's description, so keep every delegated instruction scoped and self-contained."),
+}
+
+
+# Copilot descriptions drive the runtime's auto-delegation, so they're purpose-written
+# (not the OpenCode `sdesc`, which references OpenCode-isms like task_id).
+COPILOT_DESCRIPTIONS = {
+    "research": "Read-only research & reasoning: investigate the codebase, read docs and the web, and reason through problems before implementation.",
+    "code": "Interactive coding: implement, refactor, and debug, confirming before destructive edits or side-effecting commands.",
+    "agent": "Autonomous coding with full access: take a task end to end -- edit, run, and verify.",
+    "agent-plan": "Read-only research/reasoning worker: gather information and return a concrete answer; no edits.",
+    "agent-code": "Full-access implementation worker: complete a change end to end and verify it.",
+    "agent-instruct": "Fast worker for simple, well-specified mechanical edits (rename, format, boilerplate).",
+    "agent-review": "Reviews a pull request against the repo's bar and reports issues + suggested fixes; invoke it explicitly for PR review / approve / merge.",
+    "team": "Lead orchestrator: decompose a request, delegate pieces to the specialist subagents, and verify results.",
+}
+
+
+def copilot_build_agents():
+    """{filename: agent-md content} for the full roster in Copilot's .agent.md format.
+
+    Primaries (research/code/agent) + team are top-level agents; the agent-* workers are
+    subagents. agent-review is `disable-model-invocation: true` (explicit-invoke-only) so it
+    isn't auto-dispatched -- the closest Copilot has to "only the team delegates to review"."""
+    out = {}
+    for key, prole, mode, is_worker, perm, color, sdesc in AGENT_SPECS:
+        body = REVIEW_PROMPT if key == "agent-review" else COPILOT_BODIES.get(key, sdesc)
+        dmi = True if key == "agent-review" else None
+        out[f"{key}.agent.md"] = _copilot_agent_md(
+            name=key, description=COPILOT_DESCRIPTIONS.get(key, sdesc.replace("[worker] ", "")),
+            body=body, tools=_copilot_tools_for(perm), disable_model_invocation=dmi)
+    out["team.agent.md"] = _copilot_agent_md(
+        name="team", description=COPILOT_DESCRIPTIONS["team"],
+        body=COPILOT_BODIES["team"], tools=_copilot_tools_for("full"))
+    return out
+
+
+def _copilot_pick_model(providers, available_models, reasoning_caps):
+    """Pick the ONE model Copilot's single BYOK endpoint will serve.
+
+    Prefers the coder the `code` agent would use (Copilot is a coding assistant), then any
+    reasoning model, then the first live model. Returns (model_ref, base_url, served_id)."""
+    if not available_models:
+        return None, None, None
+    refs = sorted(available_models)
+    served = {ref: (ref.split("/", 1)[1] if "/" in ref else ref) for ref in refs}
+    chosen = None
+    for pref in (load_default_models().get("agents") or {}).get("code", []):
+        pl = pref.lower()
+        for ref in refs:
+            sid = served[ref].lower()
+            if sid == pl or sid.rsplit("/", 1)[-1] == pl.rsplit("/", 1)[-1]:
+                chosen = ref
+                break
+        if chosen:
+            break
+    if not chosen:
+        chosen = sorted(reasoning_caps)[0] if reasoning_caps else refs[0]
+    pk = chosen.split("/", 1)[0]
+    base_url = ((providers.get(pk) or {}).get("options") or {}).get("baseURL", "")
+    return chosen, base_url, served[chosen]
+
+
+def _copilot_load_settings(path):
+    """Load settings.json, tolerating //-line comments (Copilot writes a commented file)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    lines = [ln for ln in raw.splitlines() if not ln.lstrip().startswith("//")]
+    try:
+        return json.loads("\n".join(lines)) or {}
+    except ValueError:
+        return {}
+
+
+def copilot_merge_settings(settings, served_id=None):
+    """Set the omw-managed keys in Copilot's settings.json (non-destructive to other keys).
+    `model` is only set when a live model was found (served_id); the rest is model-independent."""
+    settings["includeCoAuthoredBy"] = False   # matches the no-Co-Authored-By rule
+    settings["stream"] = True
+    if served_id:
+        settings["model"] = served_id
+    return settings
+
+
+def copilot_env_files(base_url, served_id, api_key="dgx"):
+    """(sh, ps1) env snippets that point Copilot's single BYOK provider at the DGX endpoint.
+    The endpoint can't live in settings.json, so this is the one piece that must be env."""
+    sh = ("# otools -- Copilot BYOK provider for your DGX endpoint (auto-generated by `omw sync`).\n"
+          "# The custom endpoint can't be stored in settings.json, so source this before running\n"
+          "# `copilot`, or add it to your shell rc (~/.bashrc, ~/.zshrc).\n"
+          'export COPILOT_PROVIDER_TYPE="openai"\n'
+          f'export COPILOT_PROVIDER_BASE_URL="{base_url}"\n'
+          f'export COPILOT_PROVIDER_API_KEY="{api_key}"\n'
+          f'export COPILOT_MODEL="{served_id}"\n')
+    ps1 = ("# otools -- Copilot BYOK provider (PowerShell). Dot-source before `copilot`, or add to\n"
+           "# your $PROFILE. For a persistent user env var use: setx COPILOT_PROVIDER_BASE_URL \"...\"\n"
+           '$env:COPILOT_PROVIDER_TYPE = "openai"\n'
+           f'$env:COPILOT_PROVIDER_BASE_URL = "{base_url}"\n'
+           f'$env:COPILOT_PROVIDER_API_KEY = "{api_key}"\n'
+           f'$env:COPILOT_MODEL = "{served_id}"\n')
+    return sh, ps1
+
+
+def _win_path(p):
+    """Translate a /mnt/<drive>/... WSL path to a Windows path (C:\\...) for display; else return p."""
+    mnt = re.match(r"^/mnt/([a-z])/(.*)$", p)
+    return f"{mnt.group(1).upper()}:\\{mnt.group(2).replace('/', chr(92))}" if mnt else p
+
+
+def _copilot_print_where_to_find(home, n):
+    """Print where the synced agents show up -- all three Copilot surfaces read <home>/agents/."""
+    print(f"\nYour {n} agents are in {os.path.join(home, 'agents')} -- all three Copilot surfaces read it:")
+    print("  * VS Code:      Copilot Chat -> the agents dropdown at the bottom of the panel.")
+    print("                  Reload first: Ctrl+Shift+P -> \"Developer: Reload Window\".")
+    print("  * CLI / TUI:    run `copilot`, then type /agent  (or `copilot --agent code -p \"...\"`).")
+    print("  * Desktop app:  the agent picker (shares this same ~/.copilot config).")
+
+
+def _copilot_print_env_instructions(home, sh_path, ps1_path):
+    win = home.startswith("/mnt/")   # WSL wrote to the Windows-side Copilot home
+    print("\nOne more step -- point Copilot at the DGX endpoint (it can't live in settings.json):")
+    if win:
+        # Copilot runs on Windows; give the Windows path for its shell.
+        print(f"  PowerShell (Windows):    . {_win_path(ps1_path)}")
+        print(f"  (or from WSL if you run copilot there:  source {sh_path})")
+    else:
+        print(f"  bash/zsh (Linux/macOS):  source {sh_path}")
+        print(f"  PowerShell (Windows):    . {ps1_path}")
+    print("  Add that line to your shell rc / $PROFILE to persist it, then run")
+    print("  `copilot --agent code` (or `--agent team`).")
+
+
+def copilot_sync(args, sampling, detected_installed):
+    """Write the GitHub Copilot CLI target: agent roster (.agent.md) + settings.json + the
+    BYOK provider env snippet.
+
+    The roster and the model-independent settings are ALWAYS written -- so you can sync (and see
+    where the files land) even with the DGX offline. The provider endpoint (settings `model` +
+    the env snippet) needs a live model, so it's wired only when one is discovered; otherwise the
+    sync completes with a note to re-run when the DGX is reachable. Returns 0."""
+    home = _copilot_home_for(args)
+    configs = load_configs(args.configs) if not getattr(args, "no_recipes", False) else {"recipes": []}
+    print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for Copilot ...")
+    providers, refs, reasoning_caps, available_models = oc_build_providers(
+        args._hosts, args._ports, args.timeout, sampling, profiles=True,
+        tool_call=not getattr(args, "no_tool_call", False), recipes=configs, verbose=True)
+    model_ref, base_url, served_id = _copilot_pick_model(providers, available_models, reasoning_caps)
+    agents = copilot_build_agents()
+
+    if model_ref:
+        print(f"\nGitHub Copilot target -- the whole roster runs on ONE endpoint:")
+        print(f"  model:    {model_ref}")
+        print(f"  base URL: {base_url}")
+    else:
+        print("\nGitHub Copilot target -- no live model right now; writing the roster + settings "
+              "only (the endpoint gets wired when the DGX is reachable).")
+
+    if args.dry_run:
+        print(f"\n--- DRY RUN: would write to {home} ---")
+        print(f"  agents/  ({len(agents)}): {', '.join(sorted(agents))}")
+        print(f"  settings.json (includeCoAuthoredBy=false, stream=true"
+              + (f", model={served_id}" if served_id else "; model when a DGX is live") + ")")
+        if base_url:
+            print(f"  otools-copilot.env / .ps1  (COPILOT_PROVIDER_BASE_URL={base_url})")
+        return 0
+
+    # 1. Agent roster -- model-independent, always written.
+    agents_dir = os.path.join(home, "agents")
+    os.makedirs(agents_dir, exist_ok=True)
+    for fn, content in sorted(agents.items()):
+        with open(os.path.join(agents_dir, fn), "w", encoding="utf-8") as f:
+            f.write(content)
+    print(f"Wrote {len(agents)} agent(s) to {agents_dir}")
+
+    # 2. settings.json -- model-independent keys always; `model` only when a model is live.
+    settings_path = os.path.join(home, "settings.json")
+    settings = copilot_merge_settings(_copilot_load_settings(settings_path), served_id)
+    os.makedirs(home, exist_ok=True)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    print(f"Wrote {settings_path}")
+
+    _copilot_print_where_to_find(home, len(agents))
+
+    # 3. Provider endpoint -- needs a live model/base URL.
+    if not model_ref:
+        print("\n  NOTE: the endpoint is NOT wired yet (no live model), so the agents will use")
+        print("  Copilot's default hosted model. Re-run `omw sync --target copilot` with your DGX")
+        print("  up to point them at your local model.")
+        return 0
+    sh, ps1 = copilot_env_files(base_url, served_id)
+    sh_path = os.path.join(home, "otools-copilot.env")
+    ps1_path = os.path.join(home, "otools-copilot.ps1")
+    with open(sh_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(sh)
+    with open(ps1_path, "w", encoding="utf-8") as f:
+        f.write(ps1)
+    print(f"Wrote {sh_path} and {ps1_path}")
+    _copilot_print_env_instructions(home, sh_path, ps1_path)
+    return 0
+
+
 def cmd_sync(args):
     """Full profile sync: roster + providers + plugin + prompts (was --profiles)."""
     _resolve_io(args)
@@ -2535,19 +2893,27 @@ def cmd_sync(args):
     detected = detect_tools()
     print_detection(detected)
     installed = {t["key"] for t in detected if t["installed"]}
+
+    # Route to the requested target(s). --target opencode (default) preserves prior behavior;
+    # copilot writes the Copilot CLI config; all does every implemented target.
+    sync_funcs = {"opencode": oc_sync, "copilot": copilot_sync}
+    target = getattr(args, "target", None) or "opencode"
+    wanted = list(sync_funcs) if target == "all" else [target]
     ran_any = False
-    for tool in detected:
-        if tool["sync"] != "opencode":
+    for name in wanted:
+        func = sync_funcs.get(name)
+        if not func:
             continue
         ran_any = True
-        if not tool["installed"]:
-            print("OpenCode not found on PATH -- writing config anyway "
-                  "(install opencode, or point --config, to use it).")
-        rc = oc_sync(args, sampling, installed)
+        tool = next((t for t in detected if t["sync"] == name), None)
+        if tool and not tool["installed"]:
+            print(f"{tool['display']} not found on PATH -- writing config anyway "
+                  f"(install it, or point --config, to use it).")
+        rc = func(args, sampling, installed)
         if rc not in (0,):
             sys.exit(rc)
     if not ran_any:
-        print("No configurable tools matched. (Only OpenCode sync is implemented today.)")
+        print(f"No sync target named {target!r}. (Implemented: opencode, copilot.)")
         return
     if not args.dry_run:
         _suggest([
@@ -3317,8 +3683,12 @@ def _build_parser():
                            help="omodel-manager configs dir (default: wire.json / $OMODEL_CONFIGS / sibling)")
 
     ps = sub.add_parser("sync", parents=[io_parent],
-                        help="sync the OpenCode agent roster from the model configs")
+                        help="sync the agent roster from the model configs (OpenCode and/or Copilot)")
     _add_sync_args(ps)
+    ps.add_argument("--target", choices=["opencode", "copilot", "all"], default="opencode",
+                    help="which tool to configure (default: opencode)")
+    ps.add_argument("--copilot-home", default=None,
+                    help="override Copilot's config home (default: $COPILOT_HOME or ~/.copilot)")
     ps.set_defaults(func=cmd_sync)
 
     pa = sub.add_parser("audit", parents=[io_parent],
