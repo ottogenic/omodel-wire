@@ -1993,5 +1993,119 @@ class TestOcBuildOpencodeProviders(unittest.TestCase):
         self.assertEqual(models, {})
 
 
+class TestCopilotSync(unittest.TestCase):
+    """The GitHub Copilot CLI target: .agent.md roster + settings.json + env snippet."""
+
+    def _sync(self, tmp, **over):
+        args = make_args(tmp, copilot_home=tmp, target="copilot", **over)
+        sampling = m.build_sampling(args)
+        with FakeProbes(), quiet():
+            rc = m.copilot_sync(args, sampling, {"copilot"})
+        self.assertEqual(rc, 0)
+        return args
+
+    def test_writes_full_roster_as_agent_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            adir = os.path.join(tmp, "agents")
+            for name in ("research", "code", "agent", "team",
+                         "agent-plan", "agent-code", "agent-instruct", "agent-review"):
+                self.assertTrue(os.path.exists(os.path.join(adir, f"{name}.agent.md")),
+                                f"{name}.agent.md missing")
+            body = open(os.path.join(adir, "code.agent.md"), encoding="utf-8").read()
+            self.assertTrue(body.startswith("---\nname: code\n"))
+            self.assertIn("description:", body)
+
+    def test_readonly_agent_restricts_tools_full_agent_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            adir = os.path.join(tmp, "agents")
+            research = open(os.path.join(adir, "research.agent.md"), encoding="utf-8").read()
+            self.assertIn('tools: ["read", "search", "fetch"]', research)
+            agent = open(os.path.join(adir, "agent.agent.md"), encoding="utf-8").read()
+            self.assertNotIn("tools:", agent.split("\n\n")[0])   # full -> all tools (omitted)
+
+    def test_agent_review_is_explicit_invoke_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            review = open(os.path.join(tmp, "agents", "agent-review.agent.md"), encoding="utf-8").read()
+            self.assertIn("disable-model-invocation: true", review)
+            self.assertNotIn("task_id", review.split("\n\n")[0])  # clean Copilot description
+
+    def test_settings_json_and_env_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertEqual(settings["model"], "Qwen3.6-27B-NVFP4")   # the FakeProbes model
+            self.assertIs(settings["includeCoAuthoredBy"], False)      # no Co-Authored-By
+            env = open(os.path.join(tmp, "otools-copilot.env"), encoding="utf-8").read()
+            self.assertIn("COPILOT_PROVIDER_BASE_URL=", env)
+            self.assertIn("192.0.2.101:8000/v1", env)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "otools-copilot.ps1")))
+
+    def test_settings_merge_preserves_user_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(tmp, exist_ok=True)
+            with open(os.path.join(tmp, "settings.json"), "w", encoding="utf-8") as f:
+                f.write('// managed\n{ "theme": "dark", "beep": true }\n')   # comment-tolerant
+            self._sync(tmp)
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertEqual(settings["theme"], "dark")       # preserved
+            self.assertEqual(settings["model"], "Qwen3.6-27B-NVFP4")  # ours added
+
+    def test_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp, dry_run=True)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
+
+    def test_offline_writes_roster_without_endpoint(self):
+        # DGX offline (no host matches the probe) -> still write the roster + model-independent
+        # settings so you can see where they land; skip the endpoint wiring.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp, copilot_home=tmp, target="copilot", _hosts=["192.0.2.99"])
+            sampling = m.build_sampling(args)
+            with FakeProbes(), quiet():
+                rc = m.copilot_sync(args, sampling, {"copilot"})
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "agents", "code.agent.md")))  # roster written
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertIs(settings["includeCoAuthoredBy"], False)   # model-independent keys set
+            self.assertNotIn("model", settings)                     # no model when offline
+            self.assertFalse(os.path.exists(os.path.join(tmp, "otools-copilot.env")))  # endpoint not wired
+
+    def test_copilot_home_env_var_wins(self):
+        saved = os.environ.get("COPILOT_HOME")
+        try:
+            os.environ["COPILOT_HOME"] = os.path.join("x", "custom")
+            self.assertEqual(m.copilot_home(), os.path.join("x", "custom"))
+        finally:
+            os.environ.pop("COPILOT_HOME", None)
+            if saved is not None:
+                os.environ["COPILOT_HOME"] = saved
+
+    def test_wsl_redirects_to_windows_copilot_home(self):
+        # Under WSL with Copilot installed on the Windows side, resolve the Windows ~/.copilot.
+        saved = (m._is_wsl, os.path.isdir, os.environ.get("USERPROFILE"))
+        try:
+            m._is_wsl = lambda: True
+            os.environ["USERPROFILE"] = r"C:\Users\Otto"
+            os.path.isdir = lambda p: p == "/mnt/c/Users/Otto/.copilot"
+            self.assertEqual(m._wsl_windows_copilot_home(), "/mnt/c/Users/Otto/.copilot")
+            m._is_wsl = lambda: False   # not WSL -> no redirect
+            self.assertIsNone(m._wsl_windows_copilot_home())
+        finally:
+            m._is_wsl, os.path.isdir = saved[0], saved[1]
+            if saved[2] is None:
+                os.environ.pop("USERPROFILE", None)
+            else:
+                os.environ["USERPROFILE"] = saved[2]
+
+    def test_win_path_translation(self):
+        self.assertEqual(m._win_path("/mnt/c/Users/Otto/.copilot/x.ps1"),
+                         r"C:\Users\Otto\.copilot\x.ps1")
+        self.assertEqual(m._win_path("/home/otto/.copilot/x"), "/home/otto/.copilot/x")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
