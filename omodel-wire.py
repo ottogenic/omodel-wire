@@ -2738,6 +2738,7 @@ def copilot_sync(args, sampling, detected_installed):
     Returns an exit code (0 ok, 2 = nothing live)."""
     home = _copilot_home_for(args)
     configs = load_configs(args.configs) if not getattr(args, "no_recipes", False) else {"recipes": []}
+    print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for Copilot ...")
     providers, refs, reasoning_caps, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling, profiles=True,
         tool_call=not getattr(args, "no_tool_call", False), recipes=configs, verbose=True)
