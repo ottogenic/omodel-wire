@@ -141,6 +141,12 @@ with `--target all`, alongside) OpenCode. It writes to Copilot's config home —
 Windows/macOS/Linux, and — when you run `omw` in **WSL** but Copilot is installed on Windows — the
 Windows-side `C:\Users\<you>\.copilot` (via `/mnt/c`). `$COPILOT_HOME` or `--copilot-home` overrides.
 
+**All three Copilot surfaces read `~/.copilot/agents/`**, so the same roster shows up in the
+**CLI/TUI** (`copilot` → `/agent`), **VS Code** (Copilot Chat → the agents dropdown; reload the
+window after syncing), and the **desktop app** (agent picker). The roster + settings are written even
+with the DGX offline (so you can see them land); the endpoint is wired only when a model is live —
+until then the agents run on Copilot's default hosted model.
+
 Two things differ from OpenCode by Copilot's design: its CLI takes a **single custom endpoint**, so
 the whole roster runs on **one DGX model** (the endpoint is env-only — hence the snippet you `source`
 before `copilot`); and delegation is runtime-global by description with **no subagent nesting**, so

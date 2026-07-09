@@ -2781,6 +2781,15 @@ def _win_path(p):
     return f"{mnt.group(1).upper()}:\\{mnt.group(2).replace('/', chr(92))}" if mnt else p
 
 
+def _copilot_print_where_to_find(home, n):
+    """Print where the synced agents show up -- all three Copilot surfaces read <home>/agents/."""
+    print(f"\nYour {n} agents are in {os.path.join(home, 'agents')} -- all three Copilot surfaces read it:")
+    print("  * VS Code:      Copilot Chat -> the agents dropdown at the bottom of the panel.")
+    print("                  Reload first: Ctrl+Shift+P -> \"Developer: Reload Window\".")
+    print("  * CLI / TUI:    run `copilot`, then type /agent  (or `copilot --agent code -p \"...\"`).")
+    print("  * Desktop app:  the agent picker (shares this same ~/.copilot config).")
+
+
 def _copilot_print_env_instructions(home, sh_path, ps1_path):
     win = home.startswith("/mnt/")   # WSL wrote to the Windows-side Copilot home
     print("\nOne more step -- point Copilot at the DGX endpoint (it can't live in settings.json):")
@@ -2846,11 +2855,13 @@ def copilot_sync(args, sampling, detected_installed):
         f.write("\n")
     print(f"Wrote {settings_path}")
 
+    _copilot_print_where_to_find(home, len(agents))
+
     # 3. Provider endpoint -- needs a live model/base URL.
     if not model_ref:
-        print("\nRoster + settings are in place at " + home + " -- open them / point Copilot's")
-        print("agents dropdown at them. The endpoint is NOT wired yet (no live model); re-run")
-        print("`omw sync --target copilot` when your DGX is reachable to set the model + provider URL.")
+        print("\n  NOTE: the endpoint is NOT wired yet (no live model), so the agents will use")
+        print("  Copilot's default hosted model. Re-run `omw sync --target copilot` with your DGX")
+        print("  up to point them at your local model.")
         return 0
     sh, ps1 = copilot_env_files(base_url, served_id)
     sh_path = os.path.join(home, "otools-copilot.env")
