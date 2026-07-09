@@ -2059,6 +2059,21 @@ class TestCopilotSync(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
 
+    def test_offline_writes_roster_without_endpoint(self):
+        # DGX offline (no host matches the probe) -> still write the roster + model-independent
+        # settings so you can see where they land; skip the endpoint wiring.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp, copilot_home=tmp, target="copilot", _hosts=["192.0.2.99"])
+            sampling = m.build_sampling(args)
+            with FakeProbes(), quiet():
+                rc = m.copilot_sync(args, sampling, {"copilot"})
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "agents", "code.agent.md")))  # roster written
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertIs(settings["includeCoAuthoredBy"], False)   # model-independent keys set
+            self.assertNotIn("model", settings)                     # no model when offline
+            self.assertFalse(os.path.exists(os.path.join(tmp, "otools-copilot.env")))  # endpoint not wired
+
     def test_copilot_home_env_var_wins(self):
         saved = os.environ.get("COPILOT_HOME")
         try:

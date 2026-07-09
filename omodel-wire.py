@@ -2746,11 +2746,13 @@ def _copilot_load_settings(path):
         return {}
 
 
-def copilot_merge_settings(settings, served_id):
-    """Set the omw-managed keys in Copilot's settings.json (non-destructive to other keys)."""
-    settings["model"] = served_id
+def copilot_merge_settings(settings, served_id=None):
+    """Set the omw-managed keys in Copilot's settings.json (non-destructive to other keys).
+    `model` is only set when a live model was found (served_id); the rest is model-independent."""
     settings["includeCoAuthoredBy"] = False   # matches the no-Co-Authored-By rule
     settings["stream"] = True
+    if served_id:
+        settings["model"] = served_id
     return settings
 
 
@@ -2795,8 +2797,12 @@ def _copilot_print_env_instructions(home, sh_path, ps1_path):
 
 def copilot_sync(args, sampling, detected_installed):
     """Write the GitHub Copilot CLI target: agent roster (.agent.md) + settings.json + the
-    BYOK provider env snippet. The whole roster runs on ONE model (single custom endpoint).
-    Returns an exit code (0 ok, 2 = nothing live)."""
+    BYOK provider env snippet.
+
+    The roster and the model-independent settings are ALWAYS written -- so you can sync (and see
+    where the files land) even with the DGX offline. The provider endpoint (settings `model` +
+    the env snippet) needs a live model, so it's wired only when one is discovered; otherwise the
+    sync completes with a note to re-run when the DGX is reachable. Returns 0."""
     home = _copilot_home_for(args)
     configs = load_configs(args.configs) if not getattr(args, "no_recipes", False) else {"recipes": []}
     print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for Copilot ...")
@@ -2804,23 +2810,26 @@ def copilot_sync(args, sampling, detected_installed):
         args._hosts, args._ports, args.timeout, sampling, profiles=True,
         tool_call=not getattr(args, "no_tool_call", False), recipes=configs, verbose=True)
     model_ref, base_url, served_id = _copilot_pick_model(providers, available_models, reasoning_caps)
-    if not model_ref:
-        print("No live models discovered -- launch one with `omm launch <profile> --host <h>` first; "
-              "Copilot's single BYOK endpoint needs a live model.", file=sys.stderr)
-        return 2
-
-    print(f"\nGitHub Copilot target -- the whole roster runs on ONE endpoint:")
-    print(f"  model:    {model_ref}")
-    print(f"  base URL: {base_url}")
     agents = copilot_build_agents()
+
+    if model_ref:
+        print(f"\nGitHub Copilot target -- the whole roster runs on ONE endpoint:")
+        print(f"  model:    {model_ref}")
+        print(f"  base URL: {base_url}")
+    else:
+        print("\nGitHub Copilot target -- no live model right now; writing the roster + settings "
+              "only (the endpoint gets wired when the DGX is reachable).")
 
     if args.dry_run:
         print(f"\n--- DRY RUN: would write to {home} ---")
         print(f"  agents/  ({len(agents)}): {', '.join(sorted(agents))}")
-        print(f"  settings.json (model={served_id}, includeCoAuthoredBy=false, stream=true)")
-        print(f"  otools-copilot.env / .ps1  (COPILOT_PROVIDER_BASE_URL={base_url})")
+        print(f"  settings.json (includeCoAuthoredBy=false, stream=true"
+              + (f", model={served_id}" if served_id else "; model when a DGX is live") + ")")
+        if base_url:
+            print(f"  otools-copilot.env / .ps1  (COPILOT_PROVIDER_BASE_URL={base_url})")
         return 0
 
+    # 1. Agent roster -- model-independent, always written.
     agents_dir = os.path.join(home, "agents")
     os.makedirs(agents_dir, exist_ok=True)
     for fn, content in sorted(agents.items()):
@@ -2828,6 +2837,7 @@ def copilot_sync(args, sampling, detected_installed):
             f.write(content)
     print(f"Wrote {len(agents)} agent(s) to {agents_dir}")
 
+    # 2. settings.json -- model-independent keys always; `model` only when a model is live.
     settings_path = os.path.join(home, "settings.json")
     settings = copilot_merge_settings(_copilot_load_settings(settings_path), served_id)
     os.makedirs(home, exist_ok=True)
@@ -2836,6 +2846,12 @@ def copilot_sync(args, sampling, detected_installed):
         f.write("\n")
     print(f"Wrote {settings_path}")
 
+    # 3. Provider endpoint -- needs a live model/base URL.
+    if not model_ref:
+        print("\nRoster + settings are in place at " + home + " -- open them / point Copilot's")
+        print("agents dropdown at them. The endpoint is NOT wired yet (no live model); re-run")
+        print("`omw sync --target copilot` when your DGX is reachable to set the model + provider URL.")
+        return 0
     sh, ps1 = copilot_env_files(base_url, served_id)
     sh_path = os.path.join(home, "otools-copilot.env")
     ps1_path = os.path.join(home, "otools-copilot.ps1")
