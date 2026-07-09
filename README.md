@@ -135,9 +135,11 @@ model against its config.
 ### GitHub Copilot target (experimental)
 
 `omw sync --target copilot` writes the same roster to the **GitHub Copilot CLI** instead of (or,
-with `--target all`, alongside) OpenCode. It writes to `~/.copilot/` (`%USERPROFILE%\.copilot` on
-Windows; `$COPILOT_HOME` overrides): the roster as `.agent.md` files under `agents/`, `settings.json`
-(model + `includeCoAuthoredBy: false`), and an `otools-copilot.env`/`.ps1` snippet.
+with `--target all`, alongside) OpenCode. It writes to Copilot's config home — the roster as
+`.agent.md` files under `agents/`, `settings.json` (model + `includeCoAuthoredBy: false`), and an
+`otools-copilot.env`/`.ps1` snippet. The home is **auto-detected**: `~/.copilot` on native
+Windows/macOS/Linux, and — when you run `omw` in **WSL** but Copilot is installed on Windows — the
+Windows-side `C:\Users\<you>\.copilot` (via `/mnt/c`). `$COPILOT_HOME` or `--copilot-home` overrides.
 
 Two things differ from OpenCode by Copilot's design: its CLI takes a **single custom endpoint**, so
 the whole roster runs on **one DGX model** (the endpoint is env-only — hence the snippet you `source`

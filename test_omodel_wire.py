@@ -2059,6 +2059,38 @@ class TestCopilotSync(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
 
+    def test_copilot_home_env_var_wins(self):
+        saved = os.environ.get("COPILOT_HOME")
+        try:
+            os.environ["COPILOT_HOME"] = os.path.join("x", "custom")
+            self.assertEqual(m.copilot_home(), os.path.join("x", "custom"))
+        finally:
+            os.environ.pop("COPILOT_HOME", None)
+            if saved is not None:
+                os.environ["COPILOT_HOME"] = saved
+
+    def test_wsl_redirects_to_windows_copilot_home(self):
+        # Under WSL with Copilot installed on the Windows side, resolve the Windows ~/.copilot.
+        saved = (m._is_wsl, os.path.isdir, os.environ.get("USERPROFILE"))
+        try:
+            m._is_wsl = lambda: True
+            os.environ["USERPROFILE"] = r"C:\Users\Otto"
+            os.path.isdir = lambda p: p == "/mnt/c/Users/Otto/.copilot"
+            self.assertEqual(m._wsl_windows_copilot_home(), "/mnt/c/Users/Otto/.copilot")
+            m._is_wsl = lambda: False   # not WSL -> no redirect
+            self.assertIsNone(m._wsl_windows_copilot_home())
+        finally:
+            m._is_wsl, os.path.isdir = saved[0], saved[1]
+            if saved[2] is None:
+                os.environ.pop("USERPROFILE", None)
+            else:
+                os.environ["USERPROFILE"] = saved[2]
+
+    def test_win_path_translation(self):
+        self.assertEqual(m._win_path("/mnt/c/Users/Otto/.copilot/x.ps1"),
+                         r"C:\Users\Otto\.copilot\x.ps1")
+        self.assertEqual(m._win_path("/home/otto/.copilot/x"), "/home/otto/.copilot/x")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

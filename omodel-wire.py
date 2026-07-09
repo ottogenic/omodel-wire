@@ -2542,9 +2542,58 @@ def cmd_verify(args):
 # Docs: docs.github.com/en/copilot/{how-tos/copilot-cli/customize-copilot/use-byok-models,
 #       reference/custom-agents-configuration, reference/copilot-cli-reference/cli-config-dir-reference}
 
+def _is_wsl():
+    """True when running under WSL (which looks like Linux but hosts Windows on /mnt/c)."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_windows_copilot_home():
+    """Under WSL, the Windows-side ~/.copilot (Copilot installed on Windows, not in WSL), or None.
+
+    Tries $USERPROFILE (if WSL interop exposes it), then /mnt/c/Users/<wsl-user>, then any single
+    real user under /mnt/c/Users that already has a `.copilot`."""
+    if not _is_wsl():
+        return None
+    cands = []
+    up = os.environ.get("USERPROFILE")            # e.g. C:\Users\Otto
+    if up and len(up) > 2 and up[1] == ":":
+        cands.append(f"/mnt/{up[0].lower()}{up[2:].replace(chr(92), '/')}/.copilot")
+    user = os.environ.get("USER")
+    if user:
+        cands.append(f"/mnt/c/Users/{user}/.copilot")
+    try:
+        for name in sorted(os.listdir("/mnt/c/Users")):
+            if name.lower() in ("public", "default", "default user", "all users", "defaultuser0"):
+                continue
+            cands.append(f"/mnt/c/Users/{name}/.copilot")
+    except OSError:
+        pass
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    return None
+
+
 def copilot_home():
-    """Copilot CLI config home: $COPILOT_HOME or ~/.copilot (cross-platform)."""
-    return os.environ.get("COPILOT_HOME") or os.path.expanduser(os.path.join("~", ".copilot"))
+    """Copilot CLI config home, auto-detected per platform.
+
+    Precedence: $COPILOT_HOME > a native ~/.copilot that already exists (Copilot is installed
+    right here -- correct on native Windows/macOS/Linux, where expanduser is already per-OS) >
+    a Windows-side ~/.copilot when running under WSL (Copilot installed on Windows) > native
+    ~/.copilot (created on first write)."""
+    env = os.environ.get("COPILOT_HOME")
+    if env:
+        return env
+    native = os.path.expanduser(os.path.join("~", ".copilot"))
+    if os.path.isdir(native):
+        return native
+    return _wsl_windows_copilot_home() or native
 
 
 def _copilot_home_for(args):
@@ -2724,12 +2773,24 @@ def copilot_env_files(base_url, served_id, api_key="dgx"):
     return sh, ps1
 
 
-def _copilot_print_env_instructions(sh_path, ps1_path):
+def _win_path(p):
+    """Translate a /mnt/<drive>/... WSL path to a Windows path (C:\\...) for display; else return p."""
+    mnt = re.match(r"^/mnt/([a-z])/(.*)$", p)
+    return f"{mnt.group(1).upper()}:\\{mnt.group(2).replace('/', chr(92))}" if mnt else p
+
+
+def _copilot_print_env_instructions(home, sh_path, ps1_path):
+    win = home.startswith("/mnt/")   # WSL wrote to the Windows-side Copilot home
     print("\nOne more step -- point Copilot at the DGX endpoint (it can't live in settings.json):")
-    print(f"  bash/zsh (Linux/macOS):  source {sh_path}")
-    print(f"  PowerShell (Windows):    . {ps1_path}")
-    print("  (add the source/dot-source line to your shell rc / $PROFILE to persist it,")
-    print("   then run `copilot` and pick an agent, e.g. `copilot --agent code`.)")
+    if win:
+        # Copilot runs on Windows; give the Windows path for its shell.
+        print(f"  PowerShell (Windows):    . {_win_path(ps1_path)}")
+        print(f"  (or from WSL if you run copilot there:  source {sh_path})")
+    else:
+        print(f"  bash/zsh (Linux/macOS):  source {sh_path}")
+        print(f"  PowerShell (Windows):    . {ps1_path}")
+    print("  Add that line to your shell rc / $PROFILE to persist it, then run")
+    print("  `copilot --agent code` (or `--agent team`).")
 
 
 def copilot_sync(args, sampling, detected_installed):
@@ -2783,7 +2844,7 @@ def copilot_sync(args, sampling, detected_installed):
     with open(ps1_path, "w", encoding="utf-8") as f:
         f.write(ps1)
     print(f"Wrote {sh_path} and {ps1_path}")
-    _copilot_print_env_instructions(sh_path, ps1_path)
+    _copilot_print_env_instructions(home, sh_path, ps1_path)
     return 0
 
 
