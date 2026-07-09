@@ -1993,5 +1993,72 @@ class TestOcBuildOpencodeProviders(unittest.TestCase):
         self.assertEqual(models, {})
 
 
+class TestCopilotSync(unittest.TestCase):
+    """The GitHub Copilot CLI target: .agent.md roster + settings.json + env snippet."""
+
+    def _sync(self, tmp, **over):
+        args = make_args(tmp, copilot_home=tmp, target="copilot", **over)
+        sampling = m.build_sampling(args)
+        with FakeProbes(), quiet():
+            rc = m.copilot_sync(args, sampling, {"copilot"})
+        self.assertEqual(rc, 0)
+        return args
+
+    def test_writes_full_roster_as_agent_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            adir = os.path.join(tmp, "agents")
+            for name in ("research", "code", "agent", "team",
+                         "agent-plan", "agent-code", "agent-instruct", "agent-review"):
+                self.assertTrue(os.path.exists(os.path.join(adir, f"{name}.agent.md")),
+                                f"{name}.agent.md missing")
+            body = open(os.path.join(adir, "code.agent.md"), encoding="utf-8").read()
+            self.assertTrue(body.startswith("---\nname: code\n"))
+            self.assertIn("description:", body)
+
+    def test_readonly_agent_restricts_tools_full_agent_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            adir = os.path.join(tmp, "agents")
+            research = open(os.path.join(adir, "research.agent.md"), encoding="utf-8").read()
+            self.assertIn('tools: ["read", "search", "fetch"]', research)
+            agent = open(os.path.join(adir, "agent.agent.md"), encoding="utf-8").read()
+            self.assertNotIn("tools:", agent.split("\n\n")[0])   # full -> all tools (omitted)
+
+    def test_agent_review_is_explicit_invoke_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            review = open(os.path.join(tmp, "agents", "agent-review.agent.md"), encoding="utf-8").read()
+            self.assertIn("disable-model-invocation: true", review)
+            self.assertNotIn("task_id", review.split("\n\n")[0])  # clean Copilot description
+
+    def test_settings_json_and_env_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertEqual(settings["model"], "Qwen3.6-27B-NVFP4")   # the FakeProbes model
+            self.assertIs(settings["includeCoAuthoredBy"], False)      # no Co-Authored-By
+            env = open(os.path.join(tmp, "otools-copilot.env"), encoding="utf-8").read()
+            self.assertIn("COPILOT_PROVIDER_BASE_URL=", env)
+            self.assertIn("192.0.2.101:8000/v1", env)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "otools-copilot.ps1")))
+
+    def test_settings_merge_preserves_user_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(tmp, exist_ok=True)
+            with open(os.path.join(tmp, "settings.json"), "w", encoding="utf-8") as f:
+                f.write('// managed\n{ "theme": "dark", "beep": true }\n')   # comment-tolerant
+            self._sync(tmp)
+            settings = json.load(open(os.path.join(tmp, "settings.json"), encoding="utf-8"))
+            self.assertEqual(settings["theme"], "dark")       # preserved
+            self.assertEqual(settings["model"], "Qwen3.6-27B-NVFP4")  # ours added
+
+    def test_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp, dry_run=True)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

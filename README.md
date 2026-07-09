@@ -132,6 +132,25 @@ enforced by the plugin. No match → generic `code`/`reason`. **Add a model by d
 NVIDIA-Nemotron-3-Super, GLM-4.7-Flash, and the Gemma-4 pair. `omw verify` checks a live
 model against its config.
 
+### GitHub Copilot target (experimental)
+
+`omw sync --target copilot` writes the same roster to the **GitHub Copilot CLI** instead of (or,
+with `--target all`, alongside) OpenCode. It writes to `~/.copilot/` (`%USERPROFILE%\.copilot` on
+Windows; `$COPILOT_HOME` overrides): the roster as `.agent.md` files under `agents/`, `settings.json`
+(model + `includeCoAuthoredBy: false`), and an `otools-copilot.env`/`.ps1` snippet.
+
+Two things differ from OpenCode by Copilot's design: its CLI takes a **single custom endpoint**, so
+the whole roster runs on **one DGX model** (the endpoint is env-only — hence the snippet you `source`
+before `copilot`); and delegation is runtime-global by description with **no subagent nesting**, so
+primaries become top-level agents, the workers become subagents, and `agent-review` is
+explicit-invoke-only. A multi-model **VS Code** target is a planned follow-up.
+
+```bash
+omw sync --target copilot            # write the Copilot roster + settings + env snippet
+source ~/.copilot/otools-copilot.env # point Copilot at your DGX endpoint (bash/zsh)
+copilot --agent code                 # run it
+```
+
 ---
 
 ## Commands
