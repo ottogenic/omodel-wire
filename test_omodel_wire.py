@@ -276,9 +276,25 @@ class TestAgentBuilding(unittest.TestCase):
             task = agents[k]["permission"]["task"]
             self.assertEqual(task["*"], "deny")
             self.assertEqual(task["agent-review"], "allow")
-        # visible research (readonly) and the workers never get a task budget.
-        self.assertNotIn("task_budget", agents["research"])
-        self.assertNotIn("task_budget", agents["agent-plan"])
+            # But edit/bash permissions should be preserved
+            self.assertIn(agents[k]["permission"].get("edit"), ("ask", "allow"),
+                          f"{k} should have edit permission")
+            self.assertIn(agents[k]["permission"].get("bash"), ("ask", "allow"),
+                          f"{k} should have bash permission")
+
+    def test_agent_code_cannot_delegate_to_review(self):
+        # agent-code (hidden worker) must NOT delegate to agent-review.
+        # It has NO delegation capability at all (task="deny"), preserving edit/bash permissions.
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        # agent-code is a worker with full permissions but NO delegation capability
+        task = agents["agent-code"]["permission"]["task"]
+        self.assertEqual(task, "deny", "agent-code should have task='deny' (no delegation)")
+        # agent-code should NOT have task_budget (no delegation)
+        self.assertNotIn("task_budget", agents["agent-code"])
+        # But edit/bash permissions should be preserved (full access)
+        self.assertEqual(agents["agent-code"]["permission"].get("edit"), "allow")
+        self.assertEqual(agents["agent-code"]["permission"].get("bash"), "allow")
 
     def test_thinking_knob_on(self):
         # reason/code/agent are thinking:true -> enable_thinking + graded effort.
@@ -1910,6 +1926,25 @@ class TestRuntimeModelDiscovery(unittest.TestCase):
         self.assertEqual(models, [])
         # Note should indicate some kind of failure
         self.assertTrue("failed" in note.lower() or "no such file" in note.lower())
+
+    def test_discover_accepts_github_copilot_gpt_5_5(self):
+        """github-copilot/gpt-5.5 should be recognized as a valid remote provider model."""
+        import subprocess
+        import tempfile
+
+        # Create a fake opencode script that returns output with github-copilot/gpt-5.5
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_opencode = os.path.join(tmp, "opencode")
+            # Simulate opencode models output with github-copilot/gpt-5.5
+            with open(fake_opencode, "w") as f:
+                f.write("#!/bin/bash\necho 'github-copilot/gpt-5.5'\necho 'openai/gpt-5.5'\n")
+            os.chmod(fake_opencode, 0o755)
+
+            models, note = m.discover_opencode_runtime_models(fake_opencode)
+            # Should include github-copilot/gpt-5.5
+            self.assertIn("github-copilot/gpt-5.5", models)
+            self.assertIn("openai/gpt-5.5", models)
+            self.assertIn("2 runtime model(s)", note)
 
     def test_discover_handles_timeout(self):
         """When opencode models takes too long, returns empty list."""

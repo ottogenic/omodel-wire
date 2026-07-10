@@ -44,6 +44,13 @@ All notable changes to this project are documented here. The format follows
 - **`disabled_providers` uses OpenCode's native schema.** The tool now uses the documented
   `disabled_providers` array rather than model-level `blacklist`, which is the proper way to
   hide providers at the provider level.
+- **`code` and `agent` retain delegation to `agent-review`.** They have `task_budget = 1` and
+  `permission.task: {"*": "deny", "agent-review": "allow"}` so they can hand PR reviews to
+  `agent-review` without opening up general delegation. `agent-code` (hidden worker) has
+  `permission.task: "deny"` (no delegation at all) to prevent it from delegating to `agent-review`
+  or any other agent, preserving edit/bash permissions (`allow`). The `team` orchestrator
+  retains full delegation capability to all workers (`agent-plan`, `agent-code`,
+  `agent-instruct`, `agent-review`).
 
 ### Added
 - **`--add-default-providers` flag.** Enable built-in OpenCode and Hugging Face providers when

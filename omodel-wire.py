@@ -265,7 +265,8 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 # real remote ref (openai/gpt-5.5) apart from a DGX served-model-id that merely contains a
 # slash (e.g. unsloth/qwen3-coder-next-fp8 -- an HF org/model id, NOT a provider ref).
 REMOTE_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "azure",
-                    "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex"}
+                    "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex",
+                    "github-copilot"}
 # vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
 # token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
 # Three knobs (vLLM's own defaults in parens):
@@ -1162,13 +1163,16 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
                 agent["prompt"] = "{file:./prompts/otools-review.md}"
             else:
                 agent["prompt"] = "{file:./prompts/otools-worker.md}"
+        # Special case for agent-code: deny ALL delegation (including to agent-review)
+        if key == "agent-code":
+            agent["permission"]["task"] = "deny"
         # Reliable sampling lives in the agent config too (correct even without the
         # plugin); the plugin additionally enforces top_k/min_p/penalties/maxOutput.
         if "temperature" in s: agent["temperature"] = s["temperature"]
         if "top_p" in s: agent["top_p"] = s["top_p"]
         if not preset.get("thinking") and not caps["can_disable"] and not recipe.get("soft_switch"):
             agent["description"] += "  [WARN: endpoint can't disable thinking]"
-        # code and agent need task_budget to delegate (only to agent-review)
+        # Visible code/agent get task_budget to delegate (only to agent-review)
         if key in ("code", "agent"):
             agent["task_budget"] = 1
         agents[key] = agent

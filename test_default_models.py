@@ -425,6 +425,62 @@ class TestApplyDefaultModels(unittest.TestCase):
         self.assertEqual(result["agent-review"]["model"], "openai/gpt-5.5")
         self.assertIn("Pref skipped (not available): anthropic/claude-opus-4-8", model_notes)
 
+    def test_github_copilot_gpt_5_5_in_pool_accepted(self):
+        """Regression test: github-copilot/gpt-5.5 should be accepted when in available_models pool."""
+        agents = {
+            "team": {"model": "dgx-n1-8000/qwen3", "mode": "primary"}
+        }
+        default_models = {
+            "agents": {"team": ["github-copilot/gpt-5.5", "openai/gpt-5.5", "qwen3-coder-next-fp8"]}
+        }
+        reasoning_caps = {}
+
+        # github-copilot/gpt-5.5 IS in pool -> accepted as first preference
+        available_models = {
+            "github-copilot/gpt-5.5": {},
+            "openai/gpt-5.5": {},
+            "dgx-n1-8000/qwen3-coder-next-fp8": {}
+        }
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["team"]["model"], "github-copilot/gpt-5.5")
+
+    def test_github_copilot_gpt_5_5_skipped_when_not_in_pool(self):
+        """Regression test: github-copilot/gpt-5.5 should be skipped when not in pool."""
+        agents = {
+            "team": {"model": "dgx-n1-8000/qwen3", "mode": "primary"}
+        }
+        default_models = {
+            "agents": {"team": ["github-copilot/gpt-5.5", "openai/gpt-5.5", "qwen3-coder-next-fp8"]}
+        }
+        reasoning_caps = {}
+
+        # github-copilot/gpt-5.5 is NOT in pool -> skipped, falls back to first available
+        available_models = {
+            "openai/gpt-5.5": {},
+            "dgx-n1-8000/qwen3-coder-next-fp8": {}
+        }
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
+
+    def test_github_copilot_claude_opus_4_8_in_pool_accepted(self):
+        """Regression test: github-copilot/claude-opus-4.8 should be accepted when in available_models pool."""
+        agents = {
+            "agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}
+        }
+        default_models = {
+            "subagents": {"agent-review": ["github-copilot/claude-opus-4.8", "openai/gpt-5.5", "google/gemini-3.5-flash"]}
+        }
+        reasoning_caps = {}
+
+        # github-copilot/claude-opus-4.8 IS in pool -> accepted as first preference
+        available_models = {
+            "github-copilot/claude-opus-4.8": {},
+            "openai/gpt-5.5": {},
+            "google/gemini-3.5-flash": {}
+        }
+        result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
+        self.assertEqual(result["agent-review"]["model"], "github-copilot/claude-opus-4.8")
+
 
 if __name__ == "__main__":
     unittest.main()
