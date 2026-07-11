@@ -110,7 +110,7 @@ the network probes, so it runs offline and writes only to a temp dir. It asserts
 integrity, config loading (`test_configs.py`), recipe matching, agent/plugin
 construction, provider capability flags, the plugin directory (`plugins/`, plural, per
 docs) + stale-`plugin/` cleanup, and a full `oc_sync` round-trip (roster written,
-build/plan disabled, `default_agent` set, frontier team model preserved across re-syncs).
+build/plan disabled, `default_agent` set, team model uses resolved preference or preserves frontier only when no preference resolves).
 
 Prefer `--dry-run` over touching a real `opencode.json` while iterating. Do not write to
 `$HOME` dotfiles from tests — `install_aliases()` / shell-env writers append to the real
