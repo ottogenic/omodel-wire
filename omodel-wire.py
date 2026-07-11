@@ -2044,19 +2044,27 @@ def oc_sync(args, sampling, detected_installed):
         if not args.keep_builtins and args.default_agent in cfg["agent"]:
             cfg["default_agent"] = args.default_agent
 
-        # ---- Team model (frontier planner). Flag wins; else PRESERVE whatever
-        # frontier model was already set (so we never wipe your anthropic choice).
+        # ---- Team model (frontier planner). Precedence:
+        #   1) explicit --team-model / configured team_model (args.team_model)
+        #   2) a resolved default_models.json preference for "team"
+        #   3) preserve the previous team model when it is a non-DGX frontier
+        #      AND no preference resolved (so we never wipe your anthropic choice).
         # Workers keep their own pinned local models, so they stay on the DGX. ----
-        # Check if team preference resolved to a valid model - if so, use that instead of preserving
+        team_pref_resolved = False
+        for pref in ((default_models.get("agents") or {}).get("team", [])):
+            if _resolve_model_ref_from_prefs(pref, all_available_models) is not None:
+                team_pref_resolved = True
+                break
+
         team_agent_model = agents.get("team", {}).get("model") if agents else None
         team_model = args.team_model
         if not team_model:
-            # No flag passed - check if preference resolved to a valid model
-            if team_agent_model and team_agent_model != agent_model_ref:
-                # Preference resolved to a different model - use it
+            if team_pref_resolved and team_agent_model:
+                # default_models.json preference resolved - use it even if it differs
+                # from the previous config's team model
                 team_model = team_agent_model
             elif prev_team_model and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX):
-                # No preference or preference is same as current - preserve existing
+                # No preference resolved - preserve existing frontier choice
                 team_model = prev_team_model
                 print(f"  team model preserved from existing config: {team_model}")
         if team_model and "team" in agents:

@@ -24,6 +24,13 @@ All notable changes to this project are documented here. The format follows
   the roster) for Claude to walk a new user through, with copy-paste commands at each step.
 
 ### Fixed
+- **Team model now honors `default_models.json` when no reasoning models are live.** Previously,
+  if the previous team model was a non-DGX frontier (e.g., `openai/gpt-5.5`) and the resolved
+  preference in `default_models.json` pointed elsewhere (e.g., `github-copilot/gpt-5.5`), sync
+  would preserve the stale existing model because the "preference resolved" check only fired when
+  the resolved model differed from the already-resolved preference. Sync now explicitly checks
+  whether any team preference resolves and uses it; preservation only applies when no preference
+  resolves.
 - **`omw agents <name> --set-model` now round-trips with the names `omw models` shows.** The
   models list printed the bare served id (e.g. `unsloth/qwen3-coder-next-fp8`), but passing that
   to `--set-model` split it into a non-existent `unsloth` provider (broken config), and a bare
