@@ -1,13 +1,14 @@
 {
   "agents": {
     "team": [
+      "github-copilot/gpt-5.5",
       "openai/gpt-5.5",
+      "google/gemini-3.5-flash",
       "unsloth/qwen3-coder-next-fp8",
       "qwen3-coder-next-fp8",
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
-      "qwen3.6-35b-a3b-nvfp4",
-      "google/gemini-3.5-flash"
+      "qwen3.6-35b-a3b-nvfp4"
     ],
     "research": [
       "unsloth/qwen3-coder-next-fp8",
@@ -15,6 +16,7 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ],
@@ -24,6 +26,7 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ],
@@ -33,6 +36,7 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ]
@@ -44,6 +48,7 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ],
@@ -53,6 +58,7 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ],
@@ -62,11 +68,12 @@
       "qwen3-coder-next-nvfp4",
       "qwen3.6-35b-a3b-fp8",
       "qwen3.6-35b-a3b-nvfp4",
+      "github-copilot/claude-haiku-4.5",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ],
     "agent-review": [
-      "anthropic/claude-opus-4-8",
+      "github-copilot/claude-opus-4.8",
       "openai/gpt-5.5",
       "google/gemini-3.5-flash"
     ]

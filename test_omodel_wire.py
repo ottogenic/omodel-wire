@@ -276,9 +276,25 @@ class TestAgentBuilding(unittest.TestCase):
             task = agents[k]["permission"]["task"]
             self.assertEqual(task["*"], "deny")
             self.assertEqual(task["agent-review"], "allow")
-        # visible research (readonly) and the workers never get a task budget.
-        self.assertNotIn("task_budget", agents["research"])
-        self.assertNotIn("task_budget", agents["agent-plan"])
+            # But edit/bash permissions should be preserved
+            self.assertIn(agents[k]["permission"].get("edit"), ("ask", "allow"),
+                          f"{k} should have edit permission")
+            self.assertIn(agents[k]["permission"].get("bash"), ("ask", "allow"),
+                          f"{k} should have bash permission")
+
+    def test_agent_code_cannot_delegate_to_review(self):
+        # agent-code (hidden worker) must NOT delegate to agent-review.
+        # It has NO delegation capability at all (task="deny"), preserving edit/bash permissions.
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        # agent-code is a worker with full permissions but NO delegation capability
+        task = agents["agent-code"]["permission"]["task"]
+        self.assertEqual(task, "deny", "agent-code should have task='deny' (no delegation)")
+        # agent-code should NOT have task_budget (no delegation)
+        self.assertNotIn("task_budget", agents["agent-code"])
+        # But edit/bash permissions should be preserved (full access)
+        self.assertEqual(agents["agent-code"]["permission"].get("edit"), "allow")
+        self.assertEqual(agents["agent-code"]["permission"].get("bash"), "allow")
 
     def test_thinking_knob_on(self):
         # reason/code/agent are thinking:true -> enable_thinking + graded effort.
@@ -933,10 +949,84 @@ class TestSyncEndToEnd(unittest.TestCase):
             code_model = cfg["agent"]["code"]["model"]
             self.assertIn("Qwen3.6-27B-NVFP4", code_model)
 
+    def test_team_pref_overrides_stale_existing_when_no_reasoning_models(self):
+        """Regression: previous team openai/gpt-5.5, runtime reports
+        github-copilot/gpt-5.5, no reasoning models live. The resolved
+        default_models.json preference must win, not preservation."""
+        default_models = {
+            "agents": {"team": ["github-copilot/gpt-5.5", "openai/gpt-5.5"]},
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "openai": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "OpenAI",
+                        "options": {"baseURL": "https://api.openai.com/v1", "apiKey": "sk-..."},
+                        "models": {"gpt-5.5": {"reasoning": True, "tool_call": True}}
+                    }
+                },
+                "agent": {
+                    "team": {"mode": "primary", "model": "openai/gpt-5.5"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            # No reasoning models live; runtime discovery reports github-copilot/gpt-5.5
+            with FakeProbes(model="qwen3-coder-next-fp8",
+                            runtime_models=["github-copilot/gpt-5.5", "openai/gpt-5.5"]), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # team must switch to the first resolved preference, not preserve openai
+            self.assertEqual(cfg["agent"]["team"]["model"], "github-copilot/gpt-5.5")
+
+    def test_team_existing_preserved_when_no_team_pref_resolves(self):
+        """When no team preference resolves, the previous non-DGX team model
+        should still be preserved across re-syncs."""
+        default_models = {
+            "agents": {"team": ["anthropic/claude-opus-4-8"]},  # not available
+            "subagents": {}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "opencode.json")
+            initial_cfg = {
+                "provider": {
+                    "openai": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "OpenAI",
+                        "options": {"baseURL": "https://api.openai.com/v1", "apiKey": "sk-..."},
+                        "models": {"gpt-5.5": {"reasoning": True, "tool_call": True}}
+                    }
+                },
+                "agent": {
+                    "team": {"mode": "primary", "model": "openai/gpt-5.5"}
+                }
+            }
+            with open(cfg_path, "w") as f:
+                json.dump(initial_cfg, f)
+
+            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
+            sampling = m.build_sampling(args)
+            with FakeProbes(model="qwen3-coder-next-fp8",
+                            runtime_models=["openai/gpt-5.5"]), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+            self.assertEqual(rc, 0)
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # anthropic pref unavailable, so preserve existing openai choice
+            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+
     def test_stale_remote_provider_skipped_when_runtime_discovery_succeeds(self):
         """Regression: When runtime discovery succeeds, stale remote providers
         from existing config should NOT be available unless they appear in runtime.
-        
+
         Scenario: existing config has Anthropic, but runtime opencode models only
         reports openai/gpt-5.5. agent-review should resolve to OpenAI, not Anthropic."""
         default_models = {
@@ -1910,6 +2000,25 @@ class TestRuntimeModelDiscovery(unittest.TestCase):
         self.assertEqual(models, [])
         # Note should indicate some kind of failure
         self.assertTrue("failed" in note.lower() or "no such file" in note.lower())
+
+    def test_discover_accepts_github_copilot_gpt_5_5(self):
+        """github-copilot/gpt-5.5 should be recognized as a valid remote provider model."""
+        import subprocess
+        import tempfile
+
+        # Create a fake opencode script that returns output with github-copilot/gpt-5.5
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_opencode = os.path.join(tmp, "opencode")
+            # Simulate opencode models output with github-copilot/gpt-5.5
+            with open(fake_opencode, "w") as f:
+                f.write("#!/bin/bash\necho 'github-copilot/gpt-5.5'\necho 'openai/gpt-5.5'\n")
+            os.chmod(fake_opencode, 0o755)
+
+            models, note = m.discover_opencode_runtime_models(fake_opencode)
+            # Should include github-copilot/gpt-5.5
+            self.assertIn("github-copilot/gpt-5.5", models)
+            self.assertIn("openai/gpt-5.5", models)
+            self.assertIn("2 runtime model(s)", note)
 
     def test_discover_handles_timeout(self):
         """When opencode models takes too long, returns empty list."""

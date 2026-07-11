@@ -265,7 +265,8 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 # real remote ref (openai/gpt-5.5) apart from a DGX served-model-id that merely contains a
 # slash (e.g. unsloth/qwen3-coder-next-fp8 -- an HF org/model id, NOT a provider ref).
 REMOTE_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "azure",
-                    "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex"}
+                    "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex",
+                    "github-copilot"}
 # vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
 # token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
 # Three knobs (vLLM's own defaults in parens):
@@ -1162,13 +1163,16 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
                 agent["prompt"] = "{file:./prompts/otools-review.md}"
             else:
                 agent["prompt"] = "{file:./prompts/otools-worker.md}"
+        # Special case for agent-code: deny ALL delegation (including to agent-review)
+        if key == "agent-code":
+            agent["permission"]["task"] = "deny"
         # Reliable sampling lives in the agent config too (correct even without the
         # plugin); the plugin additionally enforces top_k/min_p/penalties/maxOutput.
         if "temperature" in s: agent["temperature"] = s["temperature"]
         if "top_p" in s: agent["top_p"] = s["top_p"]
         if not preset.get("thinking") and not caps["can_disable"] and not recipe.get("soft_switch"):
             agent["description"] += "  [WARN: endpoint can't disable thinking]"
-        # code and agent need task_budget to delegate (only to agent-review)
+        # Visible code/agent get task_budget to delegate (only to agent-review)
         if key in ("code", "agent"):
             agent["task_budget"] = 1
         agents[key] = agent
@@ -2040,19 +2044,27 @@ def oc_sync(args, sampling, detected_installed):
         if not args.keep_builtins and args.default_agent in cfg["agent"]:
             cfg["default_agent"] = args.default_agent
 
-        # ---- Team model (frontier planner). Flag wins; else PRESERVE whatever
-        # frontier model was already set (so we never wipe your anthropic choice).
+        # ---- Team model (frontier planner). Precedence:
+        #   1) explicit --team-model / configured team_model (args.team_model)
+        #   2) a resolved default_models.json preference for "team"
+        #   3) preserve the previous team model when it is a non-DGX frontier
+        #      AND no preference resolved (so we never wipe your anthropic choice).
         # Workers keep their own pinned local models, so they stay on the DGX. ----
-        # Check if team preference resolved to a valid model - if so, use that instead of preserving
+        team_pref_resolved = False
+        for pref in ((default_models.get("agents") or {}).get("team", [])):
+            if _resolve_model_ref_from_prefs(pref, all_available_models) is not None:
+                team_pref_resolved = True
+                break
+
         team_agent_model = agents.get("team", {}).get("model") if agents else None
         team_model = args.team_model
         if not team_model:
-            # No flag passed - check if preference resolved to a valid model
-            if team_agent_model and team_agent_model != agent_model_ref:
-                # Preference resolved to a different model - use it
+            if team_pref_resolved and team_agent_model:
+                # default_models.json preference resolved - use it even if it differs
+                # from the previous config's team model
                 team_model = team_agent_model
             elif prev_team_model and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX):
-                # No preference or preference is same as current - preserve existing
+                # No preference resolved - preserve existing frontier choice
                 team_model = prev_team_model
                 print(f"  team model preserved from existing config: {team_model}")
         if team_model and "team" in agents:
