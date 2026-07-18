@@ -680,6 +680,14 @@ def _team_skill_path(cfg_path):
     return os.path.join(os.path.dirname(cfg_path), "skills", "team-orchestration", "SKILL.md")
 
 
+def _pr_review_skill_path(cfg_path):
+    return os.path.join(os.path.dirname(cfg_path), "skills", "pr-review", "SKILL.md")
+
+
+def _agent_runbook_skill_path(cfg_path):
+    return os.path.join(os.path.dirname(cfg_path), "skills", "agent-runbook-review", "SKILL.md")
+
+
 def team_prompt_text(task_budget=None):
     """The team system prompt, with a soft note about the delegation budget so the
     model knows how many subtasks it can run (OpenCode's task_budget enforces it)."""
@@ -712,12 +720,202 @@ When the work is finished, send a final plain-text message that summarizes what 
 
 # Review prompt for agent-review. Written next to opencode.json; edit there to tune.
 # This agent handles reviewing Pull Requests and provides feedback to the parent agent.
+# Two-tier skill load: the PROJECT skill (`pr-review-project`, if the repo ships one) holds
+# repo-specific checks/invariants; the GLOBAL `pr-review` skill (written by `omw sync` to
+# <config-dir>/skills, so it's always present) is the fallback for a fresh repo.
 REVIEW_PROMPT = """You are agent-review -- the pull-request reviewer for whatever repository you're working in.
 
-Load the `pr-review` skill and follow it end-to-end. In short: review the open PR against the repo's REVIEW.md, then hand the parent agent an itemized list of issues, each with a suggested fix. You do NOT fix issues yourself, and you do NOT merge while any remain -- the parent's coding agents apply the fixes and delegate back to you (reuse the task_id) to re-review. Merge ONLY when the review is clean, and only as the REVIEWER account (`GH_TOKEN="$GH_TOKEN_REVIEWER" gh ...`, per the skill).
+First try to load the `pr-review-project` skill -- this repo's own review bar (its specific checks, invariants, and what to look for). If that skill does not exist, say exactly "No project specific PR skill found, using global default" and load the global `pr-review` skill instead. Follow whichever skill you loaded end-to-end.
+
+In short: review the open PR against the repo's bar, then hand the parent agent an itemized list of issues, each with a suggested fix. You do NOT fix issues yourself, and you do NOT merge while any remain -- the parent's coding agents apply the fixes and delegate back to you (reuse the task_id) to re-review. Merge ONLY when the review is clean, and only as the REVIEWER account (`GH_TOKEN="$GH_TOKEN_REVIEWER" gh ...`, per the skill).
 
 Your final message is the review report the parent agent acts on.
 """
+
+# Generic `pr-review` skill -- the repo-agnostic review METHOD for the otools agent roster.
+# Written GLOBALLY by sync to <opencode-config>/skills/pr-review/SKILL.md (auto-scanned), so a
+# FRESH repo with no `pr-review-project` skill still gets a working reviewer. A repo that needs
+# specific checks/invariants ships its own `pr-review-project` skill (see the authoring section
+# below), which agent-review prefers. Thin prompt + this skill = the same pattern as
+# team-orchestration.
+PR_REVIEW_SKILL = """---
+name: pr-review
+description: Generic method for reviewing a pull request with the otools agent roster, used when a repo has no `pr-review-project` skill of its own. Review the open PR, return an itemized list of issues + suggested fixes to the parent agent, and merge (as the reviewer) only when the review is clean.
+---
+
+# Review a pull request (generic default)
+
+You are the reviewer for THIS repository. The rule is simple: **review first, hand the findings
+back to the parent agent, and merge only when there is nothing left to fix.** You do **not** fix
+issues yourself -- the parent (coding) agents do that and then ask you to re-review.
+
+This is the GLOBAL default method. If the repo ships a `pr-review-project` skill, that one wins
+(it carries the repo's specific checks and invariants); use this only when it doesn't.
+
+## 1. Find the repo's bar
+Look for a repo review bar and adopt it as your standard: a `REVIEW.md` (preferred), else
+`CONTRIBUTING.md` / `README.md` / CI config (`.github/workflows`). It tells you the required
+checks (build/lint/test commands) and the invariants a diff must not break. If none exists, fall
+back to: the change must build, its tests must pass, and it must do only what the PR claims.
+
+## 2. Review the PR (comprehensively -- green tests are necessary, not sufficient)
+- `gh pr view <n>` and `gh pr diff <n>` -- what it *claims* vs. what it *changes*.
+- Get the PR's code and run the repo's checks. Use `gh pr checkout <n>` when the clone has a
+  GitHub remote; if it doesn't (a worktree/clone made from a local path) fetch the ref directly
+  with `git fetch origin pull/<n>/head && git switch --detach FETCH_HEAD`, or if you're already
+  on the PR branch with a clean tree, just run the checks in place.
+- Read the diff yourself, looking for:
+  - **correctness bugs / logic errors** -- trace the changed paths and their callers;
+  - **code quality** -- clarity, matches the surrounding style, no dead code or debug leftovers;
+  - **invariant violations** -- every rule the repo's bar names;
+  - **scope creep** -- unrelated changes or churn beyond the stated intent;
+  - **stale-branch regressions** -- does the diff *revert* something already on the base branch?
+    (a branch cut before a recent merge, committed whole-file, silently undoes it -- rebase and
+    re-check);
+  - **secrets / leaked private info** -- tokens, keys, internal IPs, hostnames, real emails;
+  - **missing tests or changelog entry** (if the repo keeps one).
+
+## 3. Report to the parent agent -- ALWAYS
+Your final message is a review report the parent agent acts on. Return an **itemized** list; for
+each issue give:
+
+> **`file:line` - severity - what's wrong - a concrete suggested fix.**
+
+Do not fix the issues and do not merge while any remain -- the parent's coding agents apply the
+fixes, then delegate back to you (reuse the task_id) to re-review. If the review is clean, say so
+plainly: **"No issues found."**
+
+## 4. Merge -- only when the review is clean
+If (and only if) there are no issues, merge **as the reviewer account** so the approval is
+genuine two-party review (GitHub lets a different account approve the coder's PR):
+
+    GH_TOKEN="$GH_TOKEN_REVIEWER" gh pr review <n> --approve
+    GH_TOKEN="$GH_TOKEN_REVIEWER" gh pr merge  <n> --squash --delete-branch
+
+Conventional-Commit squash title, **no `Co-Authored-By` trailer**. If `$GH_TOKEN_REVIEWER` is
+unset, do **not** self-approve (GitHub blocks it) -- post the summary with `gh pr comment` and
+tell the user to set the reviewer token.
+
+Never push to the base branch directly. Never merge anything touching `LICENSE`, version tags, or
+`.github/` CI without explicit user approval.
+
+## Authoring a `pr-review-project` skill for this repo
+When the user asks to set up project-specific review for a repo, create
+`.agents/skills/pr-review-project/SKILL.md` (YAML frontmatter `name: pr-review-project`) holding
+the repo's *specifics* only -- its exact checks, its invariants (point at REVIEW.md if present),
+and repo-specific gotchas -- while this generic method stays here. Once it exists, agent-review
+loads it first and this global skill is the fallback. For the full "what files a repo should have
+and when to update them" workflow, see the `agent-runbook-review` skill.
+"""
+
+# `agent-runbook-review` skill -- a user-kicked maintenance pass ("perform an agent runbook
+# review"). Written GLOBALLY by sync (like team-orchestration / pr-review) so it's available in
+# every repo. It compacts the agent-facing docs, mines the CURRENT OpenCode session (incl.
+# subagents, via the SQLite store) for recurring failures, proposes note additions, audits skill
+# sizes, and authors first drafts of missing key files -- REPORT-FIRST, never a silent rewrite.
+AGENT_RUNBOOK_REVIEW_SKILL = r"""---
+name: agent-runbook-review
+description: Periodic maintenance pass for a repo's agent-facing files (AGENTS.md, REVIEW.md, the .agents/skills/*, CHANGELOG, CONTRIBUTING). Use when the user says "perform an agent runbook review" (or asks to review/compact/tidy the agent runbook, instructions, or skills). Compacts and de-duplicates the docs, mines the current session for recurring errors and drafts fixes into the right file, audits skill sizes, recommends whether a new project skill is needed, and authors first drafts of missing key files -- as a REPORT with proposed diffs, not a silent rewrite.
+---
+
+# Agent runbook review
+
+A maintenance pass over the files that steer the agent roster in THIS repo. You do NOT silently
+rewrite them -- you produce a **Runbook Review Report** with proposed changes, apply only the
+low-risk docs-only ones, and gate edits to the invariant files (AGENTS.md, REVIEW.md) behind the
+user's OK or a PR. These files govern the agents doing the editing, so treat every change as
+load-bearing until proven otherwise.
+
+## Guardrails (always)
+- **Report-first.** Lead with the report (below). Apply docs-only, non-normative tidy-ups
+  directly; for anything that changes a rule/invariant, show the diff and wait for approval.
+- **Preserve every normative statement.** You may reorder, de-duplicate, and tighten prose, but
+  never drop or weaken a MUST/NEVER/invariant. You may NOT add or strengthen rules during a
+  compaction -- consolidation only.
+- **Docs-only diffs.** A runbook review never rides along with code changes; keep it to `*.md`
+  and `.agents/skills/**`. If it warrants a PR, it's a docs-only PR.
+- **Respect fences.** Never touch content between `<!-- do-not-compact -->` and
+  `<!-- /do-not-compact -->`.
+- **One rule, one home.** De-duplicate by pointer, not by copy: state a rule once in its
+  canonical file and reference it elsewhere by name.
+
+## Phase A -- Inventory & size
+List the agent-facing files and skills and judge their weight. Run `omw skills` for the skill
+table (name, scope, instruction count, size verdict). The size metric = number of normative
+lines (bullets/numbered steps + lines with MUST/NEVER/ALWAYS/DO NOT), excluding frontmatter and
+fenced code. Thresholds: **<=40 lean, 41-80 moderate, >80 LARGE (consider splitting)**. Flag any
+LARGE skill, e.g. "pr-review-project: 104 instructions -- LARGE, consider extracting the merge
+section into its own skill."
+
+Key files a roster-ready repo should have (author first drafts in Phase E if missing):
+- **AGENTS.md** -- the agent operating manual: invariants, working agreement, and a skill index.
+- **REVIEW.md** -- the review *bar* (checks + invariants). The review *process* lives in the
+  pr-review / pr-review-project skill, not here.
+- **CHANGELOG.md**, **CONTRIBUTING.md**, **README.md** -- conventional roles.
+- **.agents/skills/pr-review-project/** -- this repo's review specifics (optional but recommended).
+
+## Phase B -- Hygiene & compaction (docs-only)
+For AGENTS.md and each skill: find duplicated guidance, out-of-order sections, and bloat.
+Consolidate to one home + pointers, put sections in a sensible order, and tighten wording without
+losing meaning. Keep the change mechanical and reviewable.
+
+## Phase C -- Mine the CURRENT session for recurring failures
+OpenCode records every session -- INCLUDING subagent sessions -- in a SQLite store. Use it to find
+"we keep failing on X" and turn each into a concrete note in the right file. Open it READ-ONLY so
+you never disturb a live session:
+
+    DB="file:$HOME/.local/share/opencode/opencode.db?mode=ro"
+
+1. **Find the session to review** -- normally the most recently active top-level session in this
+   directory (the one you're in). `parent_id IS NULL` means top-level (not a subagent):
+
+       sqlite3 "$DB" "SELECT id, agent, title FROM session WHERE parent_id IS NULL AND directory='$(pwd)' ORDER BY time_updated DESC LIMIT 5;"
+
+   Pick the row the user means (usually the top one); call it SID.
+
+2. **List its subagent sessions** -- workers like agent-review / agent-code are child rows:
+
+       sqlite3 "$DB" "SELECT id, agent, title FROM session WHERE parent_id='SID' ORDER BY time_created;"
+
+3. **Pull tool ERRORS across the session + its subagents** -- your primary recurring-failure signal
+   (a failed command shows up as a tool part with state.status='error'):
+
+       sqlite3 "$DB" "SELECT s.agent, json_extract(p.data,'\$.tool') tool, json_extract(p.data,'\$.state.input') input, json_extract(p.data,'\$.state.error') error FROM part p JOIN session s ON s.id=p.session_id WHERE (s.id='SID' OR s.parent_id='SID') AND json_extract(p.data,'\$.type')='tool' AND json_extract(p.data,'\$.state.status')='error';"
+
+4. **Read the ordered transcript** (text + reasoning + tool titles) across agent + subagents when
+   you need context around an error:
+
+       sqlite3 "$DB" "SELECT s.agent, json_extract(m.data,'\$.role') role, json_extract(p.data,'\$.type') type, coalesce(json_extract(p.data,'\$.text'), json_extract(p.data,'\$.state.title')) content FROM part p JOIN message m ON m.id=p.message_id JOIN session s ON s.id=p.session_id WHERE (s.id='SID' OR s.parent_id='SID') ORDER BY p.time_created, p.id;"
+
+Notes: the store is WAL-mode, so the in-flight session may lag by a message or two (fine); if
+`sqlite3` isn't on PATH, Python's stdlib `sqlite3` module reads it the same way; you only need the
+CURRENT session -- don't trawl the whole DB.
+
+For each recurring failure, propose a **specific note** in the file that would have prevented it --
+e.g. a repeated `gh pr merge` worktree error -> a line in `pr-review-project`; a common code bug ->
+a line in AGENTS.md or the relevant skill. Quote the target file and the exact text to add.
+
+## Phase D -- New project skill?
+From the session, judge whether a recurring workflow deserves its own `.agents/skills/<name>-project`
+skill. Recommend yes/no with one line of justification; if yes, include draft frontmatter
+(`name`, `description`) and a skeleton.
+
+## Phase E -- Author missing key files
+For any key file from Phase A that's absent, draft a first iteration tailored to this repo (infer
+checks from README/CI, invariants from the code). Present drafts in the report; write the docs-only
+ones, and gate AGENTS.md / REVIEW.md behind approval.
+
+## The report (your final message)
+Deliver a structured report:
+- **Inventory & size** -- files present/missing; skill size table with verdicts.
+- **Hygiene** -- duplicates/order/bloat found; what you compacted.
+- **Session findings** -- recurring failures (with the evidence source) -> proposed notes (file + exact text).
+- **New-skill recommendation** -- yes/no + draft if yes.
+- **Missing files** -- first drafts authored.
+- **Change ledger** -- exactly which instructions you changed/moved/cut and why (old -> new), so a
+  reviewer can confirm nothing normative was lost.
+"""
+
 
 # The blue test image + the word we expect a real vision model to say back.
 # A text-only server typically 200s and ignores the image -> answer won't say "blue".
@@ -2158,14 +2356,24 @@ def oc_sync(args, sampling, detected_installed):
         # The team's methodology lives in a GLOBAL skill (auto-scanned from
         # <config-dir>/skills); the thin team prompt tells it to load this.
         team_skill_path = _team_skill_path(config_path)
+    # The runbook-review skill is a user-kicked maintenance pass; write it globally
+    # whenever we build a roster so "perform an agent runbook review" works in any repo.
+    runbook_skill_path = None
+    if args.profiles and agents:
+        runbook_skill_path = _agent_runbook_skill_path(config_path)
     worker_prompt_path = None
     if args.profiles and any(k in agents for k in TEAM_TARGETS):
         worker_prompt_path = os.path.join(os.path.dirname(config_path),
                                           "prompts", "otools-worker.md")
     review_prompt_path = None
+    pr_review_skill_path = None
     if args.profiles and "agent-review" in agents:
         review_prompt_path = os.path.join(os.path.dirname(config_path),
                                           "prompts", "otools-review.md")
+        # The generic review METHOD lives in a GLOBAL skill (auto-scanned from
+        # <config-dir>/skills); agent-review loads a repo's own `pr-review-project`
+        # first and falls back to this when the repo doesn't ship one.
+        pr_review_skill_path = _pr_review_skill_path(config_path)
 
     # ---- Web search / tool exposure -----------------------------------------
     web_notes = oc_apply_web_search(cfg, args)
@@ -2238,6 +2446,12 @@ def oc_sync(args, sampling, detected_installed):
         if team_skill_path:
             print(f"\n--- DRY RUN: would write {team_skill_path} ---")
             print(TEAM_ORCHESTRATION_SKILL)
+        if pr_review_skill_path:
+            print(f"\n--- DRY RUN: would write {pr_review_skill_path} ---")
+            print(PR_REVIEW_SKILL)
+        if runbook_skill_path:
+            print(f"\n--- DRY RUN: would write {runbook_skill_path} ---")
+            print(AGENT_RUNBOOK_REVIEW_SKILL)
         return 0
 
     # Write config (+ one-shot backup)
@@ -2303,6 +2517,18 @@ def oc_sync(args, sampling, detected_installed):
         with open(team_skill_path, "w") as f:
             f.write(TEAM_ORCHESTRATION_SKILL)
         print(f"Wrote {team_skill_path}")
+
+    if pr_review_skill_path:
+        os.makedirs(os.path.dirname(pr_review_skill_path), exist_ok=True)
+        with open(pr_review_skill_path, "w") as f:
+            f.write(PR_REVIEW_SKILL)
+        print(f"Wrote {pr_review_skill_path}")
+
+    if runbook_skill_path:
+        os.makedirs(os.path.dirname(runbook_skill_path), exist_ok=True)
+        with open(runbook_skill_path, "w") as f:
+            f.write(AGENT_RUNBOOK_REVIEW_SKILL)
+        print(f"Wrote {runbook_skill_path}")
 
     if worker_prompt_path:
         os.makedirs(os.path.dirname(worker_prompt_path), exist_ok=True)
@@ -3722,6 +3948,147 @@ def _mutate_model(args, cfg_path, cfg, agents, plugin):
               ("Reset to known-good", "omw sync")])
 
 
+# ============================================================================
+# Skills views: list installed agent skills (global + project) and inspect one
+# ============================================================================
+SKILL_SIZE_THRESHOLDS = (40, 80)   # <=40 lean, 41-80 moderate, >80 LARGE
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _skill_frontmatter(text):
+    """Parse the leading `--- ... ---` YAML-ish block of a SKILL.md into a dict of the
+    simple `key: value` lines (name, description, ...). {} if there's no frontmatter."""
+    out = {}
+    if not text.startswith("---"):
+        return out
+    end = text.find("\n---", 3)
+    if end == -1:
+        return out
+    for ln in text[3:end].splitlines():
+        if ":" in ln:
+            k, v = ln.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _skill_instruction_count(text):
+    """Transparent size metric: number of normative lines -- bullets / numbered steps plus
+    lines containing MUST/NEVER/ALWAYS/DO NOT/DON'T -- excluding frontmatter and fenced code."""
+    body = text
+    if body.startswith("---"):
+        e = body.find("\n---", 3)
+        if e != -1:
+            body = body[e + 4:]
+    imperative = re.compile(r"\b(MUST|NEVER|ALWAYS|DO NOT|DON'T)\b")
+    bullet = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
+    n, in_fence = 0, False
+    for ln in body.splitlines():
+        s = ln.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not s:
+            continue
+        if bullet.match(ln) or imperative.search(ln):
+            n += 1
+    return n
+
+
+def _skill_size_verdict(n):
+    lean, moderate = SKILL_SIZE_THRESHOLDS
+    if n <= lean:
+        return "lean"
+    if n <= moderate:
+        return "moderate"
+    return "LARGE"
+
+
+def _skill_roots(args):
+    """[(scope, skills_root), ...] -- the OpenCode GLOBAL skills dir (next to opencode.json)
+    then the PROJECT skills dir (./.agents/skills), matching where the roster looks."""
+    roots = []
+    cfg = os.path.expanduser(args.config) if getattr(args, "config", None) else ""
+    if cfg:
+        roots.append(("global", os.path.join(os.path.dirname(cfg), "skills")))
+    roots.append(("project", os.path.join(os.getcwd(), ".agents", "skills")))
+    return roots
+
+
+def _find_skills(args):
+    """{name: [(scope, skill_dir, skill_md), ...]} across the global + project roots."""
+    found = {}
+    for scope, root in _skill_roots(args):
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            md = os.path.join(root, name, "SKILL.md")
+            if os.path.isfile(md):
+                found.setdefault(name, []).append((scope, os.path.join(root, name), md))
+    return found
+
+
+def _skill_md_files(skill_dir):
+    """All .md files in a skill dir, SKILL.md first, then the rest alphabetically."""
+    files = [os.path.join(skill_dir, f) for f in os.listdir(skill_dir) if f.endswith(".md")]
+    files.sort(key=lambda p: (os.path.basename(p) != "SKILL.md", os.path.basename(p).lower()))
+    return files
+
+
+def _show_skill_detail(name, entries):
+    """Pretty-print every .md file of a skill (each scope it appears in)."""
+    for scope, skill_dir, md in entries:
+        text = _read_text(md)
+        n = _skill_instruction_count(text)
+        fm = _skill_frontmatter(text)
+        print("=" * 78)
+        print(f"skill: {name}   [{scope}]")
+        print(f"  path: {skill_dir}")
+        print(f"  size: {n} instruction(s) -> {_skill_size_verdict(n)}")
+        if fm.get("description"):
+            print(f"  description: {fm['description']}")
+        print("=" * 78)
+        for f in _skill_md_files(skill_dir):
+            print(f"\n{'-' * 78}\n# {os.path.basename(f)}\n{'-' * 78}\n")
+            print(_read_text(f).rstrip())
+        print()
+
+
+def cmd_skills(args):
+    """List agent skills (global + project); `omw skills <name>` pretty-prints one."""
+    _resolve_io(args)
+    skills = _find_skills(args)
+    if getattr(args, "name", None):
+        if args.name not in skills:
+            print(f"skill '{args.name}' not found. Available: "
+                  f"{', '.join(sorted(skills)) or '(none)'}", file=sys.stderr)
+            sys.exit(1)
+        _show_skill_detail(args.name, skills[args.name])
+        return
+    if not skills:
+        print("No skills found (looked in the OpenCode global skills/ and ./.agents/skills/).")
+        _suggest([("Sync the roster (writes the global skills)", "omw sync")])
+        return
+    rows = []
+    for name in sorted(skills):
+        for scope, skill_dir, md in skills[name]:
+            text = _read_text(md)
+            n = _skill_instruction_count(text)
+            desc = (_skill_frontmatter(text).get("description", "") or "")
+            rows.append((name, scope, f"{n} ({_skill_size_verdict(n)})",
+                         desc[:58] + ("\u2026" if len(desc) > 58 else "")))
+    print("Agent skills (OpenCode global + project ./.agents/skills):\n")
+    _table(("SKILL", "SCOPE", "SIZE", "DESCRIPTION"), rows)
+    _suggest([("Inspect a skill (pretty-print all its .md files)", "omw skills <name>"),
+              ("Re-sync the global skills", "omw sync")])
+
+
 def _build_parser():
     ap = argparse.ArgumentParser(
         prog="omodel-wire",
@@ -3798,6 +4165,11 @@ def _build_parser():
     pm.add_argument("--set-thinking", type=_boolish, metavar="BOOL",
                     help="live-set thinking on/off (true|false)")
     pm.set_defaults(func=cmd_models)
+
+    psk = sub.add_parser("skills", parents=[io_parent],
+                         help="list agent skills (global + project); show one with `omw skills <name>`")
+    psk.add_argument("name", nargs="?", help="skill to pretty-print (all its .md files)")
+    psk.set_defaults(func=cmd_skills)
 
     pd = sub.add_parser("detect", aliases=["doctor"],
                         help="report which agentic-dev tools are installed")

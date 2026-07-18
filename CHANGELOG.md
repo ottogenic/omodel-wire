@@ -7,6 +7,24 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`agent-runbook-review` skill + `omw skills` command.** A user-kicked maintenance pass
+  ("perform an agent runbook review") shipped globally by `omw sync` (like `team-orchestration`
+  and `pr-review`). It compacts and de-duplicates a repo's agent-facing docs, mines the **current
+  OpenCode session — including subagent sessions** — from the SQLite store
+  (`~/.local/share/opencode/opencode.db`, read-only; subagents linked via `session.parent_id`) for
+  recurring tool failures and drafts fixes into the right file, audits skill sizes (a transparent
+  instruction-count metric with lean/moderate/LARGE verdicts), recommends whether a new
+  `*-project` skill is warranted, and authors first drafts of missing key files (AGENTS.md,
+  REVIEW.md) — all **report-first**, never a silent rewrite. New `omw skills` lists skills (global
+  + project `.agents/skills`) with their size verdict; `omw skills <name>` pretty-prints every
+  `.md` file in the skill.
+- **Generic global `pr-review` skill + project-override pattern.** `omw sync` now writes a
+  repo-agnostic `pr-review` skill globally to `<config-dir>/skills/pr-review/SKILL.md` (like
+  `team-orchestration`), so `agent-review` has a working review method in a **fresh repo**. The
+  `agent-review` prompt now loads the repo's own `pr-review-project` skill first and, if it's
+  absent, prints "No project specific PR skill found, using global default" and falls back to the
+  global `pr-review`. The global skill includes a short section on authoring a `pr-review-project`
+  skill for a repo. omodel-wire's own review skill is renamed `pr-review` → `pr-review-project`.
 - **GitHub Copilot CLI is now a sync target** — `omw sync --target copilot` (or `--target all`)
   writes the agent roster to `~/.copilot/` as `.agent.md` files (Markdown + YAML frontmatter),
   merges `settings.json` (`model`, `includeCoAuthoredBy: false`, `stream: true`), and emits an

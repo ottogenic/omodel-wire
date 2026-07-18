@@ -549,6 +549,37 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("name: team-orchestration", body)   # frontmatter -> discoverable
             self.assertIn("PARALLEL", body)                    # the batching guidance
 
+    def test_writes_pr_review_skill_globally(self):
+        # The generic pr-review method ships as a GLOBAL skill so a fresh repo (with no
+        # pr-review-project skill) still has a working reviewer.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            skill = os.path.join(tmp, "skills", "pr-review", "SKILL.md")
+            self.assertTrue(os.path.exists(skill), "pr-review SKILL.md not written")
+            body = open(skill, encoding="utf-8").read()
+            self.assertIn("name: pr-review", body)             # frontmatter -> discoverable
+            self.assertIn("pr-review-project", body)           # points at the project override
+            self.assertIn("Authoring", body)                   # how to add a project skill
+
+    def test_review_prompt_prefers_project_skill_with_global_fallback(self):
+        # agent-review must try the repo's own skill first, then announce + fall back to global.
+        self.assertIn("pr-review-project", m.REVIEW_PROMPT)
+        self.assertIn("No project specific PR skill found, using global default", m.REVIEW_PROMPT)
+        self.assertIn("`pr-review`", m.REVIEW_PROMPT)
+
+    def test_writes_agent_runbook_review_skill_globally(self):
+        # The runbook-review maintenance pass ships globally so "perform an agent runbook
+        # review" works in any repo, and it carries the tested SQLite session-mining recipe.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            skill = os.path.join(tmp, "skills", "agent-runbook-review", "SKILL.md")
+            self.assertTrue(os.path.exists(skill), "agent-runbook-review SKILL.md not written")
+            body = open(skill, encoding="utf-8").read()
+            self.assertIn("name: agent-runbook-review", body)   # discoverable
+            self.assertIn("opencode.db", body)                  # the session-mining source
+            self.assertIn("parent_id", body)                    # subagent linkage
+            self.assertIn("Runbook Review Report", body)        # report-first output
+
     def test_team_orchestration_scoped_to_team_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             ag = self._sync(tmp)["agent"]
@@ -1273,6 +1304,61 @@ def _capture(fn, *a, **k):
     with contextlib.redirect_stdout(buf):
         fn(*a, **k)
     return buf.getvalue()
+
+
+class TestSkillsCommand(unittest.TestCase):
+    """`omw skills` lists skills (global + project) and pretty-prints one."""
+
+    def _synced(self, tmp, **over):
+        args = make_args(tmp, **over)
+        sampling = m.build_sampling(args)
+        with FakeProbes(), quiet():
+            self.assertEqual(m.oc_sync(args, sampling, {"opencode"}), 0)
+        return args.config
+
+    def test_size_metric_thresholds(self):
+        self.assertEqual(m._skill_size_verdict(10), "lean")
+        self.assertEqual(m._skill_size_verdict(60), "moderate")
+        self.assertEqual(m._skill_size_verdict(120), "LARGE")
+
+    def test_instruction_count_skips_frontmatter_and_fences(self):
+        text = ("---\nname: x\ndescription: y\n---\n"
+                "- one\n- two\nYou MUST do it\n"
+                "```\n- not counted inside a fence\n```\n"
+                "plain prose line not counted\n")
+        # 2 bullets + 1 MUST line = 3; fence body and prose excluded
+        self.assertEqual(m._skill_instruction_count(text), 3)
+
+    def test_frontmatter_parsed(self):
+        fm = m._skill_frontmatter("---\nname: foo\ndescription: bar baz\n---\n# body\n")
+        self.assertEqual(fm["name"], "foo")
+        self.assertEqual(fm["description"], "bar baz")
+
+    def test_lists_global_skills_after_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            out = _capture(m.cmd_skills, _cli_args(cfg, name=None))
+            self.assertIn("SKILL", out)
+            self.assertIn("agent-runbook-review", out)
+            self.assertIn("pr-review", out)
+            self.assertIn("team-orchestration", out)
+            self.assertIn("global", out)            # scope column
+
+    def test_pretty_prints_one_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            out = _capture(m.cmd_skills, _cli_args(cfg, name="agent-runbook-review"))
+            self.assertIn("skill: agent-runbook-review", out)
+            self.assertIn("instruction(s)", out)    # size line
+            self.assertIn("# SKILL.md", out)         # per-file header
+            self.assertIn("opencode.db", out)        # renders the body
+
+    def test_unknown_skill_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._synced(tmp)
+            with self.assertRaises(SystemExit):
+                with quiet():
+                    m.cmd_skills(_cli_args(cfg, name="does-not-exist"))
 
 
 class TestCliViews(unittest.TestCase):
