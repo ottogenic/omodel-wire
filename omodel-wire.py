@@ -1484,6 +1484,11 @@ def _apply_model_config_to_agent(agent_cfg, agent_name, model_ref, configs,
         control = recipe.get("thinking_control", "auto")
         preset = (recipe.get("presets") or {}).get(role)
         if not preset:
+            # Matched recipe lacks this role -> use the generic Qwen preset for it rather
+            # than leaving the agent on the previous model's (now-wrong) knobs.
+            control = GENERIC_QWEN_RECIPE.get("thinking_control", "auto")
+            preset = (GENERIC_QWEN_RECIPE.get("presets") or {}).get(role)
+        if not preset:
             return
         agent_cfg["options"] = _preset_options(preset, control, caps)
         s = preset.get("sampling", {})
@@ -2190,7 +2195,6 @@ def oc_sync(args, sampling, detected_installed):
     # Curated recipe supplies per-model sampling; else generic Qwen numbers.
     agents = {}
     agent_model_ref = None
-    agent_sampling = None
     per_model_sampling = None
     matched_recipe = None
     env_notes = []
@@ -2245,7 +2249,7 @@ def oc_sync(args, sampling, detected_installed):
         # non-reasoning caps dict, so build never KeyErrors on an unmatched model).
         caps = reasoning_caps.get(agent_model_ref) or caps_from_capabilities(matched_recipe or {})
         if matched_recipe:
-            agents, agent_sampling = oc_build_recipe_agents(
+            agents, _ = oc_build_recipe_agents(
                 agent_model_ref, matched_recipe, caps,
                 sampling.get("repetition_detection"))
             try:
@@ -2271,7 +2275,7 @@ def oc_sync(args, sampling, detected_installed):
             except (KeyError, ValueError):
                 pass
         else:
-            agents, agent_sampling = oc_build_agents(
+            agents, _ = oc_build_agents(
                 agent_model_ref, caps, sampling.get("repetition_detection"))
 
         # Apply default models preferences to agents (default_models already loaded above)
