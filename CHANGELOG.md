@@ -42,6 +42,13 @@ All notable changes to this project are documented here. The format follows
   the roster) for Claude to walk a new user through, with copy-paste commands at each step.
 
 ### Fixed
+- **Sync no longer re-pins the `team` agent to a stale, unavailable cloud model.** The team-model
+  preservation step kept whatever non-DGX model was previously in `opencode.json` (e.g. a leftover
+  `anthropic/claude-opus-4-8`) on every sync, without checking it was reachable and ignoring
+  `default_models.json` entirely — so an unavailable model that was never in your preferences would
+  stick forever. Preservation now applies only when the previous team model still resolves against
+  the available pool (runtime-discovered or a configured provider); otherwise the team reverts to a
+  live model.
 - **Team model now honors `default_models.json` when no reasoning models are live.** Previously,
   if the previous team model was a non-DGX frontier (e.g., `openai/gpt-5.5`) and the resolved
   preference in `default_models.json` pointed elsewhere (e.g., `github-copilot/gpt-5.5`), sync
