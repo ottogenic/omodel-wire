@@ -2297,8 +2297,13 @@ def oc_sync(args, sampling, detected_installed):
                 # default_models.json preference resolved - use it even if it differs
                 # from the previous config's team model
                 team_model = team_agent_model
-            elif prev_team_model and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX):
-                # No preference resolved - preserve existing frontier choice
+            elif (prev_team_model
+                  and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX)
+                  and _resolve_model_ref_from_prefs(prev_team_model, all_available_models) is not None):
+                # No preference resolved - preserve an existing frontier choice ONLY when it's
+                # still reachable (runtime-discovered or a configured provider). Never re-pin the
+                # team to a stale cloud ref that isn't available (e.g. an anthropic model left in
+                # the config when anthropic isn't configured and isn't in default_models.json).
                 team_model = prev_team_model
                 print(f"  team model preserved from existing config: {team_model}")
         if team_model and "team" in agents:

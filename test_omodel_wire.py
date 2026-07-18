@@ -503,9 +503,10 @@ class TestProviders(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestSyncEndToEnd(unittest.TestCase):
     def _sync(self, tmp, **over):
+        runtime_models = over.pop("runtime_models", None)
         args = make_args(tmp, **over)
         sampling = m.build_sampling(args)
-        with FakeProbes(), quiet():
+        with FakeProbes(runtime_models=runtime_models), quiet():
             rc = m.oc_sync(args, sampling, {"opencode"})
         self.assertEqual(rc, 0)
         with open(args.config, encoding="utf-8") as f:
@@ -865,11 +866,27 @@ class TestSyncEndToEnd(unittest.TestCase):
     def test_frontier_team_model_preserved_across_resync(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp, team_model="anthropic/claude-opus-4-8", team_reasoning="high")
-            # re-sync WITHOUT the flags: the anthropic choice must survive.
-            cfg = self._sync(tmp)
+            # re-sync WITHOUT the flags: the anthropic choice survives as long as it's still
+            # reachable (OpenCode runtime discovery lists it, i.e. anthropic is configured).
+            cfg = self._sync(tmp, runtime_models=["anthropic/claude-opus-4-8"])
             team = cfg["agent"]["team"]
             self.assertEqual(team["model"], "anthropic/claude-opus-4-8")
             self.assertEqual(team["temperature"], 1.0)
+
+    def test_stale_unavailable_team_model_not_preserved(self):
+        # Regression: a cloud team model left in the config that ISN'T available (no provider,
+        # not runtime-discovered, and NOT in default_models.json) must not be re-pinned every
+        # sync -- the team reverts to a live local model instead of a broken cloud ref.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "opencode.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"agent": {"team": {"mode": "primary",
+                                              "model": "anthropic/claude-opus-4-8"}}}, f)
+            # No anthropic provider, runtime discovery returns nothing.
+            cfg = self._sync(tmp)
+            team_model = cfg["agent"]["team"]["model"]
+            self.assertNotIn("claude", team_model, "stale unavailable team model was preserved")
+            self.assertIn("Qwen3.6-27B-NVFP4", team_model)  # reverted to the live local model
 
     def test_task_budget_written_and_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1139,7 +1156,7 @@ class TestSyncEndToEnd(unittest.TestCase):
                     }
                 },
                 "agent": {
-                    "team": {"mode": "primary", "model": "anthropic/claude-opus-3-5"}
+                    "team": {"mode": "primary", "model": "anthropic/claude-opus-4-8"}
                 }
             }
             with open(cfg_path, "w") as f:
@@ -1153,8 +1170,8 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # When runtime fails, existing config models are available as fallback
-            # team should use the Anthropic model from existing config
+            # When runtime fails, a CONFIGURED provider's models remain available as fallback,
+            # so the existing anthropic team model (which the provider actually serves) is preserved.
             team_model = cfg["agent"]["team"]["model"]
             self.assertIn("claude-opus", team_model)
 
