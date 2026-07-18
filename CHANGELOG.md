@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Every model assignment now applies that model's known-good config — and the redundant
+  `--team-model` flag is gone.** Previously only the roster build configured a model correctly;
+  `omw agents/subagents --set-model` was a bare string swap and `default_models.json` reassignments
+  weren't re-derived, so an agent kept the *previous* model's temperature/top_p and (critically)
+  thinking knobs. Now a single path (`_apply_model_config_to_agent`) configures every agent for the
+  model it lands on — via `--set-model`, `default_models.json`, or the roster build:
+    - **DGX-hosted models** get the omodel-manager recipe preset for the agent's role
+      (temperature/top_p/thinking + the plugin sampling vector).
+    - **Frontier/cloud models** run on OpenCode's own registry defaults; the DGX-only vLLM knobs
+      (`options`/`top_p`/`temperature`) are stripped so we never impose local sampling on them.
+  The `--team-model` / `--team-reasoning` flags and the `team_model`/`team_reasoning` wire.json
+  settings are **removed** (a leftover `team_model` is pruned from wire.json on load). Set the
+  team's model in `default_models.json` (persistent) or with `omw agents team --set-model`
+  (transient); `--team-task-budget` is unchanged.
+
 ### Added
 - **`agent-runbook-review` skill + `omw skills` command.** A user-kicked maintenance pass
   ("perform an agent runbook review") shipped globally by `omw sync` (like `team-orchestration`
