@@ -1,9 +1,13 @@
 ---
-name: pr-review
-description: Review a pull request against this repo's REVIEW.md. Use when asked to review / approve / merge a PR (this is what the agent-review subagent runs). It runs the checks, reads the diff for bugs, quality, and invariant violations, and returns an itemized list of issues + suggested fixes to the parent agent. It merges ONLY when the review is clean.
+name: pr-review-project
+description: Review a pull request against THIS repo (omodel-wire) and its REVIEW.md. Use when asked to review / approve / merge a PR here (this is what the agent-review subagent runs in this repo). It runs the checks, reads the diff for bugs, quality, and invariant violations, and returns an itemized list of issues + suggested fixes to the parent agent. It merges ONLY when the review is clean.
 ---
 
-# Review a pull request
+# Review a pull request (omodel-wire)
+
+This is omodel-wire's project-specific review skill; agent-review prefers it over the generic
+global `pr-review` skill. It follows the same review -> report -> merge loop, with this repo's
+exact checks, invariants, and gotchas below.
 
 You are the reviewer for THIS repository. The rule is simple: **review first, hand the findings
 back to the parent agent, and merge only when there is nothing left to fix.** You do **not** fix
