@@ -45,6 +45,8 @@ class TestLoadDefaultModels(unittest.TestCase):
                 for section in ("agents", "subagents"):
                     for preferences in result[section].values():
                         self.assertEqual(preferences[1], "gemma4-31b-it-nvfp4")
+            finally:
+                m.DEFAULT_MODELS_FILE = original
 
     def test_load_without_create_does_not_write_template(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -52,10 +54,8 @@ class TestLoadDefaultModels(unittest.TestCase):
             original = m.DEFAULT_MODELS_FILE
             m.DEFAULT_MODELS_FILE = fake_file
             try:
-                self.assertEqual(m.load_default_models(create=False), m.DEFAULT_MODELS_TEMPLATE)
+                self.assertEqual(m._load_default_models(create=False), m.DEFAULT_MODELS_TEMPLATE)
                 self.assertFalse(os.path.exists(fake_file))
-            finally:
-                m.DEFAULT_MODELS_FILE = original
             finally:
                 m.DEFAULT_MODELS_FILE = original
 

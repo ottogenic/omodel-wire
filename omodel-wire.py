@@ -382,7 +382,12 @@ DEFAULT_MODELS_TEMPLATE = {
 }
 
 
-def load_default_models(create=True):
+def load_default_models():
+    """Load default_models.json, creating it with the built-in template if missing."""
+    return _load_default_models(create=True)
+
+
+def _load_default_models(create):
     """Load default_models.json preferences. Returns {agents: {...}, subagents: {...}}.
     Auto-creates with template if missing unless create is false. Never overwrites an
     existing user config."""
@@ -1953,7 +1958,8 @@ def oc_sync(args, sampling, detected_installed):
             available_model_ids.append(model_id)
         
         # Check if user prefers a remote model (e.g., openai/gpt-5.5) for team
-        default_models = load_default_models(create=not args.dry_run)
+        default_models = (_load_default_models(create=False) if args.dry_run
+                          else load_default_models())
         team_prefs = (default_models.get("agents") or {}).get("team", [])
         
         # Prefer a reasoning model first, then check team preferences

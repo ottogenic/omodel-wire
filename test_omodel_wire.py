@@ -527,6 +527,19 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
+    def test_dry_run_does_not_create_default_models_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            default_models = os.path.join(tmp, "default_models.json")
+            old_default_models = m.DEFAULT_MODELS_FILE
+            m.DEFAULT_MODELS_FILE = default_models
+            try:
+                args = make_args(tmp, dry_run=True)
+                with FakeProbes(), quiet():
+                    self.assertEqual(m.oc_sync(args, m.build_sampling(args), {"opencode"}), 0)
+                self.assertFalse(os.path.exists(default_models))
+            finally:
+                m.DEFAULT_MODELS_FILE = old_default_models
+
     def test_writes_team_orchestration_skill_globally(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)
