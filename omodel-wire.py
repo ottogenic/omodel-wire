@@ -2754,7 +2754,7 @@ def copilot_build_agents():
     return out
 
 
-def _copilot_pick_model(providers, available_models, reasoning_caps):
+def _copilot_pick_model(providers, available_models, reasoning_caps, default_models=None):
     """Pick the ONE model Copilot's single BYOK endpoint will serve.
 
     Prefers the coder the `code` agent would use (Copilot is a coding assistant), then any
@@ -2764,7 +2764,9 @@ def _copilot_pick_model(providers, available_models, reasoning_caps):
     refs = sorted(available_models)
     served = {ref: (ref.split("/", 1)[1] if "/" in ref else ref) for ref in refs}
     chosen = None
-    for pref in (load_default_models().get("agents") or {}).get("code", []):
+    if default_models is None:
+        default_models = load_default_models()
+    for pref in (default_models.get("agents") or {}).get("code", []):
         pl = pref.lower()
         for ref in refs:
             sid = served[ref].lower()
@@ -2866,7 +2868,10 @@ def copilot_sync(args, sampling, detected_installed):
     providers, refs, reasoning_caps, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling, profiles=True,
         tool_call=not getattr(args, "no_tool_call", False), recipes=configs, verbose=True)
-    model_ref, base_url, served_id = _copilot_pick_model(providers, available_models, reasoning_caps)
+    default_models = (_load_default_models(create=False) if args.dry_run
+                      else load_default_models())
+    model_ref, base_url, served_id = _copilot_pick_model(
+        providers, available_models, reasoning_caps, default_models)
     agents = copilot_build_agents()
 
     if model_ref:

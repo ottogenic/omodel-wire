@@ -2177,9 +2177,16 @@ class TestCopilotSync(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._sync(tmp, dry_run=True)
-            self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
-            self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
+            default_models = os.path.join(tmp, "default_models.json")
+            old_default_models = m.DEFAULT_MODELS_FILE
+            m.DEFAULT_MODELS_FILE = default_models
+            try:
+                self._sync(tmp, dry_run=True)
+                self.assertFalse(os.path.exists(os.path.join(tmp, "agents")))
+                self.assertFalse(os.path.exists(os.path.join(tmp, "settings.json")))
+                self.assertFalse(os.path.exists(default_models))
+            finally:
+                m.DEFAULT_MODELS_FILE = old_default_models
 
     def test_offline_writes_roster_without_endpoint(self):
         # DGX offline (no host matches the probe) -> still write the roster + model-independent
