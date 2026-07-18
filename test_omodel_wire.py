@@ -111,7 +111,7 @@ def make_args(tmpdir, **over):
         mcp_name="websearch", mcp_command=None, mcp_url=None,
         mcp_env=None, mcp_header=None,
         keep_builtins=False, default_agent="code",
-        team_model=None, team_reasoning=None, team_task_budget=None,
+        team_task_budget=None,
         configs=FIXTURE_DIR, recipes=None, no_recipes=False, dry_run=False,
         sampling="server-default", temperature=None, top_p=None, top_k=None,
         presence_penalty=None, frequency_penalty=None,
@@ -324,6 +324,62 @@ class TestAgentBuilding(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# _apply_model_config_to_agent -- the single "configure an agent for its model" path
+# --------------------------------------------------------------------------- #
+class TestApplyModelConfig(unittest.TestCase):
+    def test_dgx_model_gets_role_preset_and_plugin_vector(self):
+        # A code-role agent placed on the fixture Qwen model gets the CODE preset
+        # (temp 0.6, top_p 0.95, thinking on) + its plugin sampling vector.
+        agent = {"mode": "primary", "model": "dgx-x/old", "permission": {}}
+        plugin = {}
+        m._apply_model_config_to_agent(agent, "code", "dgx-n1-8000/Qwen3.6-27B-NVFP4",
+                                       FIXTURE_CONFIGS, per_model_sampling=plugin)
+        self.assertEqual(agent["model"], "dgx-n1-8000/Qwen3.6-27B-NVFP4")
+        self.assertEqual(agent["temperature"], 0.6)
+        self.assertEqual(agent["top_p"], 0.95)
+        self.assertTrue(agent["options"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(plugin["Qwen3.6-27B-NVFP4"]["code"]["topK"], 20)
+
+    def test_switching_dgx_model_replaces_stale_config(self):
+        # The reported bug: an agent carrying one model's config, moved to another model,
+        # must get the NEW model's config -- not keep the old temp/thinking.
+        agent = {"mode": "primary", "model": "dgx-x/old", "temperature": 1.0,
+                 "options": {"chat_template_kwargs": {"enable_thinking": True},
+                             "reasoning_effort": "high"}, "permission": {}}
+        # instruct role on the fixture Qwen model: temp 0.7, thinking OFF.
+        m._apply_model_config_to_agent(agent, "agent-instruct",
+                                       "dgx-n1-8000/Qwen3.6-27B-NVFP4", FIXTURE_CONFIGS)
+        self.assertEqual(agent["temperature"], 0.7)
+        self.assertFalse(agent["options"]["chat_template_kwargs"]["enable_thinking"])
+
+    def test_thinking_control_none_has_no_reasoning_effort(self):
+        # Nemotron (thinking_control none): only the preset's explicit kwargs, no
+        # probe-derived reasoning_effort injected.
+        agent = {"mode": "primary", "model": "dgx-x/old", "permission": {}}
+        m._apply_model_config_to_agent(agent, "research",
+                                       "dgx-n2-8000/NVIDIA-Nemotron-3-Super-120B", FIXTURE_CONFIGS)
+        self.assertNotIn("reasoning_effort", agent["options"])
+        self.assertTrue(agent["options"]["chat_template_kwargs"]["enable_thinking"])
+
+    def test_cloud_model_strips_local_knobs(self):
+        # A frontier/cloud model runs on OpenCode's defaults -- local vLLM knobs are removed
+        # and the agent's plugin entry is dropped.
+        agent = {"mode": "primary", "model": "dgx-x/old", "temperature": 0.6, "top_p": 0.95,
+                 "options": {"chat_template_kwargs": {"enable_thinking": True}}, "permission": {}}
+        plugin = {"gpt-5.5": {"code": {"temperature": 0.6}}}
+        m._apply_model_config_to_agent(agent, "code", "openai/gpt-5.5", FIXTURE_CONFIGS,
+                                       per_model_sampling=plugin)
+        self.assertEqual(agent["model"], "openai/gpt-5.5")
+        self.assertNotIn("temperature", agent)
+        self.assertNotIn("top_p", agent)
+        self.assertNotIn("options", agent)
+        self.assertNotIn("code", plugin["gpt-5.5"])
+        # untouched fields survive
+        self.assertEqual(agent["mode"], "primary")
+        self.assertIn("permission", agent)
+
+
+# --------------------------------------------------------------------------- #
 # Variants + sampling plugin
 # --------------------------------------------------------------------------- #
 class TestVariantsAndPlugin(unittest.TestCase):
@@ -504,10 +560,17 @@ class TestProviders(unittest.TestCase):
 class TestSyncEndToEnd(unittest.TestCase):
     def _sync(self, tmp, **over):
         runtime_models = over.pop("runtime_models", None)
+        default_models = over.pop("default_models", None)
         args = make_args(tmp, **over)
         sampling = m.build_sampling(args)
-        with FakeProbes(runtime_models=runtime_models), quiet():
-            rc = m.oc_sync(args, sampling, {"opencode"})
+        orig = m.load_default_models
+        if default_models is not None:
+            m.load_default_models = lambda: default_models
+        try:
+            with FakeProbes(runtime_models=runtime_models), quiet():
+                rc = m.oc_sync(args, sampling, {"opencode"})
+        finally:
+            m.load_default_models = orig
         self.assertEqual(rc, 0)
         with open(args.config, encoding="utf-8") as f:
             return json.load(f)
@@ -850,28 +913,27 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertGreater(entry["limit"]["output"], 32000)
             self.assertIn("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", buf.getvalue())
 
-    def test_anthropic_team_model_thinking_and_temp(self):
+    def test_team_on_cloud_model_from_default_models_strips_local_knobs(self):
+        # The team's model comes from default_models.json like any agent. A frontier/cloud
+        # choice runs on OpenCode's own defaults -- the DGX-only knobs (options/top_p/
+        # temperature) are stripped so we never impose vLLM sampling on a cloud model.
+        dm = {"agents": {"team": ["openai/gpt-5.5"]}, "subagents": {}}
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._sync(tmp, team_model="anthropic/claude-opus-4-8",
-                             team_reasoning="high")
+            cfg = self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
             team = cfg["agent"]["team"]
-            self.assertEqual(team["model"], "anthropic/claude-opus-4-8")
-            self.assertEqual(team["options"]["thinking"],
-                             {"type": "enabled", "budgetTokens": 32000})
-            self.assertEqual(team["temperature"], 1.0)
-            # local vLLM knobs stripped for the cloud model
-            self.assertNotIn("chat_template_kwargs", team.get("options", {}))
+            self.assertEqual(team["model"], "openai/gpt-5.5")
+            self.assertNotIn("options", team)      # no chat_template_kwargs / reasoning_effort
             self.assertNotIn("top_p", team)
+            self.assertNotIn("temperature", team)
 
-    def test_frontier_team_model_preserved_across_resync(self):
+    def test_team_model_from_default_models_persists_across_resync(self):
+        # No special team-model preservation any more: default_models.json IS the persistence,
+        # so an available cloud choice is re-selected every sync.
+        dm = {"agents": {"team": ["openai/gpt-5.5"]}, "subagents": {}}
         with tempfile.TemporaryDirectory() as tmp:
-            self._sync(tmp, team_model="anthropic/claude-opus-4-8", team_reasoning="high")
-            # re-sync WITHOUT the flags: the anthropic choice survives as long as it's still
-            # reachable (OpenCode runtime discovery lists it, i.e. anthropic is configured).
-            cfg = self._sync(tmp, runtime_models=["anthropic/claude-opus-4-8"])
-            team = cfg["agent"]["team"]
-            self.assertEqual(team["model"], "anthropic/claude-opus-4-8")
-            self.assertEqual(team["temperature"], 1.0)
+            self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
+            cfg = self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
+            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
 
     def test_stale_unavailable_team_model_not_preserved(self):
         # Regression: a cloud team model left in the config that ISN'T available (no provider,
@@ -1134,9 +1196,9 @@ class TestSyncEndToEnd(unittest.TestCase):
             # Verify team gets openai/gpt-5.5 (it's the only remote in pool)
             self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
 
-    def test_stale_remote_provider_fallback_when_runtime_discovery_fails(self):
-        """When runtime discovery fails, existing config provider models should
-        be available as fallback/back-compat."""
+    def test_configured_provider_model_available_when_runtime_discovery_fails(self):
+        """When `opencode models` returns nothing, a model from a CONFIGURED provider in the
+        existing config is still available as a fallback, so an agent can be placed on it."""
         default_models = {
             "agents": {"team": ["anthropic/claude-opus-4-8"]},
             "subagents": {}
@@ -1161,19 +1223,15 @@ class TestSyncEndToEnd(unittest.TestCase):
             }
             with open(cfg_path, "w") as f:
                 json.dump(initial_cfg, f)
-            
-            args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
-            sampling = m.build_sampling(args)
-            # Runtime discovery fails (returns empty list)
-            with FakeProbes(runtime_models=[]), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
-            self.assertEqual(rc, 0)
-            with open(cfg_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-            # When runtime fails, a CONFIGURED provider's models remain available as fallback,
-            # so the existing anthropic team model (which the provider actually serves) is preserved.
-            team_model = cfg["agent"]["team"]["model"]
-            self.assertIn("claude-opus", team_model)
+
+            # Runtime discovery fails; the configured anthropic provider's model is the fallback.
+            cfg = self._sync(tmp, _hosts=["192.0.2.101"], _ports=[8000],
+                             runtime_models=[], default_models=default_models)
+            team = cfg["agent"]["team"]
+            self.assertEqual(team["model"], "anthropic/claude-opus-4-8")
+            # cloud model -> local vLLM knobs stripped, runs on OpenCode's own defaults
+            self.assertNotIn("top_p", team)
+            self.assertNotIn("options", team)
 
 
 # --------------------------------------------------------------------------- #
@@ -1403,12 +1461,26 @@ class TestCliViews(unittest.TestCase):
             m.WIRE_SETTINGS_FILE = os.path.join(tmp, "wire.json")
             try:
                 self.assertEqual(m.load_settings(), {})
-                m.save_settings({"team_model": "anthropic/claude-opus-4-8"})
-                self.assertEqual(m.load_settings()["team_model"], "anthropic/claude-opus-4-8")
+                m.save_settings({"hosts": "192.0.2.101,192.0.2.102"})
+                self.assertEqual(m.load_settings()["hosts"], "192.0.2.101,192.0.2.102")
                 a = types.SimpleNamespace(_settings=m.load_settings())
-                self.assertEqual(m._setting(a, "team_model"), "anthropic/claude-opus-4-8")
+                self.assertEqual(m._setting(a, "hosts"), "192.0.2.101,192.0.2.102")
                 self.assertEqual(m._setting(a, "default_agent"), "code")  # built-in fallback
                 self.assertIsNone(m._setting(a, "configs_dir"))
+            finally:
+                m.WIRE_SETTINGS_FILE = old
+
+    def test_retired_team_model_setting_is_pruned_on_load(self):
+        # A leftover team_model in wire.json (retired) is dropped on load so it can't
+        # silently drive sync any more.
+        old = m.WIRE_SETTINGS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            m.WIRE_SETTINGS_FILE = os.path.join(tmp, "wire.json")
+            try:
+                m.save_settings({"team_model": "anthropic/claude-opus-4-8", "web_search": "exa"})
+                loaded = m.load_settings()
+                self.assertNotIn("team_model", loaded)
+                self.assertEqual(loaded["web_search"], "exa")   # other keys survive
             finally:
                 m.WIRE_SETTINGS_FILE = old
 
@@ -1521,6 +1593,36 @@ class TestCliMutations(unittest.TestCase):
             ag = self._load(cfg)["agent"]
             for w in ("agent-plan", "agent-code", "agent-instruct"):
                 self.assertEqual(ag[w]["model"], "anthropic/x")
+
+    def test_set_model_to_cloud_strips_local_knobs(self):
+        # Regression: `--set-model` to a frontier/cloud model must reconfigure the agent
+        # for that model (OpenCode defaults), not leave the old DGX temp/thinking behind.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            before = self._load(cfg)["agent"]["research"]
+            self.assertIn("options", before)          # DGX build left thinking knobs
+            with quiet():
+                m.cmd_agents(_cli_args(cfg, name="research", set_model="openai/gpt-5.5"))
+            research = self._load(cfg)["agent"]["research"]
+            self.assertEqual(research["model"], "openai/gpt-5.5")
+            self.assertNotIn("options", research)     # local knobs stripped for cloud
+            self.assertNotIn("top_p", research)
+            self.assertNotIn("temperature", research)
+
+    def test_set_model_to_dgx_applies_recipe_config(self):
+        # `--set-model` to a DGX model applies THAT model's recipe preset (thinking on for
+        # the research/reason role) rather than a bare string swap.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _sync_fixture(tmp)
+            # move the (thinking-off) instruct worker onto the Qwen model as-is; then verify
+            # research keeps a correct reason-preset block after a same-model reconfigure.
+            with quiet():
+                m.cmd_agents(_cli_args(cfg, name="research",
+                                       set_model="dgx-n1-8000/Qwen3.6-27B-NVFP4"))
+            research = self._load(cfg)["agent"]["research"]
+            self.assertEqual(research["model"], "dgx-n1-8000/Qwen3.6-27B-NVFP4")
+            self.assertTrue(research["options"]["chat_template_kwargs"]["enable_thinking"])
+            self.assertEqual(research["temperature"], 1.0)   # reason preset
 
     def test_set_work_budget_updates_team_and_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
