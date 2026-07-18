@@ -41,13 +41,21 @@ class TestLoadDefaultModels(unittest.TestCase):
                 self.assertIn("agents", result)
                 self.assertIn("subagents", result)
                 
-                # Should have team and agent-code defaults
-                self.assertIn("team", result["agents"])
-                self.assertIn("agent-code", result["subagents"])
-                
-                # Should have qwen3-coder-next-fp8 as default
-                self.assertEqual(result["agents"]["team"], ["qwen3-coder-next-fp8"])
-                self.assertEqual(result["subagents"]["agent-code"], ["qwen3-coder-next-fp8"])
+                self.assertEqual(result, m.DEFAULT_MODELS_TEMPLATE)
+                for section in ("agents", "subagents"):
+                    for preferences in result[section].values():
+                        self.assertEqual(preferences[1], "gemma4-31b-it-nvfp4")
+            finally:
+                m.DEFAULT_MODELS_FILE = original
+
+    def test_load_without_create_does_not_write_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_file = os.path.join(tmpdir, "default_models.json")
+            original = m.DEFAULT_MODELS_FILE
+            m.DEFAULT_MODELS_FILE = fake_file
+            try:
+                self.assertEqual(m._load_default_models(create=False), m.DEFAULT_MODELS_TEMPLATE)
+                self.assertFalse(os.path.exists(fake_file))
             finally:
                 m.DEFAULT_MODELS_FILE = original
 
