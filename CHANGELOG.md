@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   `gh pr merge`'s local post-merge error when `main` is checked out in a sibling worktree.
 
 ### Changed
+- **`default_models.json` is now a local preference file.** It is ignored by Git, so custom
+  model priorities no longer block repository updates. `omw sync` recreates a missing file with
+  the built-in per-agent preference ordering, which includes `gemma4-31b-it-nvfp4` as each
+  role's second-choice model.
 - **Built-in OpenCode and Hugging Face providers are disabled by default.** The tool now writes a
   top-level `disabled_providers` array (e.g., `["opencode", "huggingface"]`) to `opencode.json`.
   These providers remain in the config but their models are hidden from the `/models` picker.

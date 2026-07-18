@@ -342,6 +342,36 @@ MANAGED_AGENTS = {"research", "code", "agent", "team",
 
 # Default models config file (user preferences for agent/subagent models)
 DEFAULT_MODELS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default_models.json")
+DEFAULT_MODELS_TEMPLATE = {
+    "agents": {
+        "team": ["openai/gpt-5.5", "gemma4-31b-it-nvfp4", "unsloth/qwen3-coder-next-fp8",
+                 "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                 "qwen3.6-35b-a3b-nvfp4", "google/gemini-3.5-flash"],
+        "research": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                     "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                     "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "code": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                 "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                 "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                  "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                  "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5", "google/gemini-3.5-flash"],
+    },
+    "subagents": {
+        "agent-plan": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                       "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                       "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent-code": ["qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                       "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                       "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent-instruct": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                           "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
+                           "qwen3.6-35b-a3b-fp8", "qwen3.6-35b-a3b-nvfp4", "openai/gpt-5.5",
+                           "google/gemini-3.5-flash"],
+        "agent-review": ["anthropic/claude-opus-4-8", "gemma4-31b-it-nvfp4",
+                         "openai/gpt-5.5", "google/gemini-3.5-flash"],
+    },
+}
 
 
 def load_default_models():
@@ -364,20 +394,10 @@ def load_default_models():
 
 
 def _create_default_models_template():
-    """Create default_models.json with template (all agents set to qwen3-coder-next-fp8)."""
+    """Create default_models.json with the built-in agent preference ordering."""
     template = {
-        "agents": {
-            "team": ["qwen3-coder-next-fp8"],
-            "research": ["qwen3-coder-next-fp8"],
-            "code": ["qwen3-coder-next-fp8"],
-            "agent": ["qwen3-coder-next-fp8"]
-        },
-        "subagents": {
-            "agent-plan": ["qwen3-coder-next-fp8"],
-            "agent-code": ["qwen3-coder-next-fp8"],
-            "agent-instruct": ["qwen3-coder-next-fp8"],
-            "agent-review": ["qwen3-coder-next-fp8"]
-        }
+        section: {agent: list(preferences) for agent, preferences in agents.items()}
+        for section, agents in DEFAULT_MODELS_TEMPLATE.items()
     }
     try:
         with open(DEFAULT_MODELS_FILE, "w", encoding="utf-8") as f:

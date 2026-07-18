@@ -41,13 +41,11 @@ class TestLoadDefaultModels(unittest.TestCase):
                 self.assertIn("agents", result)
                 self.assertIn("subagents", result)
                 
-                # Should have team and agent-code defaults
-                self.assertIn("team", result["agents"])
-                self.assertIn("agent-code", result["subagents"])
-                
-                # Should have qwen3-coder-next-fp8 as default
-                self.assertEqual(result["agents"]["team"], ["qwen3-coder-next-fp8"])
-                self.assertEqual(result["subagents"]["agent-code"], ["qwen3-coder-next-fp8"])
+                self.assertEqual(result, m.DEFAULT_MODELS_TEMPLATE)
+                self.assertEqual(result["agents"]["team"][:2],
+                                 ["openai/gpt-5.5", "gemma4-31b-it-nvfp4"])
+                self.assertEqual(result["subagents"]["agent-review"][:2],
+                                 ["anthropic/claude-opus-4-8", "gemma4-31b-it-nvfp4"])
             finally:
                 m.DEFAULT_MODELS_FILE = original
 
