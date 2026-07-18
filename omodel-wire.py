@@ -21,8 +21,7 @@ Quick start:
   omodel-wire.py --install-aliases     # add the `omw` shell alias (re-open shell after)
   omw                                 # detect tools + sync (default sampling)
   omw --profiles                      # + build the agent roster for reasoning models
-  omw --profiles --team-model anthropic/claude-opus-4-8 --team-reasoning high \
-       --team-task-budget 4 --web-search exa --write-shell-env
+  omw --profiles --team-task-budget 4 --web-search exa --write-shell-env
   omw --dry-run                       # preview opencode.json + plugin, write nothing
 
 --profiles builds, per reasoning model, an agent roster from omodel-manager's
@@ -1316,6 +1315,45 @@ GENERIC_QWEN_RECIPE = {
 }
 
 
+def _preset_options(preset, control, caps):
+    """Thinking-knob options dict for a recipe preset (shared by build + reconfigure).
+
+    control='none' leaves the model at its own default; otherwise a thinking preset gets
+    enable_thinking + reasoning_effort (per caps) and a non-thinking preset gets the
+    off-options. Explicit per-preset raw kwargs (e.g. preserve_thinking for the agent role,
+    or Nemotron's {enable_thinking, low_effort}) are merged on top."""
+    if control == "none":
+        o = {}
+    elif preset.get("thinking"):
+        o = dict(oc_effort_options(caps, "high"))
+    else:
+        o = dict(oc_off_options(caps))
+    for k, v in (preset.get("options") or {}).items():
+        if k == "chat_template_kwargs" and isinstance(o.get(k), dict) and isinstance(v, dict):
+            o[k] = {**o[k], **v}
+        else:
+            o[k] = v
+    return o
+
+
+def _preset_vec(preset, repetition_detection):
+    """Plugin sampling vector for a recipe preset (shared by build + reconfigure)."""
+    s = preset.get("sampling", {})
+    vec = {}
+    if "temperature" in s: vec["temperature"] = s["temperature"]
+    if "top_p" in s: vec["topP"] = s["top_p"]
+    if "top_k" in s: vec["topK"] = s["top_k"]
+    if preset.get("max_output"): vec["maxOutputTokens"] = preset["max_output"]
+    body = {}
+    if s.get("presence_penalty") is not None: body["presence_penalty"] = s["presence_penalty"]
+    if s.get("min_p"): body["min_p"] = s["min_p"]
+    if s.get("repetition_penalty") not in (None, 1.0): body["repetition_penalty"] = s["repetition_penalty"]
+    if repetition_detection is not None:
+        body["repetition_detection"] = repetition_detection
+    if body: vec["options"] = body
+    return vec
+
+
 def oc_build_agents(model_ref, caps, repetition_detection=None):
     """Generic (no curated recipe) reasoning model -> the 4 standard roles via
     Qwen's recommended numbers. Returns (agents, agent_sampling) like the recipe
@@ -1338,40 +1376,6 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
     # (e.g. Nemotron super_v3) whose templates don't take those kwargs.
     control = recipe.get("thinking_control", "auto")
 
-    def _opts_for(preset):
-        """Build the thinking-knob options dict for a preset."""
-        if control == "none":
-            o = {}
-        elif preset.get("thinking"):
-            o = dict(oc_effort_options(caps, "high"))
-        else:
-            o = dict(oc_off_options(caps))
-        # Explicit per-preset raw kwargs win (e.g. preserve/clear_thinking for the
-        # agent role, or Nemotron's {enable_thinking, low_effort}).
-        for k, v in (preset.get("options") or {}).items():
-            if k == "chat_template_kwargs" and isinstance(o.get(k), dict) and isinstance(v, dict):
-                o[k] = {**o[k], **v}
-            else:
-                o[k] = v
-        return o
-
-    def _vec_for(preset):
-        """Plugin sampling vector for a preset."""
-        s = preset.get("sampling", {})
-        vec = {}
-        if "temperature" in s: vec["temperature"] = s["temperature"]
-        if "top_p" in s: vec["topP"] = s["top_p"]
-        if "top_k" in s: vec["topK"] = s["top_k"]
-        if preset.get("max_output"): vec["maxOutputTokens"] = preset["max_output"]
-        body = {}
-        if s.get("presence_penalty") is not None: body["presence_penalty"] = s["presence_penalty"]
-        if s.get("min_p"): body["min_p"] = s["min_p"]
-        if s.get("repetition_penalty") not in (None, 1.0): body["repetition_penalty"] = s["repetition_penalty"]
-        if repetition_detection is not None:
-            body["repetition_detection"] = repetition_detection
-        if body: vec["options"] = body
-        return vec
-
     presets = recipe.get("presets", {})
     agents, agent_sampling = {}, {}
     for key, prole, mode, is_worker, perm, color, sdesc in AGENT_SPECS:
@@ -1384,7 +1388,7 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "mode": mode,
             "model": model_ref,
             "color": color,
-            "options": _opts_for(preset),
+            "options": _preset_options(preset, control, caps),
             "permission": dict(PERM[perm]),
         }
         # Hidden delegation workers get the worker prompt so they return a
@@ -1409,11 +1413,11 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         if key in ("code", "agent"):
             agent["task_budget"] = 1
         agents[key] = agent
-        agent_sampling[key] = _vec_for(preset)
+        agent_sampling[key] = _preset_vec(preset, repetition_detection)
 
     # --- `team`: lead orchestrator with the reason preset's sampling/thinking
     # that DELEGATES to the hidden agent-* workers instead of editing. Built when
-    # a reason preset + at least one worker exist. Model overridable via --team-model. ---
+    # a reason preset + at least one worker exist. Model comes from default_models. ---
     rp = presets.get("reason")
     targets = [k for k in TEAM_TARGETS if k in agents]
     if rp and targets:
@@ -1428,7 +1432,7 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "model": model_ref,
             "color": TEAM_COLOR,
             "prompt": "{file:./prompts/otools-team.md}",
-            "options": _opts_for(rp),
+            "options": _preset_options(rp, control, caps),
             # Delegation-only: deny EVERY tool category (incl. the read-only ones --
             # read/grep/glob/list have their own permission keys and default to allow,
             # so denying edit/bash alone still lets the orchestrator grep/read). The
@@ -1441,8 +1445,65 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         if "temperature" in rs: team["temperature"] = rs["temperature"]
         if "top_p" in rs: team["top_p"] = rs["top_p"]
         agents["team"] = team
-        agent_sampling["team"] = _vec_for(rp)
+        agent_sampling["team"] = _preset_vec(rp, repetition_detection)
     return agents, agent_sampling
+
+
+# Cloud/frontier providers get their known-good config from OpenCode's model registry,
+# NOT local vLLM knobs. When an agent lands on such a model we strip the DGX-only agent
+# fields so it runs on the model's own correct defaults instead of stale local sampling.
+_LOCAL_ONLY_AGENT_FIELDS = ("temperature", "top_p", "options")
+
+
+def _apply_model_config_to_agent(agent_cfg, agent_name, model_ref, configs,
+                                 reasoning_caps=None, repetition_detection=None,
+                                 per_model_sampling=None):
+    """Configure ONE agent for `model_ref` with THAT model's known-good settings.
+
+    The single place every model-assignment path routes through (roster build,
+    default_models application, and `--set-model`), so an agent ALWAYS carries the right
+    sampling + thinking config for whatever model it runs on:
+      * DGX-hosted model     -> the omodel-manager recipe preset for the agent's role
+        (temperature/top_p/thinking knobs on the block + the plugin sampling vector);
+        a model with no curated recipe falls back to the generic Qwen numbers.
+      * Frontier/cloud model -> OpenCode's registry defaults; the DGX-only knobs are
+        stripped so we never impose vLLM sampling/thinking on a cloud model.
+
+    Mutates `agent_cfg` in place (only model + sampling fields; never touches
+    permission/mode/prompt/task_budget) and updates
+    per_model_sampling[model_id][agent_name] when a dict is passed."""
+    role = AGENT_ROLE.get(agent_name, "code")
+    model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+    provider = model_ref.split("/", 1)[0] if "/" in model_ref else ""
+    agent_cfg["model"] = model_ref
+
+    if provider.startswith(PROVIDER_PREFIX):
+        recipe = match_recipe(model_id, configs) or GENERIC_QWEN_RECIPE
+        caps = (reasoning_caps or {}).get(model_ref) or caps_from_capabilities(
+            match_recipe(model_id, configs) or {})
+        control = recipe.get("thinking_control", "auto")
+        preset = (recipe.get("presets") or {}).get(role)
+        if not preset:
+            return
+        agent_cfg["options"] = _preset_options(preset, control, caps)
+        s = preset.get("sampling", {})
+        if "temperature" in s:
+            agent_cfg["temperature"] = s["temperature"]
+        else:
+            agent_cfg.pop("temperature", None)
+        if "top_p" in s:
+            agent_cfg["top_p"] = s["top_p"]
+        else:
+            agent_cfg.pop("top_p", None)
+        if per_model_sampling is not None:
+            per_model_sampling.setdefault(model_id, {})[agent_name] = _preset_vec(
+                preset, repetition_detection)
+    else:
+        # Frontier/cloud model: strip DGX-only knobs; OpenCode uses the model's own defaults.
+        for field in _LOCAL_ONLY_AGENT_FIELDS:
+            agent_cfg.pop(field, None)
+        if per_model_sampling is not None and model_id in per_model_sampling:
+            per_model_sampling[model_id].pop(agent_name, None)
 
 
 def oc_agent_sampling_plugin_js(per_model_sampling, default_model_id):
@@ -2235,6 +2296,18 @@ def oc_sync(args, sampling, detected_installed):
                 _, _msamp = oc_build_agents(_mref, _mcaps, _rep_det)
             per_model_sampling[_mid] = _msamp
 
+        # Re-derive EACH agent's block for the model it actually ended up on. The roster
+        # was built on one primary model, but _apply_default_models may have moved agents
+        # onto other models; without this, an agent keeps the primary's thinking knobs /
+        # sampling (wrong for a different DGX model) or stale local knobs (wrong on a cloud
+        # model). This is the single guarantee that every agent carries its model's
+        # known-good config -- DGX recipe preset or frontier defaults -- and keeps the
+        # plugin's per-(model, agent) table in sync.
+        for _name, _a in agents.items():
+            if isinstance(_a, dict) and _a.get("model"):
+                _apply_model_config_to_agent(_a, _name, _a["model"], configs,
+                                             reasoning_caps, _rep_det, per_model_sampling)
+
         # OpenCode caps per-step output at 32k UNLESS this env var is raised. A
         # reasoning model spends output tokens *thinking* before it answers, so one
         # coding turn easily exceeds 32k and OpenCode cuts it off mid-thought. Raise
@@ -2251,11 +2324,11 @@ def oc_sync(args, sampling, detected_installed):
         except (KeyError, ValueError, TypeError):
             pass
         existing_agents = cfg.get("agent", {}) or {}
-        # Capture a previously-set frontier team model + thinking config BEFORE we
-        # overwrite, so a re-sync without the flags doesn't reset your choices.
+        # Capture a previously-set team task_budget BEFORE we overwrite, so a re-sync
+        # without the flag doesn't reset it. (The team MODEL is no longer special-cased:
+        # it comes from default_models.json like any other agent and is configured for its
+        # model by the reconfigure loop above -- including cloud stripping.)
         prev_team = existing_agents.get("team") or {}
-        prev_team_model = prev_team.get("model")
-        prev_team_thinking = (prev_team.get("options") or {}).get("thinking")
         prev_team_budget = prev_team.get("task_budget")
         # Rebuild the agent map so OUR agents are written in a FIXED canonical
         # order every sync (plan, build, agent, ...workers..., team). OpenCode's
@@ -2277,59 +2350,6 @@ def oc_sync(args, sampling, detected_installed):
         # default at one of our agents so startup doesn't fall back to a disabled one.
         if not args.keep_builtins and args.default_agent in cfg["agent"]:
             cfg["default_agent"] = args.default_agent
-
-        # ---- Team model (frontier planner). Precedence:
-        #   1) explicit --team-model / configured team_model (args.team_model)
-        #   2) a resolved default_models.json preference for "team"
-        #   3) preserve the previous team model when it is a non-DGX frontier
-        #      AND no preference resolved (so we never wipe your anthropic choice).
-        # Workers keep their own pinned local models, so they stay on the DGX. ----
-        team_pref_resolved = False
-        for pref in ((default_models.get("agents") or {}).get("team", [])):
-            if _resolve_model_ref_from_prefs(pref, all_available_models) is not None:
-                team_pref_resolved = True
-                break
-
-        team_agent_model = agents.get("team", {}).get("model") if agents else None
-        team_model = args.team_model
-        if not team_model:
-            if team_pref_resolved and team_agent_model:
-                # default_models.json preference resolved - use it even if it differs
-                # from the previous config's team model
-                team_model = team_agent_model
-            elif (prev_team_model
-                  and not prev_team_model.split("/", 1)[0].startswith(PROVIDER_PREFIX)
-                  and _resolve_model_ref_from_prefs(prev_team_model, all_available_models) is not None):
-                # No preference resolved - preserve an existing frontier choice ONLY when it's
-                # still reachable (runtime-discovered or a configured provider). Never re-pin the
-                # team to a stale cloud ref that isn't available (e.g. an anthropic model left in
-                # the config when anthropic isn't configured and isn't in default_models.json).
-                team_model = prev_team_model
-                print(f"  team model preserved from existing config: {team_model}")
-        if team_model and "team" in agents:
-            tm = cfg["agent"]["team"]
-            tm["model"] = team_model
-            provider = team_model.split("/", 1)[0]
-            if not provider.startswith(PROVIDER_PREFIX):
-                # non-dgx (e.g. anthropic): local vLLM options/top_p are meaningless
-                # there and the dgx-scoped plugin won't touch it -- drop them.
-                tm.pop("options", None)
-                tm.pop("top_p", None)
-                agent_sampling.pop("team", None)
-                # Anthropic extended thinking. Flag wins; else preserve previous.
-                # (Anthropic uses options.thinking budgetTokens, NOT reasoningEffort.)
-                budget = {"low": 10000, "medium": 24000, "high": 32000}.get(args.team_reasoning)
-                if budget and provider == "anthropic":
-                    tm["options"] = {"thinking": {"type": "enabled", "budgetTokens": budget}}
-                    tm["temperature"] = 1.0   # Anthropic REQUIRES temp=1 when thinking is on
-                    print(f"  team reasoning -> {args.team_reasoning} (thinking budgetTokens {budget})")
-                elif prev_team_thinking:
-                    tm["options"] = {"thinking": prev_team_thinking}
-                    tm["temperature"] = 1.0
-                    print(f"  team reasoning preserved (budgetTokens "
-                          f"{prev_team_thinking.get('budgetTokens')})")
-            if args.team_model:
-                print(f"  team model -> {team_model} (workers stay local)")
 
         # Cap how many sub-agents the team spawns (task_budget). Precedence:
         # flag > previously-set budget > the worker model's declared `concurrency`
@@ -2621,23 +2641,34 @@ SETTINGS_KEYS = {
     "configs_dir":     ("omodel-manager configs/ dir", None),
     "hosts":           ("comma-separated host IPs to probe", None),
     "ports":           ("comma-separated ports", ",".join(map(str, DEFAULT_PORTS))),
-    "team_model":      ("model ref for the team orchestrator", None),
-    "team_reasoning":  ("low|medium|high (Anthropic team thinking)", None),
     "default_agent":   ("startup agent (research/code/agent/team)", "code"),
     "web_search":      ("none|exa|mcp", "none"),
     "proxy_port":      ("proxy listen port (default: 9099)", 9099),
     "proxy_active":    ("is proxy currently active?", False),
 }
+# Retired settings -- silently dropped from wire.json on load so a stale value can't linger
+# and mislead (the team model now lives in default_models.json / `omw agents team --set-model`).
+RETIRED_SETTINGS = ("team_model", "team_reasoning")
 
 
 def load_settings():
-    """Read wire.json; {} if absent or unparseable."""
+    """Read wire.json; {} if absent or unparseable. Retired keys are dropped so a stale
+    value (e.g. an old `team_model`) can't linger and silently drive behavior."""
     try:
         with open(WIRE_SETTINGS_FILE, encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) else {}
+        if not isinstance(d, dict):
+            return {}
     except (OSError, json.JSONDecodeError):
         return {}
+    if any(k in d for k in RETIRED_SETTINGS):
+        for k in RETIRED_SETTINGS:
+            d.pop(k, None)
+        try:
+            save_settings(d)   # rewrite without the retired keys
+        except OSError:
+            pass
+    return d
 
 
 def save_settings(d):
@@ -2700,7 +2731,7 @@ def cmd_home(args):
     cdir = _configs_dir(_setting(args, "configs_dir"))
     ntoml = len([f for f in os.listdir(cdir) if f.endswith(".toml")]) if os.path.isdir(cdir) else 0
     hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
-    team = (agents.get("team") or {}).get("model") or _setting(args, "team_model") or "(local worker model)"
+    team = (agents.get("team") or {}).get("model") or "(from default_models.json)"
 
     print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
     print("Status:")
@@ -2777,7 +2808,7 @@ def cmd_config(args):
     for role in ("coder", "reviewer"):
         state = "set" if os.path.exists(_gh_token_path(role)) else "unset"
         print(f"  gh_token_{role:8} {state}   ({_gh_token_path(role)})")
-    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set team_model anthropic/claude-opus-4-8"),
+    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set default_agent code"),
               ("Set the shared-bot GitHub token (prompts, hidden)", "omw config --set-gh-token-coder"),
               ("Set your reviewer GitHub token", "omw config --set-gh-token-reviewer")],
              header="Set")
@@ -3163,10 +3194,6 @@ def cmd_sync(args):
     """Full profile sync: roster + providers + plugin + prompts (was --profiles)."""
     _resolve_io(args)
     _resolve_hosts_ports(args)
-    if args.team_model is None:
-        args.team_model = _setting(args, "team_model")
-    if args.team_reasoning is None:
-        args.team_reasoning = _setting(args, "team_reasoning")
     if not args.default_agent:
         args.default_agent = _setting(args, "default_agent")
     if not args.web_search:
@@ -3260,16 +3287,9 @@ def _add_sync_args(p):
     p.add_argument("--default-agent", default=None,
                    help="startup agent when build/plan are disabled "
                         "(default: wire.json default_agent, else code)")
-    p.add_argument("--team-model", "--architect-model", metavar="REF", dest="team_model",
-                   default=None,
-                   help="put the `team` orchestrator on a specific model (e.g. "
-                        "anthropic/claude-opus-4-8). Workers stay local; preserved across syncs.")
     p.add_argument("--team-task-budget", "--architect-task-budget", type=int, metavar="N",
                    dest="team_task_budget", default=None,
                    help="cap how many sub-agents the team may spawn per session")
-    p.add_argument("--team-reasoning", choices=["low", "medium", "high"], dest="team_reasoning",
-                   default=None,
-                   help="(Anthropic team model) extended-thinking budget: low/medium/high")
     p.add_argument("--no-recipes", action="store_true",
                    help="ignore the omodel-manager configs; yields generic behavior")
     p.add_argument("--dry-run", action="store_true", help="print result, do not write")
@@ -3889,9 +3909,18 @@ def _mutate_roster(args, want_subagent):
         warn = _validate_ref(ref, cfg)
         if warn:
             print(f"  note: {warn}")
+    # Configure each target for the new model with its known-good config -- DGX recipe
+    # preset (temperature/top_p/thinking + plugin sampling vector) or, on a frontier/cloud
+    # model, OpenCode's own defaults (local vLLM knobs stripped). A plain model swap would
+    # leave the OLD model's sampling/thinking on the agent, which is the whole thing this
+    # tool exists to prevent.
     for nm in targets:
-        agents[nm]["model"] = ref
+        _apply_model_config_to_agent(agents[nm], nm, ref, configs,
+                                     repetition_detection=dict(DEFAULT_REPETITION_DETECTION),
+                                     per_model_sampling=plugin)
     _write_cfg(cfg_path, cfg)
+    if os.path.exists(_plugin_js_path(cfg_path)):
+        _write_plugin(cfg_path, plugin, cfg)
     print(f"set model -> {ref}  for: {', '.join(targets)}")
     print(RESET_NOTE)
     _suggest([("See the change", "omw subagents" if want_subagent else "omw agents"),
