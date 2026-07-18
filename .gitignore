@@ -7,6 +7,7 @@ venv/
 
 # Local overrides / secrets — do not commit
 *.local.json
+default_models.json
 .env
 hf_token
 wire.json

@@ -343,43 +343,73 @@ MANAGED_AGENTS = {"research", "code", "agent", "team",
 
 # Default models config file (user preferences for agent/subagent models)
 DEFAULT_MODELS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default_models.json")
+DEFAULT_MODELS_TEMPLATE = {
+    "agents": {
+        "team": ["github-copilot/gpt-5.5", "gemma4-31b-it-nvfp4", "openai/gpt-5.5",
+                 "google/gemini-3.5-flash", "unsloth/qwen3-coder-next-fp8",
+                 "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                 "qwen3.6-35b-a3b-nvfp4"],
+        "research": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                     "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                     "qwen3.6-35b-a3b-nvfp4", "github-copilot/claude-haiku-4.5",
+                     "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "code": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                 "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                 "qwen3.6-35b-a3b-nvfp4", "github-copilot/claude-haiku-4.5",
+                 "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                  "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                  "qwen3.6-35b-a3b-nvfp4", "github-copilot/claude-haiku-4.5",
+                  "openai/gpt-5.5", "google/gemini-3.5-flash"],
+    },
+    "subagents": {
+        "agent-plan": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                       "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                       "qwen3.6-35b-a3b-nvfp4", "github-copilot/claude-haiku-4.5",
+                       "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent-code": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                       "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4", "qwen3.6-35b-a3b-fp8",
+                       "qwen3.6-35b-a3b-nvfp4", "github-copilot/claude-haiku-4.5",
+                       "openai/gpt-5.5", "google/gemini-3.5-flash"],
+        "agent-instruct": ["unsloth/qwen3-coder-next-fp8", "gemma4-31b-it-nvfp4",
+                           "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
+                           "qwen3.6-35b-a3b-fp8", "qwen3.6-35b-a3b-nvfp4",
+                           "github-copilot/claude-haiku-4.5", "openai/gpt-5.5",
+                           "google/gemini-3.5-flash"],
+        "agent-review": ["github-copilot/claude-opus-4.8", "gemma4-31b-it-nvfp4",
+                         "openai/gpt-5.5", "google/gemini-3.5-flash"],
+    },
+}
 
 
-def load_default_models():
+def load_default_models(create=True):
     """Load default_models.json preferences. Returns {agents: {...}, subagents: {...}}.
-    Auto-creates with template if missing. Never overwrites existing user config."""
+    Auto-creates with template if missing unless create is false. Never overwrites an
+    existing user config."""
     if not os.path.exists(DEFAULT_MODELS_FILE):
-        return _create_default_models_template()
+        return _create_default_models_template(write=create)
     try:
         with open(DEFAULT_MODELS_FILE, encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
-            return _create_default_models_template()
+            return _create_default_models_template(write=create)
         if "agents" not in data:
             data["agents"] = {}
         if "subagents" not in data:
             data["subagents"] = {}
         return data
     except (json.JSONDecodeError, OSError):
-        return _create_default_models_template()
+        return _create_default_models_template(write=create)
 
 
-def _create_default_models_template():
-    """Create default_models.json with template (all agents set to qwen3-coder-next-fp8)."""
+def _create_default_models_template(write=True):
+    """Create default_models.json with the built-in agent preference ordering."""
     template = {
-        "agents": {
-            "team": ["qwen3-coder-next-fp8"],
-            "research": ["qwen3-coder-next-fp8"],
-            "code": ["qwen3-coder-next-fp8"],
-            "agent": ["qwen3-coder-next-fp8"]
-        },
-        "subagents": {
-            "agent-plan": ["qwen3-coder-next-fp8"],
-            "agent-code": ["qwen3-coder-next-fp8"],
-            "agent-instruct": ["qwen3-coder-next-fp8"],
-            "agent-review": ["qwen3-coder-next-fp8"]
-        }
+        section: {agent: list(preferences) for agent, preferences in agents.items()}
+        for section, agents in DEFAULT_MODELS_TEMPLATE.items()
     }
+    if not write:
+        return template
     try:
         with open(DEFAULT_MODELS_FILE, "w", encoding="utf-8") as f:
             json.dump(template, f, indent=2)
@@ -1923,7 +1953,7 @@ def oc_sync(args, sampling, detected_installed):
             available_model_ids.append(model_id)
         
         # Check if user prefers a remote model (e.g., openai/gpt-5.5) for team
-        default_models = load_default_models()
+        default_models = load_default_models(create=not args.dry_run)
         team_prefs = (default_models.get("agents") or {}).get("team", [])
         
         # Prefer a reasoning model first, then check team preferences
