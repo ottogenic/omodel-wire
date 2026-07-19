@@ -227,16 +227,19 @@ class TestAgentBuilding(unittest.TestCase):
         agents, sampling = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
 
         for k in ("research", "code", "agent", "team",
-                  "agent-plan", "agent-code", "agent-instruct"):
+                  "agent-research", "agent-code", "agent-test",
+                  "agent-instruct", "agent-architect", "agent-review"):
             self.assertIn(k, agents, f"missing agent {k}")
             self.assertEqual(agents[k]["model"], self.REF)
 
         # visible agents carry no worker prompt; hidden workers do.
         for k in ("research", "code", "agent"):
             self.assertNotIn("prompt", agents[k], f"visible {k} should be prompt-free")
-        # agent-review has its own review prompt; other workers use worker prompt
-        for k in ("agent-plan", "agent-code", "agent-instruct"):
+        # generic workers use the worker prompt; the specialists have their own.
+        for k in ("agent-research", "agent-code", "agent-instruct"):
             self.assertEqual(agents[k].get("prompt"), "{file:./prompts/otools-worker.md}")
+        self.assertEqual(agents["agent-test"].get("prompt"), "{file:./prompts/otools-test.md}")
+        self.assertEqual(agents["agent-architect"].get("prompt"), "{file:./prompts/otools-architect.md}")
         self.assertEqual(agents["agent-review"].get("prompt"), "{file:./prompts/otools-review.md}")
 
         # permission tiers landed on the right agents
@@ -279,8 +282,10 @@ class TestAgentBuilding(unittest.TestCase):
             # But edit/bash permissions should be preserved
             self.assertIn(agents[k]["permission"].get("edit"), ("ask", "allow"),
                           f"{k} should have edit permission")
-            self.assertIn(agents[k]["permission"].get("bash"), ("ask", "allow"),
-                          f"{k} should have bash permission")
+            bash = agents[k]["permission"].get("bash")
+            # bash is either the shorthand ("ask") or the merge-gated dict ({"*":"allow", "gh pr merge*":"deny"})
+            self.assertTrue(bash == "ask" or (isinstance(bash, dict) and bash.get("*") == "allow"),
+                            f"{k} should have bash permission")
 
     def test_agent_code_cannot_delegate_to_review(self):
         # agent-code (hidden worker) must NOT delegate to agent-review.
@@ -292,9 +297,39 @@ class TestAgentBuilding(unittest.TestCase):
         self.assertEqual(task, "deny", "agent-code should have task='deny' (no delegation)")
         # agent-code should NOT have task_budget (no delegation)
         self.assertNotIn("task_budget", agents["agent-code"])
-        # But edit/bash permissions should be preserved (full access)
+        # But edit/bash permissions should be preserved (full access), except
+        # `gh pr merge*` is denied (only agent-review may merge).
         self.assertEqual(agents["agent-code"]["permission"].get("edit"), "allow")
-        self.assertEqual(agents["agent-code"]["permission"].get("bash"), "allow")
+        bash = agents["agent-code"]["permission"].get("bash")
+        self.assertEqual(bash.get("*"), "allow")
+        self.assertEqual(bash.get("gh pr merge*"), "deny")
+
+    def test_only_review_may_merge_and_workers_never_delegate(self):
+        # Every worker has task='deny' (no sub-delegation); every agent EXCEPT
+        # agent-review has `gh pr merge*` denied. agent-review keeps plain bash allow.
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        for k in ("agent-research", "agent-code", "agent-test", "agent-instruct",
+                  "agent-architect", "agent-review"):
+            self.assertEqual(agents[k]["permission"]["task"], "deny",
+                             f"{k} must not sub-delegate")
+        for k, a in agents.items():
+            if k == "agent-review":
+                self.assertEqual(a["permission"]["bash"], "allow",
+                                 "agent-review keeps unrestricted bash (it merges)")
+                continue
+            bash = a["permission"].get("bash")
+            if isinstance(bash, dict):
+                self.assertEqual(bash.get("gh pr merge*"), "deny",
+                                 f"{k} must be denied merge")
+
+    def test_architect_is_readonly(self):
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        arch = agents["agent-architect"]["permission"]
+        self.assertEqual(arch["edit"], "deny")
+        self.assertEqual(arch["bash"], "deny")
+        self.assertEqual(arch["task"], "deny")
 
     def test_thinking_knob_on(self):
         # reason/code/agent are thinking:true -> enable_thinking + graded effort.
@@ -580,7 +615,7 @@ class TestSyncEndToEnd(unittest.TestCase):
             cfg = self._sync(tmp)
             ag = cfg["agent"]
             for k in ("research", "code", "agent", "team",
-                      "agent-plan", "agent-code", "agent-instruct"):
+                      "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
                 self.assertIn(k, ag)
             # native build/plan disabled, default moved off build
             self.assertEqual(ag["build"], {"disable": True})
@@ -648,7 +683,7 @@ class TestSyncEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ag = self._sync(tmp)["agent"]
             # every non-team agent denies the team skill...
-            for k in ("research", "code", "agent", "agent-plan", "agent-code",
+            for k in ("research", "code", "agent", "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review",
                       "agent-instruct", "agent-review"):
                 self.assertEqual(ag[k]["permission"]["skill"], {"team-orchestration": "deny"})
             # ...and team does NOT (so it alone can load it)
@@ -869,10 +904,10 @@ class TestSyncEndToEnd(unittest.TestCase):
                 cfg = json.load(f)
             ag = cfg["agent"]
             for k in ("research", "code", "agent", "team",
-                      "agent-plan", "agent-code", "agent-instruct"):
+                      "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
                 self.assertIn(k, ag, f"{k} missing -> roster not rebuilt for a non-reasoning fleet")
             # local agents point at the LIVE model + an existing provider (not a stale ref)
-            for k in ("code", "agent", "agent-plan", "agent-code", "agent-instruct"):
+            for k in ("code", "agent", "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
                 ref = ag[k]["model"]
                 self.assertIn("qwen3-coder-next-fp8", ref, f"{k} not on the live model: {ref}")
                 self.assertIn(ref.split("/", 1)[0], cfg["provider"],
@@ -1025,8 +1060,13 @@ class TestSyncEndToEnd(unittest.TestCase):
             
             args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
             sampling = m.build_sampling(args)
-            with FakeProbes(), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
+            _orig = m.load_default_models
+            m.load_default_models = lambda: default_models
+            try:
+                with FakeProbes(), quiet():
+                    rc = m.oc_sync(args, sampling, {"opencode"})
+            finally:
+                m.load_default_models = _orig
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -1103,16 +1143,22 @@ class TestSyncEndToEnd(unittest.TestCase):
             # No reasoning models live; runtime discovery reports github-copilot/gpt-5.5
             with FakeProbes(model="qwen3-coder-next-fp8",
                             runtime_models=["github-copilot/gpt-5.5", "openai/gpt-5.5"]), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
+                _orig = m.load_default_models
+                m.load_default_models = lambda: default_models
+                try:
+                    rc = m.oc_sync(args, sampling, {"opencode"})
+                finally:
+                    m.load_default_models = _orig
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             # team must switch to the first resolved preference, not preserve openai
             self.assertEqual(cfg["agent"]["team"]["model"], "github-copilot/gpt-5.5")
 
-    def test_team_existing_preserved_when_no_team_pref_resolves(self):
-        """When no team preference resolves, the previous non-DGX team model
-        should still be preserved across re-syncs."""
+    def test_team_falls_back_to_live_local_when_no_remote_pref_resolves(self):
+        """When the team's remote preferences are all unavailable, team lands on a
+        live local model (Qwen-first design), rather than a stale remote. Injects a
+        team pref of only-unavailable remotes so the fallback path is exercised."""
         default_models = {
             "agents": {"team": ["anthropic/claude-opus-4-8"]},  # not available
             "subagents": {}
@@ -1139,12 +1185,17 @@ class TestSyncEndToEnd(unittest.TestCase):
             sampling = m.build_sampling(args)
             with FakeProbes(model="qwen3-coder-next-fp8",
                             runtime_models=["openai/gpt-5.5"]), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
+                _orig = m.load_default_models
+                m.load_default_models = lambda: default_models
+                try:
+                    rc = m.oc_sync(args, sampling, {"opencode"})
+                finally:
+                    m.load_default_models = _orig
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # anthropic pref unavailable, so preserve existing openai choice
-            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+            # No remote pref resolves -> team lands on the live local model, not a stale remote.
+            self.assertEqual(cfg["agent"]["team"]["model"], "dgx-n1-8000/qwen3-coder-next-fp8")
 
     def test_stale_remote_provider_skipped_when_runtime_discovery_succeeds(self):
         """Regression: When runtime discovery succeeds, stale remote providers
@@ -1181,7 +1232,12 @@ class TestSyncEndToEnd(unittest.TestCase):
             sampling = m.build_sampling(args)
             # Runtime discovery reports only openai/gpt-5.5, NOT Anthropic
             with FakeProbes(runtime_models=["openai/gpt-5.5"]), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
+                _orig = m.load_default_models
+                m.load_default_models = lambda: default_models
+                try:
+                    rc = m.oc_sync(args, sampling, {"opencode"})
+                finally:
+                    m.load_default_models = _orig
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -1490,7 +1546,7 @@ class TestCliViews(unittest.TestCase):
             out = _capture(m.cmd_agents, _cli_args(cfg))
             for name in ("research", "code", "agent", "team"):
                 self.assertIn(name, out)
-            self.assertNotIn("agent-plan", out)  # workers are not primaries
+            self.assertNotIn("agent-research", out)  # workers are not primaries
             detail = _capture(m.cmd_agents, _cli_args(cfg, name="team"))
             self.assertIn("agent: team", detail)
             self.assertIn("work-budget", detail)
@@ -1500,9 +1556,11 @@ class TestCliViews(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._synced(tmp)
             out = _capture(m.cmd_subagents, _cli_args(cfg))
-            for w in ("agent-plan", "agent-code", "agent-instruct"):
+            for w in ("agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
                 self.assertIn(w, out)
-            self.assertNotIn("research", out)  # primaries excluded
+            # primaries are excluded from the subagents view (team is primary-only)
+            self.assertNotIn("team", out)
+            self.assertNotIn("\n  research ", out)
 
     def test_models_list_and_role_table(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1591,7 +1649,7 @@ class TestCliMutations(unittest.TestCase):
             with quiet():
                 m.cmd_subagents(_cli_args(cfg, name=None, set_model="anthropic/x"))
             ag = self._load(cfg)["agent"]
-            for w in ("agent-plan", "agent-code", "agent-instruct"):
+            for w in ("agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
                 self.assertEqual(ag[w]["model"], "anthropic/x")
 
     def test_set_model_to_cloud_strips_local_knobs(self):
@@ -2336,7 +2394,7 @@ class TestCopilotSync(unittest.TestCase):
             self._sync(tmp)
             adir = os.path.join(tmp, "agents")
             for name in ("research", "code", "agent", "team",
-                         "agent-plan", "agent-code", "agent-instruct", "agent-review"):
+                         "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review", "agent-review"):
                 self.assertTrue(os.path.exists(os.path.join(adir, f"{name}.agent.md")),
                                 f"{name}.agent.md missing")
             body = open(os.path.join(adir, "code.agent.md"), encoding="utf-8").read()
