@@ -283,7 +283,7 @@ class TestAgentBuilding(unittest.TestCase):
             self.assertIn(agents[k]["permission"].get("edit"), ("ask", "allow"),
                           f"{k} should have edit permission")
             bash = agents[k]["permission"].get("bash")
-            # bash is either the shorthand ("ask") or the merge-gated dict ({"*":"allow", "gh pr merge*":"deny"})
+            # bash is either the shorthand ("ask") or the merge-tripwire dict ({"*":"allow", "*gh pr merge*":"ask"})
             self.assertTrue(bash == "ask" or (isinstance(bash, dict) and bash.get("*") == "allow"),
                             f"{k} should have bash permission")
 
@@ -297,16 +297,17 @@ class TestAgentBuilding(unittest.TestCase):
         self.assertEqual(task, "deny", "agent-code should have task='deny' (no delegation)")
         # agent-code should NOT have task_budget (no delegation)
         self.assertNotIn("task_budget", agents["agent-code"])
-        # But edit/bash permissions should be preserved (full access), except
-        # `gh pr merge*` is denied (only agent-review may merge).
+        # But edit/bash permissions should be preserved (full access), except the
+        # merge tripwire prompts (only agent-review holds the reviewer token to merge).
         self.assertEqual(agents["agent-code"]["permission"].get("edit"), "allow")
         bash = agents["agent-code"]["permission"].get("bash")
         self.assertEqual(bash.get("*"), "allow")
-        self.assertEqual(bash.get("gh pr merge*"), "deny")
+        self.assertEqual(bash.get("*gh pr merge*"), "ask")
 
     def test_only_review_may_merge_and_workers_never_delegate(self):
         # Every worker has task='deny' (no sub-delegation); every agent EXCEPT
-        # agent-review has `gh pr merge*` denied. agent-review keeps plain bash allow.
+        # agent-review carries the merge tripwire (ask). agent-review keeps plain
+        # bash allow (the token split is the real merge control).
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
         agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
         for k in ("agent-research", "agent-code", "agent-test", "agent-instruct",
@@ -320,8 +321,8 @@ class TestAgentBuilding(unittest.TestCase):
                 continue
             bash = a["permission"].get("bash")
             if isinstance(bash, dict):
-                self.assertEqual(bash.get("gh pr merge*"), "deny",
-                                 f"{k} must be denied merge")
+                self.assertEqual(bash.get("*gh pr merge*"), "ask",
+                                 f"{k} must hit the merge tripwire")
 
     def test_architect_is_readonly(self):
         recipe = self._recipe("Qwen3.6-27B-NVFP4")

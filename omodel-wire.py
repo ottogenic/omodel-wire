@@ -1506,14 +1506,20 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         # is correct for the VISIBLE code/agent primaries but not for the workers).
         if is_worker:
             agent["permission"]["task"] = "deny"
-        # Only agent-review may merge. Deny `gh pr merge*` for every other agent so a
-        # coder/tester can open a PR (coder token) but can never merge it.
+        # Merge tripwire. The REAL control that only agent-review can merge is the
+        # TOKEN split: non-reviewer agents don't hold $GH_TOKEN_REVIEWER, and GitHub
+        # rejects an unauthorized/self merge. This bash rule is defense-in-depth ONLY --
+        # it is trivially bypassable (e.g. `GH_TOKEN=x gh pr merge`, extra spaces, or
+        # `cd d && gh pr merge` don't match the glob, since OpenCode matches the parsed
+        # command string). So we set it to "ask" (a visible prompt), not "deny" (false
+        # assurance), and cover the common merge spellings. See opencode.ai/docs/permissions.
         if key != "agent-review":
+            merge_gate = {"*gh pr merge*": "ask", "*gh  pr  merge*": "ask"}
             base_bash = agent["permission"].get("bash")
             if base_bash == "allow":
-                agent["permission"]["bash"] = {"*": "allow", "gh pr merge*": "deny"}
+                agent["permission"]["bash"] = {"*": "allow", **merge_gate}
             elif isinstance(base_bash, dict):
-                base_bash["gh pr merge*"] = "deny"
+                base_bash.update(merge_gate)
         # Reliable sampling lives in the agent config too (correct even without the
         # plugin); the plugin additionally enforces top_k/min_p/penalties/maxOutput.
         if "temperature" in s: agent["temperature"] = s["temperature"]

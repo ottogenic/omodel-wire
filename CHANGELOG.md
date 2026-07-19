@@ -20,9 +20,11 @@ All notable changes to this project are documented here. The format follows
   `agent-review`). Workers never sub-delegate — every worker now has `task: "deny"` and the team
   is the sole orchestrator/courier (escalation flows code → BLOCKED → architect → code through the
   team, never subagent-to-subagent).
-- **Only `agent-review` may merge.** `gh pr merge*` is denied for every other agent via a
-  builder-side permission gate, so a coder/tester can open a PR (coder token) but can never merge
-  it (reviewer token). A new `test` permission profile backs `agent-test`.
+- **Only `agent-review` may merge.** The real control is the **token split** — non-reviewer
+  agents don't hold `$GH_TOKEN_REVIEWER`, so GitHub rejects an unauthorized/self merge. As
+  defense-in-depth, a bash **merge tripwire** (`*gh pr merge*` → `ask`) is added to every other
+  agent; it's a visible prompt, not a hard block (glob matching is bypassable, so `deny` would be
+  false assurance). A new `test` permission profile backs `agent-test`.
 - **`default_models.json` template is now Qwen-first.** Every workhorse agent leads with the local
   `qwen3.6-35b-a3b-nvfp4-unsloth` (≈free at the margin) and falls back to paid GitHub-Copilot
   models only when needed; the two low-volume, high-stakes workers (`agent-architect`,
