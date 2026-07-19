@@ -667,6 +667,19 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertIn("No project specific PR skill found, using global default", m.REVIEW_PROMPT)
         self.assertIn("`pr-review`", m.REVIEW_PROMPT)
 
+    def test_worker_prompts_look_for_optional_project_skill(self):
+        # Every generic/specialist worker prompt tells the worker to load its own
+        # `<agent-name>-project` skill if it exists (optional, absent by default).
+        for prompt in (m.WORKER_PROMPT, m.TEST_PROMPT, m.ARCHITECT_PROMPT):
+            self.assertIn("-project", prompt)
+            self.assertIn("if it does not exist", prompt.lower())
+        # The specialist prompts keep their own guidance AND end with the note last,
+        # so their role instructions aren't buried before it.
+        self.assertIn("NEVER modify", m.TEST_PROMPT)
+        self.assertIn("READ-ONLY planner", m.ARCHITECT_PROMPT)
+        self.assertTrue(m.TEST_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
+        self.assertTrue(m.ARCHITECT_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
+
     def test_writes_agent_runbook_review_skill_globally(self):
         # The runbook-review maintenance pass ships globally so "perform an agent runbook
         # review" works in any repo, and it carries the tested SQLite session-mining recipe.

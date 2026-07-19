@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Optional per-worker project skills.** Every worker prompt now tells the worker to load a
+  repo-local skill named after itself (`<agent-name>-project`, e.g. `agent-code-project`,
+  `agent-architect-project`) IF one exists — the same try-project-first pattern `agent-review`
+  already uses with `pr-review-project`. These skills are absent by default (a no-op line in a
+  fresh repo), hand-authored under `.agents/skills/`, and never written by `omw sync`, so a repo
+  can give one worker repo-specific guidance without bloating the shared global prompt. The
+  `agent-runbook-review` skill now recommends and drafts `agent-<role>-project` skills when it
+  finds recurring role-specific guidance.
 - **Two new subagents — `agent-test` and `agent-architect` — for model-tiered delegation.**
   `agent-test` runs lint/tests and reports structured PASS/FAIL (opening a PR only when explicitly
   asked, and never weakening tests to pass); `agent-architect` is a read-only planner/verifier and

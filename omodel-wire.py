@@ -773,19 +773,33 @@ def team_prompt_text(task_budget=None):
 # vLLM --tool-call-parser qwen3_coder) NARRATE tool calls as text (<invoke .../>, bash(...),
 # etc.) instead of emitting native tool calls -> the parser drops them, the loop exits, and
 # the worker fabricates/leaks (verified on n1: 1/8 vs 15/15 with action-first wording).
+# A shared "optional project skill" note appended to every worker prompt. Each worker
+# looks for a repo-local skill named after ITSELF (`<agent-name>-project`, e.g.
+# `agent-code-project`) that carries this repo's specific guidance. It's OPTIONAL and
+# absent by default -- a fresh repo has none, so the line is a no-op there. Project skills
+# are authored by hand or drafted by the `agent-runbook-review` skill; `omw sync` never
+# writes them (they're repo-specific, unlike the global team/pr-review skills).
+PROJECT_SKILL_NOTE = """
+Before you start, check whether a skill named `<your-own-agent-name>-project` exists (e.g.
+if you are agent-code, look for `agent-code-project`). If it does, load it first -- it holds
+this repo's specific guidance for your role. If it does not exist, skip this and proceed
+normally; it is optional and most repos won't have one.
+"""
+
 # Lead with "call the tools", THEN state the summary rule.
-WORKER_PROMPT = """Complete the task by calling the provided tools. Act, inspect each tool result, then continue until the task is done.
+_WORKER_BASE = """Complete the task by calling the provided tools. Act, inspect each tool result, then continue until the task is done.
 
 When the work is finished, send a final plain-text message that summarizes what you did and includes the concrete results that matter: command output, files changed, key findings, or the exact error if something failed. That final message is the only thing your caller (the orchestrator) receives back, so:
 - Never stop on a bare tool call or an empty message -- always finish with a text summary.
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
 """
+WORKER_PROMPT = _WORKER_BASE + PROJECT_SKILL_NOTE
 
 # Test-worker prompt for agent-test. Extends WORKER_PROMPT (keep the action-first
 # ordering -- see the note above) with two guardrails: never weaken tests to pass, and
 # open a PR only when the delegating instruction explicitly said to.
-TEST_PROMPT = WORKER_PROMPT + """
+TEST_PROMPT = _WORKER_BASE + """
 You run this repo's linters and tests, then report the outcome. Two hard rules:
 - NEVER modify, delete, weaken, or skip tests/assertions to make a run pass. If a test
   fails because of a real defect, report the failure (test name + the relevant output) and
@@ -794,12 +808,12 @@ You run this repo's linters and tests, then report the outcome. Two hard rules:
   Otherwise never run `gh pr create` / git push; just report the test results.
 Your final summary must state PASS or FAIL, the failing test names + output slice, and
 whether a PR was opened (with its number) if you were asked to open one.
-"""
+""" + PROJECT_SKILL_NOTE
 
 # Read-only planner/verifier prompt for agent-architect. It never edits or runs
 # side-effecting commands -- it reads, reasons, and returns a plan. Extends the
 # action-first base so it still inspects via read-only tools before answering.
-ARCHITECT_PROMPT = WORKER_PROMPT + """
+ARCHITECT_PROMPT = _WORKER_BASE + """
 You are the architect: a READ-ONLY planner and verifier on a top-tier model. You do NOT
 edit files or run side-effecting commands -- you read, search, and reason. You are called
 to (a) plan a hard change, (b) verify a result against acceptance criteria, or (c) diagnose
@@ -808,7 +822,7 @@ Your final summary must contain: a NUMBERED plan (or, for a verification, a clea
 PASS/FAIL against each criterion), any RESEARCH REQUESTS the orchestrator should gather,
 and explicit ACCEPTANCE CRITERIA the implementer can check against. Propose the fix; do not
 implement it.
-"""
+""" + PROJECT_SKILL_NOTE
 
 # Review prompt for agent-review. Written next to opencode.json; edit there to tune.
 # This agent handles reviewing Pull Requests and provides feedback to the parent agent.
@@ -950,6 +964,8 @@ Key files a roster-ready repo should have (author first drafts in Phase E if mis
   pr-review / pr-review-project skill, not here.
 - **CHANGELOG.md**, **CONTRIBUTING.md**, **README.md** -- conventional roles.
 - **.agents/skills/pr-review-project/** -- this repo's review specifics (optional but recommended).
+- **.agents/skills/agent-<role>-project/** -- optional per-worker guidance loaded by that worker
+  (e.g. `agent-code-project`); absent by default, authored only when a worker needs repo-specifics.
 
 ## Phase B -- Hygiene & compaction (docs-only)
 For AGENTS.md and each skill: find duplicated guidance, out-of-order sections, and bloat.
@@ -990,12 +1006,24 @@ CURRENT session -- don't trawl the whole DB.
 
 For each recurring failure, propose a **specific note** in the file that would have prevented it --
 e.g. a repeated `gh pr merge` worktree error -> a line in `pr-review-project`; a common code bug ->
-a line in AGENTS.md or the relevant skill. Quote the target file and the exact text to add.
+a line in AGENTS.md or the relevant skill. If the failure is specific to ONE worker's role (e.g.
+agent-code repeatedly mishandles this repo's plugin layout, or agent-test runs the wrong test
+command), prefer a per-role project skill (`agent-<role>-project`, see Phase D) over bloating the
+global worker prompt. Quote the target file and the exact text to add.
 
 ## Phase D -- New project skill?
 From the session, judge whether a recurring workflow deserves its own `.agents/skills/<name>-project`
-skill. Recommend yes/no with one line of justification; if yes, include draft frontmatter
-(`name`, `description`) and a skeleton.
+skill. Two flavours:
+- **Per-role worker skills** (`agent-code-project`, `agent-test-project`, `agent-architect-project`,
+  `agent-research-project`, `agent-instruct-project`): each worker's prompt already tells it to load
+  its own `<agent-name>-project` skill IF one exists, so authoring one is how you give a single
+  worker repo-specific guidance without touching the shared global prompt. Recommend one when a
+  worker keeps needing the same repo-specific instruction. `agent-review` uses `pr-review-project`
+  (its long-standing name), not `agent-review-project`.
+- **Workflow skills** (`<workflow>-project`): a recurring multi-step process worth codifying.
+Recommend yes/no with one line of justification; if yes, include draft frontmatter (`name`,
+`description`) and a skeleton. These are PROJECT skills under `.agents/skills/` -- hand-authored,
+never written by `omw sync`.
 
 ## Phase E -- Author missing key files
 For any key file from Phase A that's absent, draft a first iteration tailored to this repo (infer
