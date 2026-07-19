@@ -6,7 +6,44 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Optional per-worker project skills.** Every worker prompt now tells the worker to load a
+  repo-local skill named after itself (`<agent-name>-project`, e.g. `agent-code-project`,
+  `agent-architect-project`) IF one exists — the same try-project-first pattern `agent-review`
+  already uses with `pr-review-project`. These skills are absent by default (a no-op line in a
+  fresh repo), hand-authored under `.agents/skills/`, and never written by `omw sync`, so a repo
+  can give one worker repo-specific guidance without bloating the shared global prompt. The
+  `agent-runbook-review` skill now recommends and drafts `agent-<role>-project` skills when it
+  finds recurring role-specific guidance.
+- **Two new subagents — `agent-test` and `agent-architect` — for model-tiered delegation.**
+  `agent-test` runs lint/tests and reports structured PASS/FAIL (opening a PR only when explicitly
+  asked, and never weakening tests to pass); `agent-architect` is a read-only planner/verifier and
+  the escalation target when `agent-code` reports BLOCKED. Each has its own system prompt
+  (`prompts/otools-test.md`, `prompts/otools-architect.md`); architect is purple (`#8b5cf6`).
+
 ### Changed
+- **Roster reworked for cost-tiered delegation.** `agent-plan` is renamed to `agent-research`
+  (read-only web fetch + summarize). The team now delegates to six workers
+  (`agent-research`, `agent-code`, `agent-test`, `agent-instruct`, `agent-architect`,
+  `agent-review`). Workers never sub-delegate — every worker now has `task: "deny"` and the team
+  is the sole orchestrator/courier (escalation flows code → BLOCKED → architect → code through the
+  team, never subagent-to-subagent).
+- **Only `agent-review` may merge.** The real control is the **token split** — non-reviewer
+  agents don't hold `$GH_TOKEN_REVIEWER`, so GitHub rejects an unauthorized/self merge. As
+  defense-in-depth, a bash **merge tripwire** (`*gh pr merge*` → `ask`) is added to every other
+  agent; it's a visible prompt, not a hard block (glob matching is bypassable, so `deny` would be
+  false assurance). A new `test` permission profile backs `agent-test`.
+- **`default_models.json` template is now Qwen-first.** Every workhorse agent leads with the local
+  `qwen3.6-35b-a3b-nvfp4-unsloth` (≈free at the margin) and falls back to paid GitHub-Copilot
+  models only when needed; the two low-volume, high-stakes workers (`agent-architect`,
+  `agent-review`) lead with `github-copilot/claude-opus-4.8`.
+- **`team-orchestration` skill expanded** with per-worker delegation contracts (what to ask each
+  worker to return), the escalation loop, session-continuity rules (reuse a worker's own `task_id`;
+  carry payloads across workers rather than sharing task_ids), and an explicit-only git rule: the
+  normal loop stops at working, tested code and never opens a PR / reviews / merges unless the user
+  asks. The global `pr-review` skill notes it runs only on explicit request; this repo's
+  `pr-review-project` skill documents its opt-in aggressive review-and-merge-in-one-pass flow.
+
 - **Every model assignment now applies that model's known-good config — and the redundant
   `--team-model` flag is gone.** Previously only the roster build configured a model correctly;
   `omw agents/subagents --set-model` was a bare string swap and `default_models.json` reassignments

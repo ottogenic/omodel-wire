@@ -42,9 +42,16 @@ class TestLoadDefaultModels(unittest.TestCase):
                 self.assertIn("subagents", result)
                 
                 self.assertEqual(result, m.DEFAULT_MODELS_TEMPLATE)
+                # Workhorse agents lead with the local (~free) Qwen; the two
+                # expensive-but-low-volume workers lead with a top-tier paid model.
+                qwen_first = {"team", "research", "code", "agent",
+                              "agent-research", "agent-code", "agent-test", "agent-instruct"}
                 for section in ("agents", "subagents"):
-                    for preferences in result[section].values():
-                        self.assertEqual(preferences[1], "gemma4-31b-it-nvfp4")
+                    for name, preferences in result[section].items():
+                        if name in qwen_first:
+                            self.assertEqual(preferences[0], "qwen3.6-35b-a3b-nvfp4-unsloth")
+                        else:  # agent-architect, agent-review
+                            self.assertEqual(preferences[0], "github-copilot/claude-opus-4.8")
             finally:
                 m.DEFAULT_MODELS_FILE = original
 

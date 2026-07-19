@@ -45,6 +45,11 @@ fixes, then delegate back to you (reuse the task_id) to re-review. If the review
 plainly: **"No issues found."**
 
 ## 4. Merge — only when the review is clean
+**This repo opts into an aggressive flow:** when the parent delegates a review, you review
+**and** merge if clean in a single pass — no separate merge request is needed. (This is a
+per-repo choice; the global `pr-review` default is review-only until the user explicitly asks
+to merge. Don't "fix" this to match that default.)
+
 If (and only if) there are no issues, merge **as the reviewer account** so the approval is
 genuine two-party review (GitHub lets a different account approve the coder's PR):
 
