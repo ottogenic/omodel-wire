@@ -332,6 +332,19 @@ class TestAgentBuilding(unittest.TestCase):
         self.assertEqual(arch["bash"], "deny")
         self.assertEqual(arch["task"], "deny")
 
+    def test_workers_get_step_caps_primaries_do_not(self):
+        recipe = self._recipe("Qwen3.6-27B-NVFP4")
+        agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
+        # Each worker carries its configured step cap.
+        for key, want in m.WORKER_STEPS.items():
+            self.assertEqual(agents[key].get("steps"), want, f"{key} step cap")
+        # tightest on the well-defined jobs, most headroom on open-ended work.
+        self.assertLess(agents["agent-instruct"]["steps"], agents["agent-code"]["steps"])
+        self.assertLessEqual(agents["agent-test"]["steps"], agents["agent-code"]["steps"])
+        # visible primaries and team are for direct/human use -> no step cap imposed.
+        for key in ("research", "code", "agent", "team"):
+            self.assertNotIn("steps", agents[key], f"{key} should not be step-capped")
+
     def test_thinking_knob_on(self):
         # reason/code/agent are thinking:true -> enable_thinking + graded effort.
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
@@ -679,6 +692,23 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertIn("READ-ONLY planner", m.ARCHITECT_PROMPT)
         self.assertTrue(m.TEST_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
         self.assertTrue(m.ARCHITECT_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
+
+    def test_worker_prompts_carry_exit_contract(self):
+        # Every worker prompt teaches the DONE/CONTINUE/BLOCKED exit statuses so a
+        # step-limit stop becomes a continue-or-escalate signal for the orchestrator.
+        for prompt in (m.WORKER_PROMPT, m.TEST_PROMPT, m.ARCHITECT_PROMPT):
+            for status in ("STATUS: DONE", "STATUS: CONTINUE", "STATUS: BLOCKED"):
+                self.assertIn(status, prompt)
+            self.assertIn("prefer blocked over spinning", prompt.lower())
+
+    def test_team_skill_has_continue_and_escalate_rules(self):
+        # The orchestrator must know to resume a CONTINUE worker (same task_id) and to
+        # escalate a BLOCKED one -- with the anti-spin guard on repeated CONTINUEs.
+        skill = m.TEAM_ORCHESTRATION_SKILL
+        self.assertIn("CONTINUE", skill)
+        self.assertIn("BLOCKED", skill)
+        self.assertIn("same task_id", skill.lower())
+        self.assertIn("anti-spin", skill.lower())
 
     def test_writes_agent_runbook_review_skill_globally(self):
         # The runbook-review maintenance pass ships globally so "perform an agent runbook
