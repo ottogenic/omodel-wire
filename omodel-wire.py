@@ -339,6 +339,20 @@ AGENT_SPECS = [
 # Hidden workers the team may delegate to (its permission.task allowlist).
 TEAM_TARGETS = ["agent-research", "agent-code", "agent-test", "agent-instruct",
                 "agent-architect", "agent-review"]
+# Per-worker `steps` cap (max agentic iterations before OpenCode forces a text-only
+# summary -- see opencode.ai/docs/agents#max-steps). Tightest on the well-defined jobs
+# (instruct/test), most headroom on open-ended work (code/review). This bounds runaway
+# TOOL-ACTION loops; combined with the DONE/CONTINUE/BLOCKED exit contract in the worker
+# prompts, a worker that hits the wall reports back so the team can continue it (same
+# task_id) or escalate to agent-architect. Not set on visible primaries (direct human use).
+WORKER_STEPS = {
+    "agent-instruct":  5,   # one mechanical edit; long iteration = wrong tool
+    "agent-research":  10,  # fetch + read a few sources + summarize (read-only)
+    "agent-test":      12,  # run harness + read result files + report (runaway-prone)
+    "agent-architect": 15,  # read-and-reason across the code, but read-only
+    "agent-code":      20,  # implement/debug: edit -> run -> inspect -> fix cycles
+    "agent-review":    20,  # checkout + run checks + read the whole diff
+}
 # Built-in agents we disable (can't be overridden; replaced by research/code).
 BUILTIN_DISABLE = ["build", "plan"]
 TEAM_COLOR = "#ef4444"   # red -- highest risk (orchestrates, spends $, delegates)
@@ -694,31 +708,39 @@ piece to the right subagent via the `task` tool, and verify what comes back.
 - review / approve / merge a PR -> **agent-review** (only when the user asked; see the git-actions rule)
 
 ## Delegation contracts -- what to ASK each worker to return
+Every worker ends with exactly one status line -- `STATUS: DONE`, `STATUS: CONTINUE`, or
+`STATUS: BLOCKED` (they have a bounded step budget and are told to report rather than spin).
 Put the exact files/paths and the expected return shape in every task. Ask for:
 - **agent-code**: a summary of the change, files touched (`path:line`), commands run + their
-  output, and a final status line of `PASS` or `BLOCKED`. If `BLOCKED`, include exactly what
-  it tried and the failing error.
-- **agent-test**: `PASS`/`FAIL`, the failing test names + the relevant output slice, and
-  whether a PR was opened (with its number) -- it opens one ONLY if you told it to.
+  output, and its `STATUS:` line. If `BLOCKED`, exactly what it tried and the failing error;
+  if `CONTINUE`, its plan and next step.
+- **agent-test**: `PASS`/`FAIL`, the failing test names + the relevant output slice, whether a
+  PR was opened (only if you told it to), and its `STATUS:` line.
 - **agent-architect**: a numbered plan, a list of research requests (if any), and explicit
   acceptance criteria. It never edits.
 - **agent-research**: a short findings summary plus source URLs -- no narration.
 - **agent-instruct**: the concrete result of the one edit it was given.
 
-## Escalation loop (you are the courier -- workers never talk to each other)
-1. Delegate the change to **agent-code** and read its final status.
-2. If it returns `BLOCKED`, do NOT blindly retry. Send its blocked-report to **agent-architect**
-   asking for a *proposed fix* (a plan only -- the architect is read-only).
-3. Hand the architect's plan back to **agent-code** to implement (reuse agent-code's task_id,
-   see continuity below).
-4. Repeat only as needed; if it stays blocked after a plan, surface it to the user.
+## Handling a worker's return -- DONE / CONTINUE / BLOCKED
+You are the courier; workers never talk to each other. Act on the status line:
+1. **`DONE`** -> verify the result against your acceptance criteria, then move on.
+2. **`CONTINUE`** (worker has a working plan, just ran out of steps) -> **re-delegate to the
+   SAME worker with the SAME task_id** and a brief "continue with your plan" -- do NOT restart
+   it and do NOT escalate. It resumes with its context and a fresh step budget.
+3. **`BLOCKED`** (no working hypothesis) -> do NOT blindly retry. Send its blocked-report to
+   **agent-architect** for a *proposed fix* (plan only -- architect is read-only), then hand the
+   architect's plan back to the original worker (its task_id) to implement.
+4. **Anti-spin guard:** if a worker returns `CONTINUE` about **twice without converging**, treat
+   it as `BLOCKED` and escalate to the architect -- a worker that keeps "needing one more round"
+   without progress is stuck, whatever it labels itself. If it stays blocked even after a
+   plan, surface it to the user.
 
 ## Continuity -- calling the task tool and reusing sessions
 - You delegate by CALLING THE `task` TOOL and choosing the worker by its **subagent name**
   (e.g. `agent-code`). Do not `@`-mention -- that does nothing.
 - **Reuse a worker's OWN task_id** to continue with that same worker on the same problem:
-  the revise-retry cycle on agent-code, and re-reviews on agent-review, must reuse their
-  respective task_ids so the worker keeps its context.
+  a `CONTINUE` round, the revise-retry cycle on agent-code, and re-reviews on agent-review must
+  reuse their respective task_ids so the worker keeps its context.
 - **Do NOT share a task_id across different workers.** task_id resumes one worker's session;
   it is not a shared channel. Continuity ACROSS workers (e.g. code <-> architect) is achieved
   by YOU copying the content -- the coder's blocked-report goes into the architect's task
@@ -786,6 +808,25 @@ this repo's specific guidance for your role. If it does not exist, skip this and
 normally; it is optional and most repos won't have one.
 """
 
+# The three-way exit contract every worker ends with. Makes the forced step-limit
+# summary (opencode.ai/docs/agents#max-steps) actionable for the orchestrator: DONE ->
+# verify; CONTINUE -> team re-delegates to the SAME worker (same task_id) to keep going;
+# BLOCKED -> team routes to agent-architect for a fix. The point is to stop workers from
+# spinning: escalating EARLY with a BLOCKED is correct behavior, not failure.
+EXIT_CONTRACT = """
+End every reply with EXACTLY ONE status line, so the orchestrator knows what to do next:
+- `STATUS: DONE` -- the task is complete. Include the concrete results.
+- `STATUS: CONTINUE` -- you have a WORKING PLAN and are making real progress, but ran out of
+  steps (or need another round). Give a ONE-LINE status + your plan + the exact next step you'd
+  take. Do NOT re-summarize everything; the orchestrator will resume you (same session) to keep
+  going.
+- `STATUS: BLOCKED` -- after a few attempts you have NO working hypothesis / are stuck. Give
+  what you tried, the specific question you're stuck on, and what you'd try next. The
+  orchestrator will get you help from the architect. Prefer BLOCKED over spinning -- do NOT keep
+  digging without a hypothesis.
+Use CONTINUE only when you genuinely have a plan and momentum; if you're guessing, that's BLOCKED.
+"""
+
 # Lead with "call the tools", THEN state the summary rule.
 _WORKER_BASE = """Complete the task by calling the provided tools. Act, inspect each tool result, then continue until the task is done.
 
@@ -793,7 +834,7 @@ When the work is finished, send a final plain-text message that summarizes what 
 - Never stop on a bare tool call or an empty message -- always finish with a text summary.
 - Do not just restate the command you ran; include what it RETURNED.
 - If you couldn't complete the task, say so plainly and why.
-"""
+""" + EXIT_CONTRACT
 WORKER_PROMPT = _WORKER_BASE + PROJECT_SKILL_NOTE
 
 # Test-worker prompt for agent-test. Extends WORKER_PROMPT (keep the action-first
@@ -1557,6 +1598,11 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         # Visible code/agent get task_budget to delegate (only to agent-review)
         if key in ("code", "agent"):
             agent["task_budget"] = 1
+        # Per-worker step cap: bound runaway tool-action loops. On the wall OpenCode
+        # forces a text summary, which our DONE/CONTINUE/BLOCKED contract turns into a
+        # continue-or-escalate signal for the team.
+        if key in WORKER_STEPS:
+            agent["steps"] = WORKER_STEPS[key]
         agents[key] = agent
         agent_sampling[key] = _preset_vec(preset, repetition_detection)
 
