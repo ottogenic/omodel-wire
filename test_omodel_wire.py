@@ -640,6 +640,14 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
+    def test_sync_roster_summary_names_current_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp)
+            with FakeProbes():
+                out = _capture(m.oc_sync, args, m.build_sampling(args), {"opencode"})
+            self.assertIn("@agent-research", out)
+            self.assertNotIn("@agent-plan", out)
+
     def test_dry_run_does_not_create_default_models_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             default_models = os.path.join(tmp, "default_models.json")
