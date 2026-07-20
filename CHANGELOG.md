@@ -32,6 +32,8 @@ All notable changes to this project are documented here. The format follows
   (`prompts/otools-test.md`, `prompts/otools-architect.md`); architect is purple (`#8b5cf6`).
 
 ### Changed
+- **Sync roster summary now names the current research worker.** The printed delegation hint says
+  `@agent-research` instead of the retired `@agent-plan` name.
 - **Roster reworked for cost-tiered delegation.** `agent-plan` is renamed to `agent-research`
   (read-only web fetch + summarize). The team now delegates to six workers
   (`agent-research`, `agent-code`, `agent-test`, `agent-instruct`, `agent-architect`,

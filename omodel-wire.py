@@ -2052,7 +2052,7 @@ def _print_roster(agents):
     if hidden:
         print(f"  hidden workers (delegation-only, not in Tab): {', '.join(hidden)}")
     if "team" in agents:
-        print(f"  team delegates via @agent-plan (research) / @agent-code (hard) / "
+        print(f"  team delegates via @agent-research (research) / @agent-code (hard) / "
               f"@agent-instruct (fast); Ctrl+T toggles thinking")
 
 
