@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Per-worker step caps + a DONE/CONTINUE/BLOCKED exit contract, so workers escalate instead of
+  spinning.** Each delegation worker now carries a `steps` cap (agent-instruct 5, agent-research
+  10, agent-test 12, agent-architect 15, agent-code 20, agent-review 20); OpenCode forces a
+  text summary when the cap is hit. Worker prompts end with one of three statuses — `DONE`
+  (finished), `CONTINUE` (working plan, just needs another round), or `BLOCKED` (no working
+  hypothesis) — and the `team-orchestration` skill acts on each: `CONTINUE` → resume the SAME
+  worker (same task_id); `BLOCKED` → route to `agent-architect` for a fix. An anti-spin guard
+  escalates a worker that returns `CONTINUE` ~twice without converging. Visible primaries and
+  `team` are not step-capped (direct human use). Values are sensible defaults; a tuning flag can
+  come later.
 - **Optional per-worker project skills.** Every worker prompt now tells the worker to load a
   repo-local skill named after itself (`<agent-name>-project`, e.g. `agent-code-project`,
   `agent-architect-project`) IF one exists — the same try-project-first pattern `agent-review`
