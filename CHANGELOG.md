@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`team-orchestration` project overlays.** The global Team orchestration skill now tells the
+  Team Lead to load `team-orchestration-project` when a repo provides one, without weakening the
+  global orchestration rules.
 - **Per-worker step caps + a DONE/CONTINUE/BLOCKED exit contract, so workers escalate instead of
   spinning.** Each delegation worker now carries a `steps` cap (agent-instruct 5, agent-research
   10, agent-test 12, agent-architect 15, agent-code 20, agent-review 20); OpenCode forces a
@@ -34,6 +37,8 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - **Sync roster summary now names the current research worker.** The printed delegation hint says
   `@agent-research` instead of the retired `@agent-plan` name.
+- **Architect continuity is explicit.** Same-feature `agent-architect` re-reviews reuse the same
+  architect `task_id`, preserving the original acceptance criteria and avoiding scope expansion.
 - **Roster reworked for cost-tiered delegation.** `agent-plan` is renamed to `agent-research`
   (read-only web fetch + summarize). The team now delegates to six workers
   (`agent-research`, `agent-code`, `agent-test`, `agent-instruct`, `agent-architect`,
