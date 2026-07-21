@@ -266,13 +266,13 @@ class TestApplyDefaultModels(unittest.TestCase):
         """Should use subagents section for subagents."""
         agents = {
             "agent-code": {"model": "dgx-n1-8000/some-model", "mode": "subagent"},
-            "agent-plan": {"model": "dgx-n1-8000/some-model", "mode": "subagent"}
+            "agent-research": {"model": "dgx-n1-8000/some-model", "mode": "subagent"}
         }
         default_models = {
             "agents": {},
             "subagents": {
                 "agent-code": ["model2"],
-                "agent-plan": ["model1"]
+                "agent-research": ["model1"]
             }
         }
         reasoning_caps = {
@@ -287,7 +287,7 @@ class TestApplyDefaultModels(unittest.TestCase):
         result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
         
         self.assertEqual(result["agent-code"]["model"], "dgx-n1-8000/model2")
-        self.assertEqual(result["agent-plan"]["model"], "dgx-n1-8000/model1")
+        self.assertEqual(result["agent-research"]["model"], "dgx-n1-8000/model1")
 
     def test_non_dgx_model_selected_when_remote(self):
         """Should select remote models when in available_models pool."""

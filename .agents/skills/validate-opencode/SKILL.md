@@ -49,8 +49,9 @@ happens to equal the default proves nothing.
      body `options` (`presence_penalty`, `min_p`). **This plugin is load-bearing** — if
      it's absent/`--pure`, those knobs revert to server defaults.
 3. **Map agent → preset** from the generated roster (don't hardcode — derive it):
-   `research`/`agent-plan` → `reason`, `code`/`agent-code` → `code`, `agent` → `agent`,
-   `agent-instruct` → `instruct`, `team` → `reason` (orchestrator). Compare every param.
+   `research`/`agent-research`/`agent-architect`/`agent-review`/`team` → `reason`;
+   `code`/`agent-code`/`agent-test` → `code`; `agent` → `agent`; and
+   `agent-instruct` → `instruct`. Compare every param.
 4. **Expected non-issues:** `min_p = 0.0` is *omitted* from the generated output because
    it equals the vLLM default — a missing `min_p` is not a bug. `temperature`/`top_p`
    appearing in both files (same value) is intentional redundancy.

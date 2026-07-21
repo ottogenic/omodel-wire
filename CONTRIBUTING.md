@@ -19,7 +19,7 @@ Format: `type(scope): summary` in the imperative mood.
 ```
 feat(recipes): add GLM-4.7-Flash preset
 fix(vision): require "blue" in probe answer to avoid false positives
-docs(readme): document --team-reasoning
+docs(agents): document role skill overlays
 chore(cli): add --version flag
 ```
 
@@ -75,7 +75,7 @@ Two standards, split by **how the name is used** — the same split every Python
 not by taste:
 
 - **kebab-case for anything you type at a shell** — the executable (`omodel-wire.py` is
-  invoked directly) and every flag (`--dry-run`, `--team-model`, `--no-vision-probe`).
+  invoked directly) and every flag (`--dry-run`, `--team-task-budget`, `--no-vision-probe`).
   No underscores on the CLI surface.
 - **snake_case for Python files that get imported** — modules and tests
   (`test_omodel_wire.py`, `test_configs.py`). This is **required**, not stylistic:

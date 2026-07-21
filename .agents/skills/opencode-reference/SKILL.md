@@ -70,8 +70,8 @@ An agent is an object under the top-level `agent` block (or a markdown file in
 - Tab/menu **order is not configurable** — it's internal (upstream feature requests
   open). Config object order is written canonically anyway (visible → hidden → disabled).
 - A `team`/orchestrator can receive a local subagent's **empty** last text part instead
-  of its result — the `WORKER_PROMPT` on hidden workers forces a non-empty final summary
-  to dodge this. (Cloud/Anthropic workers are unaffected; local vLLM workers were.)
+  of its result — every generated `agent-*` role skill requires a non-empty final result
+  and status line to dodge this. (Cloud/Anthropic workers are unaffected; local vLLM workers were.)
 - Per-step output is capped at **32k** unless `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX`
   is set (`--write-shell-env` appends it).
 - Anthropic extended thinking uses `options.thinking = {type:"enabled", budgetTokens:N}`

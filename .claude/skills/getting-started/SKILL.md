@@ -107,7 +107,11 @@ With at least one model live (step 3) and OpenCode installed, wire it up:
 omw sync         # probes your live endpoints, reads omm's configs, writes ~/.config/opencode/opencode.json
 ```
 
-`omw sync` writes the OpenCode config + sampling plugin + agent prompts. It builds a roster: visible agents **research / code / agent / team** (Tab-cyclable) and hidden workers **agent-plan / agent-code / agent-instruct / agent-review**. Re-run it any time to reset to the known-good config. Useful flags: `--dry-run` (preview, write nothing), `--hosts`/`--ports` (where to probe), `--team-model REF` (put the team orchestrator on a specific model).
+`omw sync` writes the OpenCode config, sampling plugin, minimal role prompts, and global `agent-*`
+skills. It builds visible agents **research / code / agent / team** and hidden workers
+**agent-research / agent-code / agent-test / agent-instruct / agent-architect / agent-review**.
+Re-run it to reset to known-good. Useful flags: `--dry-run`, `--hosts`/`--ports`, and
+`--team-task-budget N`; model preferences live in `default_models.json`.
 
 Confirm it worked (safe — run these and show output):
 
@@ -124,7 +128,7 @@ opencode         # launch OpenCode; Tab cycles research/code/agent/team
 
 ```bash
 omw agents            # primary agents (research, code, agent, team)
-omw subagents         # hidden workers (agent-plan, agent-code, agent-instruct, agent-review)
+omw subagents         # all six hidden agent-* workers
 omw agents team       # detail for one agent
 ```
 
@@ -152,7 +156,10 @@ If a name maps to more than one host, `--set-model` lists the exact refs to choo
 ```json
 {
   "agents":   { "team": ["unsloth/qwen3-coder-next-fp8", "openai/gpt-5.5"], "research": ["…"], "code": ["…"], "agent": ["…"] },
-  "subagents":{ "agent-plan": ["…"], "agent-code": ["…"], "agent-instruct": ["…"], "agent-review": ["anthropic/claude-opus-4-8"] }
+  "subagents": {
+    "agent-research": ["…"], "agent-code": ["…"], "agent-test": ["…"],
+    "agent-instruct": ["…"], "agent-architect": ["…"], "agent-review": ["github-copilot/claude-opus-4.8"]
+  }
 }
 ```
 

@@ -292,32 +292,26 @@ DEFAULT_REPETITION_DETECTION = {"min_pattern_size": 3, "max_pattern_size": 20, "
 LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provider
 # Agents emitted per recipe. We explicitly override OpenCode's built-in plan/build
 # (full defs, our sampling + permissions). Two tiers:
-#   VISIBLE (Tab, mode primary, NO worker prompt) -- your direct-use agents.
-#   HIDDEN  (mode subagent, WITH worker prompt) -- the team's delegation targets;
-#           kept out of the Tab cycle so your direct agents stay prompt-free.
+#   VISIBLE (Tab, mode primary, provider-default prompt) -- direct-use agents.
+#   HIDDEN  (mode subagent, minimal role-skill bootstrap) -- Team's targets;
+#           role logic is visible under the global skills/ directory.
 # Permission profiles (risk tiers). websearch/webfetch allowed on all.
 #   readonly: no edits/bash/delegation (research only)
 #   ask:      full access but PROMPTS for confirmation on edits/bash
 #   full:     edits/bash run without prompting (autonomous)
-# `team-orchestration` is the team lead's methodology skill (written globally by sync);
-# deny it to every non-team agent so it only surfaces for `team` (team has its own
-# permission block below and does NOT carry this deny).
 PERM = {
     "readonly": {"edit": "deny",  "bash": "deny",  "task": "deny",
-                 "websearch": "allow", "webfetch": "allow",
-                 "skill": {"team-orchestration": "deny"}},
+                 "websearch": "allow", "webfetch": "allow"},
     "ask":      {"edit": "ask",   "bash": "ask",   "websearch": "allow", "webfetch": "allow",
-                 "task": {"*": "deny", "agent-review": "allow"},
-                 "skill": {"team-orchestration": "deny"}},
+                 "task": {"*": "deny", "agent-review": "allow"}},
     "full":     {"edit": "allow", "bash": "allow", "websearch": "allow", "webfetch": "allow",
-                 "task": {"*": "deny", "agent-review": "allow"},
-                 "skill": {"team-orchestration": "deny"}},
-    # `test` is a scoped-full profile for agent-test: edits + bash for running
-    # lint/tests + opening a PR, but it never delegates (workers don't sub-delegate)
-    # and never merges (only agent-review merges -- enforced in oc_build_recipe_agents).
-    "test":     {"edit": "allow", "bash": "allow", "websearch": "allow", "webfetch": "allow",
-                 "task": "deny",
-                 "skill": {"team-orchestration": "deny"}},
+                 "task": {"*": "deny", "agent-review": "allow"}},
+    # Test and review agents may execute checks and inspect git, but never edit the
+    # implementation. Only agent-review receives the reviewer token at runtime.
+    "test":     {"edit": "deny", "bash": "allow", "websearch": "allow", "webfetch": "allow",
+                 "task": "deny"},
+    "review":   {"edit": "deny", "bash": "allow", "websearch": "allow", "webfetch": "allow",
+                 "task": "deny"},
 }
 # Each spec: (key, preset role, mode, is_worker, perm profile, color, description).
 # color = FIXED hex by risk: green (read-only) -> yellow-green (ask) -> orange
@@ -331,10 +325,10 @@ AGENT_SPECS = [
     ("agent",    "agent",  "primary", False, "full",     "#f97316", "autonomous worker, full access (no prompts)"),
     ("agent-research", "reason",   "subagent", True, "readonly", "#22c55e", "[worker] research & data-gathering, read-only + web (fetch/summarize)"),
     ("agent-code",     "code",     "subagent", True, "full",     "#f97316", "[worker] coding / implementation / debugging, full access"),
-    ("agent-test",     "code",     "subagent", True, "test",     "#eab308", "[worker] runs lint/tests, reports results, opens a PR only when asked"),
+    ("agent-test",     "code",     "subagent", True, "test",     "#eab308", "[worker] independently runs lint/tests and reports exact results; never edits"),
     ("agent-instruct", "instruct", "subagent", True, "full",     "#facc15", "[worker] fast mechanical subtasks, no thinking"),
     ("agent-architect","reason",   "subagent", True, "readonly", "#8b5cf6", "[worker] read-only planner/verifier + escalation target for hard problems; returns a plan, research list, and acceptance criteria"),
-    ("agent-review",   "reason",   "subagent", True, "full", "#3b82f6", "[worker] handles reviewing Pull Requests — always re-use task_id when reviewing related PRs in the same session to maintain context"),
+    ("agent-review",   "reason",   "subagent", True, "review", "#3b82f6", "[worker] verifies completed implementations and reviews Pull Requests; classifies findings and never edits"),
 ]
 # Hidden workers the team may delegate to (its permission.task allowlist).
 TEAM_TARGETS = ["agent-research", "agent-code", "agent-test", "agent-instruct",
@@ -631,347 +625,332 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
 
 # System prompt for the `team` lead/orchestrator. Written to a file next to
 # opencode.json and referenced via {file:...}; edit it there to tune behavior.
-TEAM_PROMPT = """You are the Team Lead -- an orchestrator. You have NO tools of your own: you
-cannot read, grep, edit, or run commands -- the ONLY thing you can do is delegate
-by calling the `task` tool. Your job is to break work down, hand each piece to a
-worker, and verify the results they report back.
+ROLE_SKILL_NAMES = {
+    "team": "agent-team",
+    "agent-research": "agent-research",
+    "agent-code": "agent-code",
+    "agent-test": "agent-test",
+    "agent-instruct": "agent-instruct",
+    "agent-architect": "agent-architect",
+    "agent-review": "agent-review",
+}
 
-You delegate by CALLING THE `task` TOOL -- choose a subagent by NAME and give it
-an instruction. Do NOT just type "@agent ..." in your reply; that does nothing.
-You do not format the call yourself: the task tool's schema handles that -- you
-only pick the subagent and write the instruction.
 
-Subagents you can delegate to (use the exact name as the task tool's subagent):
-- agent-research -- research & data-gathering, READ-ONLY (web search/fetch + reading
-                    files). For gathering info and summarizing BEFORE implementation.
-- agent-code     -- capable worker, full edit/shell + reasoning. For anything
-                    non-trivial: implementation, refactors, debugging, investigating.
-- agent-test     -- runs lint/tests and reports structured pass/fail. Opens a PR ONLY
-                    when the user explicitly asked for one. Never weakens tests to pass.
-- agent-instruct -- fast, no-reasoning worker. ONLY for simple, well-specified,
-                    mechanical subtasks: one obvious edit, rename, format, boilerplate.
-- agent-architect-- READ-ONLY planner/verifier on a top-tier model. Ask it to plan a
-                    hard change, verify a result, or -- when agent-code reports BLOCKED --
-                    diagnose and propose a fix. It returns a plan + acceptance criteria;
-                    it never edits. Use it sparingly (it is expensive).
-- agent-review   -- reviews a pull request against the repo's bar. Delegate ONLY when the
-                    user asks to review / approve / merge a PR. It returns issues +
-                    suggested fixes (route those to agent-code, then re-delegate with
-                    the SAME task_id to re-review); it merges only when clean.
-
-You are the ONLY agent that delegates -- subagents never call each other. When agent-code
-is stuck, IT reports back to YOU and YOU courier its report to agent-architect, then hand
-the architect's plan back to agent-code. The normal loop ends at working, tested code:
-do NOT open a PR, review, or merge unless the user explicitly requested that action.
-
-**Before you plan, load the `team-orchestration` skill and follow it** -- it holds how to
-decompose a request, dispatch independent work to subagents in PARALLEL, sequence only
-true dependencies, and verify results. Never edit or run anything yourself; if the request
-is ambiguous, ask one round of clarifying questions before delegating.
+def _role_bootstrap_prompt(agent_name, skill_name):
+    """Minimal system prompt: visible role logic lives in global/project skills."""
+    return f"""You are `{agent_name}`. Before any other work, check the available skills.
+If `{skill_name}-override` is present, load it exclusively; do not load `{skill_name}` or `{skill_name}-extend`.
+Otherwise load `{skill_name}`, then load `{skill_name}-extend` if present.
+Only load exact names shown as available; NEVER probe a missing skill or another role's skills.
+An extend skill is additive and cannot weaken or contradict the global role. Then start the task.
 """
 
 
-# `team-orchestration` skill -- the Team Lead's methodology. Written GLOBALLY by sync to
-# <opencode-config>/skills/team-orchestration/SKILL.md (auto-scanned), and scoped to `team`
-# via permission.skill (see PERM). Thin prompt + this skill = the agent-review/pr-review pattern.
-TEAM_ORCHESTRATION_SKILL = """---
-name: team-orchestration
-description: How the Team Lead decomposes a request into subtasks, dispatches independent work to subagents in PARALLEL, sequences only true dependencies, and verifies results. Load at the start of every request you orchestrate.
+ROLE_PROMPTS = {key: _role_bootstrap_prompt(key, skill)
+                for key, skill in ROLE_SKILL_NAMES.items()}
+ROLE_PROMPT_FILES = {key: f"otools-{skill}.md" for key, skill in ROLE_SKILL_NAMES.items()}
+
+
+WORKER_STATUS_CONTRACT = """
+## Return Contract
+
+Always finish with a non-empty result containing concrete findings, files changed, or command
+results, followed by exactly one status line:
+- `STATUS: DONE` -- assigned work is complete.
+- `STATUS: CONTINUE` -- making progress with a concrete next step; Team should resume this task_id.
+- `STATUS: NEEDS_RESEARCH` -- blocked on specific facts; include a focused `RESEARCH REQUEST:`.
+- `STATUS: BLOCKED` -- no sound path forward; include attempts, error, and the exact blocker.
+
+Do not spin. After about two non-converging attempts, return `BLOCKED`.
+"""
+
+
+FINDING_CLASSIFICATION = """
+## Finding Classification
+
+Classify every finding as exactly one of:
+- `blocker` -- violates caller-provided acceptance criteria or breaks the requested feature.
+- `regression` -- behavior newly broken by the current change.
+- `pre-existing` -- unrelated issue present before this task.
+- `future work` -- valid improvement not required for this request.
+- `out of scope` -- outside the caller's stated goal.
+
+Only `blocker` and `regression` require immediate implementation. Report the other categories
+separately. Never expand acceptance criteria unless the caller explicitly requests a broader audit.
+"""
+
+
+AGENT_TEAM_SKILL = """---
+name: agent-team
+description: Global operating method for the Team orchestrator: route simple work directly, architect medium/high-risk work, coordinate research/coding/review with stable task IDs, enforce scope, and offer the PR workflow after verification.
 ---
 
-# Orchestrating a request
+# Team Orchestration
 
-You are the Team Lead. You do not do the work yourself -- you decompose it, delegate each
-piece to the right subagent via the `task` tool, and verify what comes back.
+You are the delegation-only Team Lead. You do not inspect or modify the workspace yourself. Call
+the `task` tool; never use `@` mentions. Workers do not coordinate directly -- you carry context.
 
-## Project Overlay
+## Intake And Routing
 
-After loading this global skill, check whether the current repository provides a project overlay
-skill named `team-orchestration-project`. If present, load it immediately and treat it as a
-repo-specific overlay on this process.
+1. Restate the goal, explicit acceptance criteria, and scope boundary.
+2. Ask one concise clarification only when ambiguity materially changes the result.
+3. Classify the request:
+   - **Simple:** localized, clear, low-risk change -> send directly to `agent-code`.
+   - **Mechanical:** one obvious edit/rename/format -> `agent-instruct` is optional.
+   - **Medium/high-risk:** design choice, multiple interacting files, unfamiliar runtime/API,
+     persistence/migration, concurrency/security, or unclear implementation -> architect first.
+   - When uncertain, treat it as medium.
 
-The project overlay may add repo-specific routing rules, acceptance criteria, or scope boundaries,
-but it must not weaken or bypass the global orchestration rules.
+## Medium/High-Risk Planning
 
-## The loop
-1. **Restate the goal** in one line and list explicit, checkable acceptance criteria.
-2. **Decompose** into the smallest independent subtasks.
-3. **Parallelize first.** Identify every subtask that does NOT depend on another's output and
-   dispatch them *together* (multiple `task` calls in one turn) rather than one at a time.
-   Prefer a wide first wave of independent work over a serial chain -- this is the single
-   biggest lever on wall-clock time.
-4. **Sequence only true dependencies.** A subtask waits only if it genuinely needs a prior
-   result; everything else runs concurrently.
-5. **Write self-contained instructions.** Each worker cannot see this conversation -- put the
-   exact files/paths, what to do, and the acceptance criteria in the task itself.
-6. **Verify against the criteria.** When workers report back, check their results. If
-   something is missing or wrong, delegate a focused follow-up -- never fix it yourself.
-7. **Summarize** for the user once all criteria are met, plus any follow-ups.
+1. Send `agent-architect` the original goal, preliminary criteria, scope, and known context.
+2. Architect should request focused research for most non-trivial unfamiliar domains.
+3. On `NEEDS_RESEARCH`, dispatch independent questions to `agent-research` in parallel, then
+   resume the same architect `task_id` with results.
+4. Require a final plan, acceptance criteria, scope exclusions, and verification commands.
+5. Give that complete packet to `agent-code`.
 
-## Routing
-- web fetch / data gathering / summarizing docs -> **agent-research** (read-only)
-- implementation / refactors / debugging / anything non-trivial -> **agent-code**
-- running lint/tests + reporting results (and opening a PR only if the user asked) -> **agent-test**
-- one obvious mechanical edit (rename, format, boilerplate) -> **agent-instruct**
-- planning a hard change, verifying a result, or diagnosing a BLOCKED coder -> **agent-architect** (read-only, expensive -- use sparingly)
-- review / approve / merge a PR -> **agent-review** (only when the user asked; see the git-actions rule)
+## Implementation
 
-## Delegation contracts -- what to ASK each worker to return
-Every worker ends with exactly one status line -- `STATUS: DONE`, `STATUS: CONTINUE`, or
-`STATUS: BLOCKED` (they have a bounded step budget and are told to report rather than spin).
-Put the exact files/paths and the expected return shape in every task. Ask for:
-- **agent-code**: a summary of the change, files touched (`path:line`), commands run + their
-  output, and its `STATUS:` line. If `BLOCKED`, exactly what it tried and the failing error;
-  if `CONTINUE`, its plan and next step.
-- **agent-test**: `PASS`/`FAIL`, the failing test names + the relevant output slice, whether a
-  PR was opened (only if you told it to), and its `STATUS:` line.
-- **agent-architect**: a numbered plan, a list of research requests (if any), and explicit
-  acceptance criteria. It never edits.
-- **agent-research**: a short findings summary plus source URLs -- no narration.
-- **agent-instruct**: the concrete result of the one edit it was given.
+- Give coder the goal, plan (if any), criteria, research, paths, scope, and expected checks.
+- On `CONTINUE`, resume the same worker `task_id`.
+- On `NEEDS_RESEARCH`, dispatch research and return it to the same worker `task_id`.
+- On coder `BLOCKED`, resume the same architect `task_id` for that feature with the blocked report,
+  then return its correction to the same coder `task_id`.
+- Two non-converging `CONTINUE` rounds count as `BLOCKED`.
 
-## Handling a worker's return -- DONE / CONTINUE / BLOCKED
-You are the courier; workers never talk to each other. Act on the status line:
-1. **`DONE`** -> verify the result against your acceptance criteria, then move on.
-2. **`CONTINUE`** (worker has a working plan, just ran out of steps) -> **re-delegate to the
-   SAME worker with the SAME task_id** and a brief "continue with your plan" -- do NOT restart
-   it and do NOT escalate. It resumes with its context and a fresh step budget.
-3. **`BLOCKED`** (no working hypothesis) -> do NOT blindly retry. Send its blocked-report to
-   **agent-architect** for a *proposed fix* (plan only -- architect is read-only), then hand the
-   architect's plan back to the original worker (its task_id) to implement.
-4. **Anti-spin guard:** if a worker returns `CONTINUE` about **twice without converging**, treat
-   it as `BLOCKED` and escalate to the architect -- a worker that keeps "needing one more round"
-   without progress is stuck, whatever it labels itself. If it stays blocked even after a
-   plan, surface it to the user.
+## Required Review
 
-## Continuity -- calling the task tool and reusing sessions
-- You delegate by CALLING THE `task` TOOL and choosing the worker by its **subagent name**
-  (e.g. `agent-code`). Do not `@`-mention -- that does nothing.
-- **Reuse a worker's OWN task_id** to continue with that same worker on the same problem:
-  a `CONTINUE` round, the revise-retry cycle on agent-code, architect re-reviews for the same
-  feature, and re-reviews on agent-review must reuse their respective task_ids so the worker keeps
-  its context and original acceptance criteria.
-- **Do NOT share a task_id across different workers.** task_id resumes one worker's session;
-  it is not a shared channel. Continuity ACROSS workers (e.g. code <-> architect) is achieved
-  by YOU copying the content -- the coder's blocked-report goes into the architect's task
-  prompt, and the architect's plan goes into the coder's next task.
+After coder completion, always send `agent-review` this verification packet:
+- original user goal and acceptance criteria;
+- explicit scope boundary and exclusions;
+- architect plan and research, when used;
+- implementation summary and changed files;
+- commands run, exact results, and known pre-existing failures.
 
-## Git actions are explicit-only
-The normal loop ends at working, tested code -- then STOP and report. Do NOT open a PR, run a
-review, or merge unless the user explicitly asked for that action. "Fix this bug" stops at a
-passing fix; only a request like "open a PR and merge when green" triggers the PR -> review ->
-merge chain. (A repo may ship its own project skill that opts into a more autonomous chain;
-this global default stays conservative.)
+When the caller already supplies a complete verification packet, send it directly to reviewer.
+Do not research, inspect, reconstruct, or pre-review it. Do not load task-specific worker skills;
+each delegated worker loads its own role and project guidance.
 
-## Rules
-- You have no read/edit/shell tools -- never try to do the work yourself.
-- Keep every delegated instruction scoped and independently verifiable.
-- Spend your delegation budget (task_budget) on the widest set of independent subtasks that
-  cleanly separate -- don't serialize work that could run in parallel.
-- If the request is ambiguous, ask ONE round of clarifying questions before delegating.
+Reviewer tests/inspects the completed implementation and classifies every finding as `blocker`,
+`regression`, `pre-existing`, `future work`, or `out of scope`. Only blockers and regressions enter
+the immediate fix loop. You are the scope firewall: do not turn other categories into required work.
+Before acting on a report, verify it preserved the supplied criteria, taxonomy, and scope. If the
+reviewer substitutes categories, invents criteria, or blocks unrelated work, resume the same
+reviewer task_id with a correction; do not relay or implement the invalid findings.
+
+Handle blockers/regressions one at a time. Send the exact finding and pass condition to the same
+coder `task_id`; then resume the same reviewer `task_id` with the fix evidence. A re-review checks
+that issue and regressions from its fix -- it does not restart an unbounded audit. Keep each role's
+task_id separate; never pass one worker another worker's task_id. Maintain a short remediation
+ledger with finding, classification, coder task_id, reviewer task_id, and status; never create a
+fresh session for an issue that already has one.
+
+## Completion And Git
+
+When review has no blockers/regressions, summarize the implementation, checks, and separately
+listed non-blocking findings. If the user did not already request a PR, ask whether to create one
+and perform PR review. On approval, resume the coder task_id to branch/commit/push/create the PR,
+then resume the feature's reviewer task_id for PR review. Do not commit, push, open a PR, approve,
+or merge without explicit user authorization. Merge only when explicitly requested or when an
+applicable project role overlay supplies a repo policy authorizing it.
+
+## Routing Reference
+
+- `agent-research`: read-only facts, codebase/doc/web research.
+- `agent-code`: implementation, refactoring, debugging, PR creation when explicitly requested.
+- `agent-test`: independent lint/test execution only.
+- `agent-instruct`: one mechanical change.
+- `agent-architect`: read-only design, criteria, blocker diagnosis.
+- `agent-review`: completed-work verification and PR review; never fixes code.
+
+When the user requests an **agent runbook review**, delegate it to `agent-architect` and explicitly
+tell that task to load `agent-runbook-review` after its normal architect role bootstrap.
 """
 
 
-def _team_skill_path(cfg_path):
-    return os.path.join(os.path.dirname(cfg_path), "skills", "team-orchestration", "SKILL.md")
+AGENT_CODE_SKILL = """---
+name: agent-code
+description: Global implementation rules for agent-code: inspect first, make the smallest correct change, preserve user work, verify it, and return actionable status to Team.
+---
+
+# Code Worker
+
+Implement the exact delegated goal. Inspect project instructions, relevant files, neighboring code,
+dependencies, and existing tests before editing. Do not assume a library or convention exists.
+
+- Prefer the smallest complete change; avoid unrelated refactors and compatibility layers without
+  a concrete persisted/external need.
+- Preserve unrelated dirty-worktree changes. Never revert user work or use destructive git commands.
+- Use specialized read/search/edit tools instead of shell file operations; parallelize independent
+  reads/checks. Keep comments rare and useful.
+- Follow existing style and security practices. Never expose, log, or commit secrets.
+- Run the relevant tests, lint, typecheck, or build commands you can identify. Report exact results.
+- Do not commit, push, open a PR, or merge unless the delegated instruction explicitly requests it.
+- Request missing factual research from Team; do not guess URLs, APIs, versions, or external facts.
+- Report changed files with `path:line` references and explain any unverified risk.
+""" + WORKER_STATUS_CONTRACT
 
 
-def _pr_review_skill_path(cfg_path):
-    return os.path.join(os.path.dirname(cfg_path), "skills", "pr-review", "SKILL.md")
+AGENT_RESEARCH_SKILL = """---
+name: agent-research
+description: Global read-only research rules for agent-research: answer the exact question from local code and authoritative sources, distinguish evidence from inference, and return concise cited findings.
+---
+
+# Research Worker
+
+Answer the delegated questions only. You are read-only: never edit files or run side-effecting
+commands. Search local code first when relevant; use authoritative/current documentation for
+external claims. Never invent URLs, APIs, versions, file contents, or certainty.
+
+- Prefer Glob/Grep/Read for local discovery and WebFetch/search for external sources.
+- Parallelize independent searches.
+- Separate verified facts, reasonable inference, and unresolved uncertainty.
+- Return concise findings, absolute or workspace-relative `path:line` references, and source URLs.
+- If evidence is unavailable or conflicting, state exactly what remains unknown.
+""" + WORKER_STATUS_CONTRACT
+
+
+AGENT_TEST_SKILL = """---
+name: agent-test
+description: Global independent verification rules for agent-test: discover and run the relevant checks, preserve tests and source, and report exact PASS/FAIL evidence.
+---
+
+# Test Worker
+
+Independently verify the delegated implementation. Read project instructions and discover the
+repo's real test/lint/build commands before running them. You may inspect files and execute checks,
+but never edit implementation or tests.
+
+- Never delete, skip, weaken, or rewrite a test/assertion to make it pass.
+- Distinguish failures caused by this change from known/pre-existing environment failures when the
+  available evidence supports that conclusion; do not guess.
+- Report each command, exit result, failing test name, and the shortest useful output excerpt.
+- Do not commit, push, open a PR, approve, or merge.
+""" + WORKER_STATUS_CONTRACT
+
+
+AGENT_INSTRUCT_SKILL = """---
+name: agent-instruct
+description: Global rules for agent-instruct: perform one clear mechanical change with no scope expansion and report the concrete result.
+---
+
+# Mechanical Worker
+
+Perform only the single, explicit mechanical task: rename, formatting, boilerplate, or one obvious
+edit. Inspect the immediate context and preserve style and unrelated work. Use specialized tools,
+avoid destructive git operations, never expose secrets, and run a narrow verification when useful.
+If design judgment, broad debugging, or ambiguous behavior is required, stop and return `BLOCKED`
+instead of inventing scope. Never commit, push, open a PR, or merge unless explicitly instructed.
+""" + WORKER_STATUS_CONTRACT
+
+
+AGENT_ARCHITECT_SKILL = """---
+name: agent-architect
+description: Global read-only architecture rules: research before planning medium/high-risk work, produce bounded implementation criteria, diagnose blocked coders, and verify without expanding scope.
+---
+
+# Architect
+
+You are read-only. Inspect project instructions, relevant code, tests, and supplied evidence; never
+edit files or run side-effecting commands. For unfamiliar medium/high-risk work, request focused
+research before finalizing a plan rather than guessing.
+
+For planning, return:
+1. relevant current-state findings;
+2. focused research requests, or `none`;
+3. a numbered implementation plan;
+4. explicit, checkable acceptance criteria;
+5. scope exclusions and verification commands.
+
+For blocker diagnosis, preserve the feature's original goal and criteria, identify the smallest
+correction, and do not redesign unrelated areas. For verification, use only caller-provided criteria
+and project bars supplied in the task. Broader observations are non-blocking unless classified below.
+""" + FINDING_CLASSIFICATION + WORKER_STATUS_CONTRACT
+
+
+AGENT_REVIEW_SKILL = """---
+name: agent-review
+description: Global reviewer rules for completed implementations and pull requests: verify the supplied acceptance packet, run checks, classify findings, preserve scope, and never edit code.
+---
+
+# Reviewer
+
+Review the completed implementation against the packet from Team: original goal, acceptance
+criteria, scope, plan/research when applicable, changed files, and test evidence. If essential
+context is missing, return `BLOCKED` and list it; do not invent acceptance criteria.
+The caller's criteria, taxonomy, and scope are authoritative. Never rename categories, substitute a
+different review framework, or promote an unrelated observation into a blocking finding.
+
+- Read project instructions and `REVIEW.md`/CONTRIBUTING/CI when relevant.
+- Inspect changed code and callers; run appropriate tests/lint/build checks.
+- Preserve unrelated work; use a clean checkout/worktree and never reset or revert user changes.
+- Check correctness, regressions, invariants, scope creep, stale-branch reversions, secrets, and
+  required tests/changelog entries.
+- Never edit or fix code. Give each finding `path:line`, classification, impact, and concrete pass
+  condition. If clean, say `No blocking findings.`
+- On re-review, check the specified issue and regression surface using the same task_id. Do not
+  restart a broad audit or add acceptance criteria.
+- For PR review, inspect the PR claim and full base diff. Approve or merge only when the user or
+  applicable project extend/override explicitly authorized it, all checks are acceptable, and no
+  blocker/regression remains. Use `GH_TOKEN_REVIEWER`; never push directly to the base branch.
+""" + FINDING_CLASSIFICATION + WORKER_STATUS_CONTRACT
+
+
+ROLE_SKILLS = {
+    "agent-team": AGENT_TEAM_SKILL,
+    "agent-code": AGENT_CODE_SKILL,
+    "agent-research": AGENT_RESEARCH_SKILL,
+    "agent-test": AGENT_TEST_SKILL,
+    "agent-instruct": AGENT_INSTRUCT_SKILL,
+    "agent-architect": AGENT_ARCHITECT_SKILL,
+    "agent-review": AGENT_REVIEW_SKILL,
+}
+
+
+LEGACY_ROLE_ARTIFACTS = (
+    os.path.join("skills", "team-orchestration", "SKILL.md"),
+    os.path.join("skills", "pr-review", "SKILL.md"),
+    os.path.join("prompts", "otools-team.md"),
+    os.path.join("prompts", "otools-worker.md"),
+    os.path.join("prompts", "otools-test.md"),
+    os.path.join("prompts", "otools-architect.md"),
+    os.path.join("prompts", "otools-review.md"),
+)
+
+
+def _role_skill_path(cfg_path, skill_name):
+    return os.path.join(os.path.dirname(cfg_path), "skills", skill_name, "SKILL.md")
+
+
+def _role_prompt_path(cfg_path, agent_name):
+    return os.path.join(os.path.dirname(cfg_path), "prompts", ROLE_PROMPT_FILES[agent_name])
 
 
 def _agent_runbook_skill_path(cfg_path):
     return os.path.join(os.path.dirname(cfg_path), "skills", "agent-runbook-review", "SKILL.md")
 
 
+def _role_skill_permissions(skill_name, exclusive=False):
+    """Expose unrelated workflow skills, but hide every other agent role contract."""
+    rules = {"*": "deny"} if exclusive else {}
+    for other in ROLE_SKILLS:
+        for name in (other, f"{other}-extend", f"{other}-override"):
+            rules[name] = "deny"
+    for name in (skill_name, f"{skill_name}-extend", f"{skill_name}-override"):
+        rules[name] = "allow"
+    return rules
+
+
 def team_prompt_text(task_budget=None):
-    """The team system prompt, with a soft note about the delegation budget so the
-    model knows how many subtasks it can run (OpenCode's task_budget enforces it)."""
-    text = TEAM_PROMPT
+    """Minimal Team bootstrap plus its effective delegation budget."""
+    text = ROLE_PROMPTS["team"].rstrip()
     if task_budget is not None:
-        text += (f"\nDelegation budget: you have up to {task_budget} sub-task delegations per "
-                 f"run -- feel free to use all {task_budget} when the work cleanly separates into "
-                 f"that many independent pieces.\n")
-    return text
-
-
-# Worker system prompt for delegation targets (plan/agent/instruct). Counters the
-# OpenCode local-subagent bug (#18423 / PR #18429) where the orchestrator gets the
-# subagent's LAST text part even when it's empty -- by forcing a non-empty,
-# results-bearing final message. Written next to opencode.json; edit there to tune.
-#
-# ORDERING IS LOAD-BEARING -- do not front-load the "final message must be plain text"
-# instruction. Leading with output/summary framing makes Qwen3-family models (served via
-# vLLM --tool-call-parser qwen3_coder) NARRATE tool calls as text (<invoke .../>, bash(...),
-# etc.) instead of emitting native tool calls -> the parser drops them, the loop exits, and
-# the worker fabricates/leaks (verified on n1: 1/8 vs 15/15 with action-first wording).
-# A shared "optional project skill" note appended to every worker prompt. Each worker
-# looks for a repo-local skill named after ITSELF (`<agent-name>-project`, e.g.
-# `agent-code-project`) that carries this repo's specific guidance. It's OPTIONAL and
-# absent by default -- a fresh repo has none, so the line is a no-op there. Project skills
-# are authored by hand or drafted by the `agent-runbook-review` skill; `omw sync` never
-# writes them (they're repo-specific, unlike the global team/pr-review skills).
-PROJECT_SKILL_NOTE = """
-Before you start, check whether a skill named `<your-own-agent-name>-project` exists (e.g.
-if you are agent-code, look for `agent-code-project`). If it does, load it first -- it holds
-this repo's specific guidance for your role. If it does not exist, skip this and proceed
-normally; it is optional and most repos won't have one.
-"""
-
-# The three-way exit contract every worker ends with. Makes the forced step-limit
-# summary (opencode.ai/docs/agents#max-steps) actionable for the orchestrator: DONE ->
-# verify; CONTINUE -> team re-delegates to the SAME worker (same task_id) to keep going;
-# BLOCKED -> team routes to agent-architect for a fix. The point is to stop workers from
-# spinning: escalating EARLY with a BLOCKED is correct behavior, not failure.
-EXIT_CONTRACT = """
-End every reply with EXACTLY ONE status line, so the orchestrator knows what to do next:
-- `STATUS: DONE` -- the task is complete. Include the concrete results.
-- `STATUS: CONTINUE` -- you have a WORKING PLAN and are making real progress, but ran out of
-  steps (or need another round). Give a ONE-LINE status + your plan + the exact next step you'd
-  take. Do NOT re-summarize everything; the orchestrator will resume you (same session) to keep
-  going.
-- `STATUS: BLOCKED` -- after a few attempts you have NO working hypothesis / are stuck. Give
-  what you tried, the specific question you're stuck on, and what you'd try next. The
-  orchestrator will get you help from the architect. Prefer BLOCKED over spinning -- do NOT keep
-  digging without a hypothesis.
-Use CONTINUE only when you genuinely have a plan and momentum; if you're guessing, that's BLOCKED.
-"""
-
-# Lead with "call the tools", THEN state the summary rule.
-_WORKER_BASE = """Complete the task by calling the provided tools. Act, inspect each tool result, then continue until the task is done.
-
-When the work is finished, send a final plain-text message that summarizes what you did and includes the concrete results that matter: command output, files changed, key findings, or the exact error if something failed. That final message is the only thing your caller (the orchestrator) receives back, so:
-- Never stop on a bare tool call or an empty message -- always finish with a text summary.
-- Do not just restate the command you ran; include what it RETURNED.
-- If you couldn't complete the task, say so plainly and why.
-""" + EXIT_CONTRACT
-WORKER_PROMPT = _WORKER_BASE + PROJECT_SKILL_NOTE
-
-# Test-worker prompt for agent-test. Extends WORKER_PROMPT (keep the action-first
-# ordering -- see the note above) with two guardrails: never weaken tests to pass, and
-# open a PR only when the delegating instruction explicitly said to.
-TEST_PROMPT = _WORKER_BASE + """
-You run this repo's linters and tests, then report the outcome. Two hard rules:
-- NEVER modify, delete, weaken, or skip tests/assertions to make a run pass. If a test
-  fails because of a real defect, report the failure (test name + the relevant output) and
-  stop -- the coding agents fix it, not you.
-- Open a pull request ONLY if the instruction you were given explicitly asks for one.
-  Otherwise never run `gh pr create` / git push; just report the test results.
-Your final summary must state PASS or FAIL, the failing test names + output slice, and
-whether a PR was opened (with its number) if you were asked to open one.
-""" + PROJECT_SKILL_NOTE
-
-# Read-only planner/verifier prompt for agent-architect. It never edits or runs
-# side-effecting commands -- it reads, reasons, and returns a plan. Extends the
-# action-first base so it still inspects via read-only tools before answering.
-ARCHITECT_PROMPT = _WORKER_BASE + """
-You are the architect: a READ-ONLY planner and verifier on a top-tier model. You do NOT
-edit files or run side-effecting commands -- you read, search, and reason. You are called
-to (a) plan a hard change, (b) verify a result against acceptance criteria, or (c) diagnose
-a BLOCKED coder and propose a fix.
-Your final summary must contain: a NUMBERED plan (or, for a verification, a clear
-PASS/FAIL against each criterion), any RESEARCH REQUESTS the orchestrator should gather,
-and explicit ACCEPTANCE CRITERIA the implementer can check against. Propose the fix; do not
-implement it.
-""" + PROJECT_SKILL_NOTE
-
-# Review prompt for agent-review. Written next to opencode.json; edit there to tune.
-# This agent handles reviewing Pull Requests and provides feedback to the parent agent.
-# Two-tier skill load: the PROJECT skill (`pr-review-project`, if the repo ships one) holds
-# repo-specific checks/invariants; the GLOBAL `pr-review` skill (written by `omw sync` to
-# <config-dir>/skills, so it's always present) is the fallback for a fresh repo.
-REVIEW_PROMPT = """You are agent-review -- the pull-request reviewer for whatever repository you're working in.
-
-First try to load the `pr-review-project` skill -- this repo's own review bar (its specific checks, invariants, and what to look for). If that skill does not exist, say exactly "No project specific PR skill found, using global default" and load the global `pr-review` skill instead. Follow whichever skill you loaded end-to-end.
-
-In short: review the open PR against the repo's bar, then hand the parent agent an itemized list of issues, each with a suggested fix. You do NOT fix issues yourself, and you do NOT merge while any remain -- the parent's coding agents apply the fixes and delegate back to you (reuse the task_id) to re-review. Merge ONLY when the review is clean, and only as the REVIEWER account (`GH_TOKEN="$GH_TOKEN_REVIEWER" gh ...`, per the skill).
-
-Your final message is the review report the parent agent acts on.
-"""
-
-# Generic `pr-review` skill -- the repo-agnostic review METHOD for the otools agent roster.
-# Written GLOBALLY by sync to <opencode-config>/skills/pr-review/SKILL.md (auto-scanned), so a
-# FRESH repo with no `pr-review-project` skill still gets a working reviewer. A repo that needs
-# specific checks/invariants ships its own `pr-review-project` skill (see the authoring section
-# below), which agent-review prefers. Thin prompt + this skill = the same pattern as
-# team-orchestration.
-PR_REVIEW_SKILL = """---
-name: pr-review
-description: Generic method for reviewing a pull request with the otools agent roster, used when a repo has no `pr-review-project` skill of its own. Review the open PR, return an itemized list of issues + suggested fixes to the parent agent, and merge (as the reviewer) only when the review is clean.
----
-
-# Review a pull request (generic default)
-
-You are the reviewer for THIS repository. The rule is simple: **review first, hand the findings
-back to the parent agent, and merge only when there is nothing left to fix.** You do **not** fix
-issues yourself -- the parent (coding) agents do that and then ask you to re-review.
-
-This is the GLOBAL default method. If the repo ships a `pr-review-project` skill, that one wins
-(it carries the repo's specific checks and invariants); use this only when it doesn't.
-
-**When this runs:** only when the user explicitly asked to review / approve / merge a PR. This
-skill is not auto-invoked just because a PR exists -- the orchestrator's normal build/fix loop
-stops at working code. A repo may ship a `pr-review-project` skill that opts into a more
-autonomous chain; this global default stays conservative.
-
-## 1. Find the repo's bar
-Look for a repo review bar and adopt it as your standard: a `REVIEW.md` (preferred), else
-`CONTRIBUTING.md` / `README.md` / CI config (`.github/workflows`). It tells you the required
-checks (build/lint/test commands) and the invariants a diff must not break. If none exists, fall
-back to: the change must build, its tests must pass, and it must do only what the PR claims.
-
-## 2. Review the PR (comprehensively -- green tests are necessary, not sufficient)
-- `gh pr view <n>` and `gh pr diff <n>` -- what it *claims* vs. what it *changes*.
-- Get the PR's code and run the repo's checks. Use `gh pr checkout <n>` when the clone has a
-  GitHub remote; if it doesn't (a worktree/clone made from a local path) fetch the ref directly
-  with `git fetch origin pull/<n>/head && git switch --detach FETCH_HEAD`, or if you're already
-  on the PR branch with a clean tree, just run the checks in place.
-- Read the diff yourself, looking for:
-  - **correctness bugs / logic errors** -- trace the changed paths and their callers;
-  - **code quality** -- clarity, matches the surrounding style, no dead code or debug leftovers;
-  - **invariant violations** -- every rule the repo's bar names;
-  - **scope creep** -- unrelated changes or churn beyond the stated intent;
-  - **stale-branch regressions** -- does the diff *revert* something already on the base branch?
-    (a branch cut before a recent merge, committed whole-file, silently undoes it -- rebase and
-    re-check);
-  - **secrets / leaked private info** -- tokens, keys, internal IPs, hostnames, real emails;
-  - **missing tests or changelog entry** (if the repo keeps one).
-
-## 3. Report to the parent agent -- ALWAYS
-Your final message is a review report the parent agent acts on. Return an **itemized** list; for
-each issue give:
-
-> **`file:line` - severity - what's wrong - a concrete suggested fix.**
-
-Do not fix the issues and do not merge while any remain -- the parent's coding agents apply the
-fixes, then delegate back to you (reuse the task_id) to re-review. If the review is clean, say so
-plainly: **"No issues found."**
-
-## 4. Merge -- only when the review is clean
-If (and only if) there are no issues, merge **as the reviewer account** so the approval is
-genuine two-party review (GitHub lets a different account approve the coder's PR):
-
-    GH_TOKEN="$GH_TOKEN_REVIEWER" gh pr review <n> --approve
-    GH_TOKEN="$GH_TOKEN_REVIEWER" gh pr merge  <n> --squash --delete-branch
-
-Conventional-Commit squash title, **no `Co-Authored-By` trailer**. If `$GH_TOKEN_REVIEWER` is
-unset, do **not** self-approve (GitHub blocks it) -- post the summary with `gh pr comment` and
-tell the user to set the reviewer token.
-
-Never push to the base branch directly. Never merge anything touching `LICENSE`, version tags, or
-`.github/` CI without explicit user approval.
-
-## Authoring a `pr-review-project` skill for this repo
-When the user asks to set up project-specific review for a repo, create
-`.agents/skills/pr-review-project/SKILL.md` (YAML frontmatter `name: pr-review-project`) holding
-the repo's *specifics* only -- its exact checks, its invariants (point at REVIEW.md if present),
-and repo-specific gotchas -- while this generic method stays here. Once it exists, agent-review
-loads it first and this global skill is the fallback. For the full "what files a repo should have
-and when to update them" workflow, see the `agent-runbook-review` skill.
-"""
+        text += f" Delegation budget: at most {task_budget} task calls in this run."
+    return text + "\n"
 
 # `agent-runbook-review` skill -- a user-kicked maintenance pass ("perform an agent runbook
-# review"). Written GLOBALLY by sync (like team-orchestration / pr-review) so it's available in
+# review"). Written GLOBALLY by sync alongside the agent-* role skills so it is available in
 # every repo. It compacts the agent-facing docs, mines the CURRENT OpenCode session (incl.
 # subagents, via the SQLite store) for recurring failures, proposes note additions, audits skill
 # sizes, and authors first drafts of missing key files -- REPORT-FIRST, never a silent rewrite.
@@ -1006,17 +985,16 @@ List the agent-facing files and skills and judge their weight. Run `omw skills` 
 table (name, scope, instruction count, size verdict). The size metric = number of normative
 lines (bullets/numbered steps + lines with MUST/NEVER/ALWAYS/DO NOT), excluding frontmatter and
 fenced code. Thresholds: **<=40 lean, 41-80 moderate, >80 LARGE (consider splitting)**. Flag any
-LARGE skill, e.g. "pr-review-project: 104 instructions -- LARGE, consider extracting the merge
+LARGE skill, e.g. "agent-review-extend: 104 instructions -- LARGE, consider extracting the merge
 section into its own skill."
 
 Key files a roster-ready repo should have (author first drafts in Phase E if missing):
 - **AGENTS.md** -- the agent operating manual: invariants, working agreement, and a skill index.
-- **REVIEW.md** -- the review *bar* (checks + invariants). The review *process* lives in the
-  pr-review / pr-review-project skill, not here.
+- **REVIEW.md** -- the review *bar* (checks + invariants). The process lives in the global
+  `agent-review` role skill plus an optional project overlay.
 - **CHANGELOG.md**, **CONTRIBUTING.md**, **README.md** -- conventional roles.
-- **.agents/skills/pr-review-project/** -- this repo's review specifics (optional but recommended).
-- **.agents/skills/agent-<role>-project/** -- optional per-worker guidance loaded by that worker
-  (e.g. `agent-code-project`); absent by default, authored only when a worker needs repo-specifics.
+- **.agents/skills/agent-<role>-extend/** -- optional additive role guidance for this repo.
+- **.agents/skills/agent-<role>-override/** -- optional full role replacement; use sparingly.
 
 ## Phase B -- Hygiene & compaction (docs-only)
 For AGENTS.md and each skill: find duplicated guidance, out-of-order sections, and bloat.
@@ -1056,25 +1034,21 @@ Notes: the store is WAL-mode, so the in-flight session may lag by a message or t
 CURRENT session -- don't trawl the whole DB.
 
 For each recurring failure, propose a **specific note** in the file that would have prevented it --
-e.g. a repeated `gh pr merge` worktree error -> a line in `pr-review-project`; a common code bug ->
+e.g. a repeated `gh pr merge` worktree error -> a line in `agent-review-extend`; a common code bug ->
 a line in AGENTS.md or the relevant skill. If the failure is specific to ONE worker's role (e.g.
 agent-code repeatedly mishandles this repo's plugin layout, or agent-test runs the wrong test
-command), prefer a per-role project skill (`agent-<role>-project`, see Phase D) over bloating the
+command), prefer a per-role project skill (`agent-<role>-extend`, see Phase D) over bloating the
 global worker prompt. Quote the target file and the exact text to add.
 
 ## Phase D -- New project skill?
-From the session, judge whether a recurring workflow deserves its own `.agents/skills/<name>-project`
-skill. Two flavours:
-- **Per-role worker skills** (`agent-code-project`, `agent-test-project`, `agent-architect-project`,
-  `agent-research-project`, `agent-instruct-project`): each worker's prompt already tells it to load
-  its own `<agent-name>-project` skill IF one exists, so authoring one is how you give a single
-  worker repo-specific guidance without touching the shared global prompt. Recommend one when a
-  worker keeps needing the same repo-specific instruction. `agent-review` uses `pr-review-project`
-  (its long-standing name), not `agent-review-project`.
-- **Workflow skills** (`<workflow>-project`): a recurring multi-step process worth codifying.
-Recommend yes/no with one line of justification; if yes, include draft frontmatter (`name`,
-`description`) and a skeleton. These are PROJECT skills under `.agents/skills/` -- hand-authored,
-never written by `omw sync`.
+From the session, judge whether recurring role guidance deserves a project overlay:
+- **Extend** (`agent-code-extend`, `agent-test-extend`, `agent-architect-extend`, etc.) adds
+  repo-specific rules after the global role skill. Prefer this for almost every project.
+- **Override** (`agent-code-override`, etc.) replaces both the global role and extend skill. Use it
+  only when the global role is fundamentally incompatible; restate every required safety rule.
+- **Workflow skills** remain appropriate for reusable task-specific processes not tied to one role.
+Recommend yes/no with one line of justification and include draft frontmatter + skeleton when yes.
+Project skills live under `.agents/skills/`, are hand-authored, and are never written by `omw sync`.
 
 ## Phase E -- Author missing key files
 For any key file from Phase A that's absent, draft a first iteration tailored to this repo (infer
@@ -1568,18 +1542,13 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "options": _preset_options(preset, control, caps),
             "permission": dict(PERM[perm]),
         }
-        # Hidden delegation workers get a system prompt so they return a non-empty
-        # results summary (works around OpenCode #18423). The VISIBLE twins
-        # (research/code/agent) stay prompt-free for clean direct use.
+        # Delegation roles get tiny bootstrap prompts; their visible behavior lives
+        # in global agent-* skills plus optional project extend/override skills.
+        # Visible direct-use agents stay prompt-free and retain OpenCode's provider
+        # default system prompts.
         if is_worker:
-            if key == "agent-review":
-                agent["prompt"] = "{file:./prompts/otools-review.md}"       # PR reviewer/merger
-            elif key == "agent-architect":
-                agent["prompt"] = "{file:./prompts/otools-architect.md}"    # read-only planner/verifier
-            elif key == "agent-test":
-                agent["prompt"] = "{file:./prompts/otools-test.md}"         # test runner/reporter (guardrails)
-            else:
-                agent["prompt"] = "{file:./prompts/otools-worker.md}"       # generic worker
+            agent["prompt"] = f"{{file:./prompts/{ROLE_PROMPT_FILES[key]}}}"
+            agent["permission"]["skill"] = _role_skill_permissions(ROLE_SKILL_NAMES[key])
         # Workers never sub-delegate -- only `team` calls the task tool. Deny it on
         # every worker (the PERM `full`/`readonly` profiles allow agent-review, which
         # is correct for the VISIBLE code/agent primaries but not for the workers).
@@ -1632,7 +1601,7 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "mode": "primary",
             "model": model_ref,
             "color": TEAM_COLOR,
-            "prompt": "{file:./prompts/otools-team.md}",
+            "prompt": f"{{file:./prompts/{ROLE_PROMPT_FILES['team']}}}",
             "options": _preset_options(rp, control, caps),
             # Delegation-only: deny EVERY tool category (incl. the read-only ones --
             # read/grep/glob/list have their own permission keys and default to allow,
@@ -1641,7 +1610,8 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
                            "edit": "deny", "bash": "deny",
                            "webfetch": "deny", "websearch": "deny",
-                           "task": task_map},
+                           "task": task_map,
+                           "skill": _role_skill_permissions(ROLE_SKILL_NAMES["team"], exclusive=True)},
         }
         if "temperature" in rs: team["temperature"] = rs["temperature"]
         if "top_p" in rs: team["top_p"] = rs["top_p"]
@@ -2062,8 +2032,8 @@ def _print_roster(agents):
     if hidden:
         print(f"  hidden workers (delegation-only, not in Tab): {', '.join(hidden)}")
     if "team" in agents:
-        print(f"  team delegates via @agent-research (research) / @agent-code (hard) / "
-              f"@agent-instruct (fast); Ctrl+T toggles thinking")
+        print("  team flow: simple -> agent-code; medium/high -> agent-architect -> "
+              "agent-code; completed -> agent-review")
 
 
 def oc_verify(args):
@@ -2577,41 +2547,19 @@ def oc_sync(args, sampling, detected_installed):
             else:
                 print(f"  team task_budget preserved: {team_budget}")
 
-    # ---- Team orchestrator + worker prompt files ----------------------------
-    team_prompt_path = None
-    team_skill_path = None
-    if args.profiles and "team" in agents:
-        team_prompt_path = os.path.join(os.path.dirname(config_path),
-                                        "prompts", "otools-team.md")
-        # The team's methodology lives in a GLOBAL skill (auto-scanned from
-        # <config-dir>/skills); the thin team prompt tells it to load this.
-        team_skill_path = _team_skill_path(config_path)
+    # ---- Minimal role prompts + visible global role skills -------------------
+    role_prompt_paths, role_skill_paths = {}, {}
+    if args.profiles:
+        for agent_name, skill_name in ROLE_SKILL_NAMES.items():
+            if agent_name not in agents:
+                continue
+            role_prompt_paths[agent_name] = _role_prompt_path(config_path, agent_name)
+            role_skill_paths[skill_name] = _role_skill_path(config_path, skill_name)
     # The runbook-review skill is a user-kicked maintenance pass; write it globally
     # whenever we build a roster so "perform an agent runbook review" works in any repo.
     runbook_skill_path = None
     if args.profiles and agents:
         runbook_skill_path = _agent_runbook_skill_path(config_path)
-    worker_prompt_path = None
-    if args.profiles and any(k in agents for k in TEAM_TARGETS):
-        worker_prompt_path = os.path.join(os.path.dirname(config_path),
-                                          "prompts", "otools-worker.md")
-    test_prompt_path = None
-    if args.profiles and "agent-test" in agents:
-        test_prompt_path = os.path.join(os.path.dirname(config_path),
-                                        "prompts", "otools-test.md")
-    architect_prompt_path = None
-    if args.profiles and "agent-architect" in agents:
-        architect_prompt_path = os.path.join(os.path.dirname(config_path),
-                                             "prompts", "otools-architect.md")
-    review_prompt_path = None
-    pr_review_skill_path = None
-    if args.profiles and "agent-review" in agents:
-        review_prompt_path = os.path.join(os.path.dirname(config_path),
-                                          "prompts", "otools-review.md")
-        # The generic review METHOD lives in a GLOBAL skill (auto-scanned from
-        # <config-dir>/skills); agent-review loads a repo's own `pr-review-project`
-        # first and falls back to this when the repo doesn't ship one.
-        pr_review_skill_path = _pr_review_skill_path(config_path)
 
     # ---- Web search / tool exposure -----------------------------------------
     web_notes = oc_apply_web_search(cfg, args)
@@ -2672,27 +2620,13 @@ def oc_sync(args, sampling, detected_installed):
         if write_plugin:
             print(f"\n--- DRY RUN: would write {plugin_path} ---")
             print(plugin_js)
-        if team_prompt_path:
-            print(f"\n--- DRY RUN: would write {team_prompt_path} ---")
-            print(team_prompt_text(team_budget))
-        if worker_prompt_path:
-            print(f"\n--- DRY RUN: would write {worker_prompt_path} ---")
-            print(WORKER_PROMPT)
-        if test_prompt_path:
-            print(f"\n--- DRY RUN: would write {test_prompt_path} ---")
-            print(TEST_PROMPT)
-        if architect_prompt_path:
-            print(f"\n--- DRY RUN: would write {architect_prompt_path} ---")
-            print(ARCHITECT_PROMPT)
-        if review_prompt_path:
-            print(f"\n--- DRY RUN: would write {review_prompt_path} ---")
-            print(REVIEW_PROMPT)
-        if team_skill_path:
-            print(f"\n--- DRY RUN: would write {team_skill_path} ---")
-            print(TEAM_ORCHESTRATION_SKILL)
-        if pr_review_skill_path:
-            print(f"\n--- DRY RUN: would write {pr_review_skill_path} ---")
-            print(PR_REVIEW_SKILL)
+        for agent_name, prompt_path in role_prompt_paths.items():
+            print(f"\n--- DRY RUN: would write {prompt_path} ---")
+            print(team_prompt_text(team_budget) if agent_name == "team"
+                  else ROLE_PROMPTS[agent_name])
+        for skill_name, skill_path in role_skill_paths.items():
+            print(f"\n--- DRY RUN: would write {skill_path} ---")
+            print(ROLE_SKILLS[skill_name])
         if runbook_skill_path:
             print(f"\n--- DRY RUN: would write {runbook_skill_path} ---")
             print(AGENT_RUNBOOK_REVIEW_SKILL)
@@ -2750,23 +2684,18 @@ def oc_sync(args, sampling, detected_installed):
         except OSError:
             pass
 
-    if team_prompt_path:
-        os.makedirs(os.path.dirname(team_prompt_path), exist_ok=True)
-        with open(team_prompt_path, "w") as f:
-            f.write(team_prompt_text(team_budget))
-        print(f"Wrote {team_prompt_path}")
+    for agent_name, prompt_path in role_prompt_paths.items():
+        os.makedirs(os.path.dirname(prompt_path), exist_ok=True)
+        with open(prompt_path, "w") as f:
+            f.write(team_prompt_text(team_budget) if agent_name == "team"
+                    else ROLE_PROMPTS[agent_name])
+        print(f"Wrote {prompt_path}")
 
-    if team_skill_path:
-        os.makedirs(os.path.dirname(team_skill_path), exist_ok=True)
-        with open(team_skill_path, "w") as f:
-            f.write(TEAM_ORCHESTRATION_SKILL)
-        print(f"Wrote {team_skill_path}")
-
-    if pr_review_skill_path:
-        os.makedirs(os.path.dirname(pr_review_skill_path), exist_ok=True)
-        with open(pr_review_skill_path, "w") as f:
-            f.write(PR_REVIEW_SKILL)
-        print(f"Wrote {pr_review_skill_path}")
+    for skill_name, skill_path in role_skill_paths.items():
+        os.makedirs(os.path.dirname(skill_path), exist_ok=True)
+        with open(skill_path, "w") as f:
+            f.write(ROLE_SKILLS[skill_name])
+        print(f"Wrote {skill_path}")
 
     if runbook_skill_path:
         os.makedirs(os.path.dirname(runbook_skill_path), exist_ok=True)
@@ -2774,29 +2703,22 @@ def oc_sync(args, sampling, detected_installed):
             f.write(AGENT_RUNBOOK_REVIEW_SKILL)
         print(f"Wrote {runbook_skill_path}")
 
-    if worker_prompt_path:
-        os.makedirs(os.path.dirname(worker_prompt_path), exist_ok=True)
-        with open(worker_prompt_path, "w") as f:
-            f.write(WORKER_PROMPT)
-        print(f"Wrote {worker_prompt_path}")
-
-    if test_prompt_path:
-        os.makedirs(os.path.dirname(test_prompt_path), exist_ok=True)
-        with open(test_prompt_path, "w") as f:
-            f.write(TEST_PROMPT)
-        print(f"Wrote {test_prompt_path}")
-
-    if architect_prompt_path:
-        os.makedirs(os.path.dirname(architect_prompt_path), exist_ok=True)
-        with open(architect_prompt_path, "w") as f:
-            f.write(ARCHITECT_PROMPT)
-        print(f"Wrote {architect_prompt_path}")
-
-    if review_prompt_path:
-        os.makedirs(os.path.dirname(review_prompt_path), exist_ok=True)
-        with open(review_prompt_path, "w") as f:
-            f.write(REVIEW_PROMPT)
-        print(f"Wrote {review_prompt_path}")
+    # Remove only artifacts generated by the retired prompt/skill layout. Project
+    # overlays are never touched.
+    root = os.path.dirname(config_path)
+    for relpath in LEGACY_ROLE_ARTIFACTS if args.profiles else ():
+        stale = os.path.join(root, relpath)
+        if not os.path.exists(stale):
+            continue
+        try:
+            os.remove(stale)
+            print(f"Removed stale {stale}")
+            try:
+                os.rmdir(os.path.dirname(stale))
+            except OSError:
+                pass
+        except OSError:
+            pass
 
     _warn_missing_gh_tokens()
     print("Restart / reload OpenCode to pick up the changes.")
@@ -3198,29 +3120,31 @@ COPILOT_BODIES = {
         "for -- read files, search, fetch docs/web -- and return a concrete, self-contained summary "
         "with sources. Do not edit files or run commands with side effects."),
     "agent-code": (
-        "You are a full-access implementation worker. Complete the assigned change end to end and verify "
-        "it. Your final message must state what you changed and the concrete result: command output, "
-        "files touched, or the exact error if it failed, plus a final PASS or BLOCKED status."),
+        "You are the implementation worker. Inspect project instructions and surrounding code first; "
+        "make the smallest correct change, preserve unrelated work, avoid secrets, and run relevant "
+        "checks. Never commit or open a PR unless explicitly asked. Return files changed, exact test "
+        "results, and DONE, CONTINUE, NEEDS_RESEARCH, or BLOCKED."),
     "agent-test": (
-        "You run this repo's linters and tests and report the outcome. Never modify or weaken tests to "
-        "make a run pass -- report real failures instead. Open a PR only if explicitly asked. Report "
-        "PASS/FAIL, failing test names + output, and any PR number."),
+        "You independently run this repo's relevant lint, test, typecheck, and build commands. Never edit "
+        "source or weaken tests. Report each command, PASS/FAIL, failing names, and useful output."),
     "agent-instruct": (
         "You are a fast worker for simple, well-specified, mechanical tasks (one obvious edit, rename, "
         "format, boilerplate). Do exactly what's asked and report the concrete result."),
     "agent-architect": (
-        "You are a read-only architect: plan hard changes, verify results against acceptance criteria, "
-        "or diagnose a blocked coder and propose a fix. Return a numbered plan, any research requests, "
-        "and explicit acceptance criteria. You never edit files or run side-effecting commands."),
+        "You are a read-only architect. Research before planning unfamiliar medium/high-risk work; return "
+        "a bounded numbered plan, research requests, acceptance criteria, scope exclusions, and checks. "
+        "Diagnose blocked coders without expanding the original goal."),
+    "agent-review": (
+        "You are a read-only implementation and PR reviewer. Verify the caller's goal, acceptance criteria, "
+        "scope, diff, and tests. Classify findings as blocker, regression, pre-existing, future work, or "
+        "out of scope; only blocker/regression require immediate fixes. Never edit. Approve or merge only "
+        "when explicitly authorized and no blocking finding remains."),
     "team": (
-        "You are the Team Lead -- an orchestrator. Break the request into the smallest independent "
-        "pieces and delegate each to the specialist subagent that fits: research -> agent-research, "
-        "implementation -> agent-code, tests -> agent-test, mechanical edits -> agent-instruct, hard "
-        "planning/verification -> agent-architect, PR review -> agent-review. Verify their results "
-        "against explicit acceptance criteria before reporting back, and prefer dispatching independent "
-        "work in parallel. Do not open a PR, review, or merge unless the user explicitly asked. Copilot "
-        "routes delegation for you based on each subagent's description, so keep every delegated "
-        "instruction scoped and self-contained."),
+        "You are the Team Lead. Send simple low-risk work to agent-code; send medium/high-risk work to "
+        "agent-architect for research, plan, criteria, and scope before coding. Courier research and "
+        "blocked reports while reusing each role's session. After coding, always send the complete goal, "
+        "criteria, scope, changes, and test evidence to agent-review. Fix blockers/regressions one at a "
+        "time; keep other findings separate. When verified, ask whether to open a PR and perform PR review."),
 }
 
 
@@ -3232,11 +3156,11 @@ COPILOT_DESCRIPTIONS = {
     "agent": "Autonomous coding with full access: take a task end to end -- edit, run, and verify.",
     "agent-research": "Read-only research/data-gathering worker: fetch docs/web, gather information, return a concrete summary with sources; no edits.",
     "agent-code": "Full-access implementation worker: complete a change end to end and verify it.",
-    "agent-test": "Runs lint/tests and reports pass/fail; opens a PR only when asked; never weakens tests to pass.",
+    "agent-test": "Independent verification worker: runs lint/tests and reports exact pass/fail evidence; never edits source or tests.",
     "agent-instruct": "Fast worker for simple, well-specified mechanical edits (rename, format, boilerplate).",
     "agent-architect": "Read-only planner/verifier and escalation target: plans hard changes, verifies results, diagnoses blocked coders; no edits.",
-    "agent-review": "Reviews a pull request against the repo's bar and reports issues + suggested fixes; invoke it explicitly for PR review / approve / merge.",
-    "team": "Lead orchestrator: decompose a request, delegate pieces to the specialist subagents, and verify results.",
+    "agent-review": "Reviews completed implementations and PRs against supplied criteria; classifies findings and never edits.",
+    "team": "Lead orchestrator: routes by risk, coordinates planning/research/coding, and verifies every completed implementation through review.",
 }
 
 
@@ -3248,7 +3172,7 @@ def copilot_build_agents():
     isn't auto-dispatched -- the closest Copilot has to "only the team delegates to review"."""
     out = {}
     for key, prole, mode, is_worker, perm, color, sdesc in AGENT_SPECS:
-        body = REVIEW_PROMPT if key == "agent-review" else COPILOT_BODIES.get(key, sdesc)
+        body = COPILOT_BODIES.get(key, sdesc)
         dmi = True if key == "agent-review" else None
         out[f"{key}.agent.md"] = _copilot_agent_md(
             name=key, description=COPILOT_DESCRIPTIONS.get(key, sdesc.replace("[worker] ", "")),
@@ -4176,7 +4100,7 @@ def _set_work_budget(cfg_path, cfg, agents, n):
         print("no `team` agent in this config (nothing delegates).", file=sys.stderr)
         sys.exit(1)
     team["task_budget"] = n
-    tp = os.path.join(os.path.dirname(cfg_path), "prompts", "otools-team.md")
+    tp = _role_prompt_path(cfg_path, "team")
     os.makedirs(os.path.dirname(tp), exist_ok=True)
     with open(tp, "w", encoding="utf-8") as f:
         f.write(team_prompt_text(n))
