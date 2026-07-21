@@ -232,20 +232,24 @@ class TestAgentBuilding(unittest.TestCase):
             self.assertIn(k, agents, f"missing agent {k}")
             self.assertEqual(agents[k]["model"], self.REF)
 
-        # visible agents carry no worker prompt; hidden workers do.
+        # Visible direct-use agents retain OpenCode defaults; every delegation role
+        # gets its own minimal role-skill bootstrap prompt.
         for k in ("research", "code", "agent"):
             self.assertNotIn("prompt", agents[k], f"visible {k} should be prompt-free")
-        # generic workers use the worker prompt; the specialists have their own.
-        for k in ("agent-research", "agent-code", "agent-instruct"):
-            self.assertEqual(agents[k].get("prompt"), "{file:./prompts/otools-worker.md}")
-        self.assertEqual(agents["agent-test"].get("prompt"), "{file:./prompts/otools-test.md}")
-        self.assertEqual(agents["agent-architect"].get("prompt"), "{file:./prompts/otools-architect.md}")
-        self.assertEqual(agents["agent-review"].get("prompt"), "{file:./prompts/otools-review.md}")
+        for k in m.TEAM_TARGETS:
+            expected = f"{{file:./prompts/{m.ROLE_PROMPT_FILES[k]}}}"
+            self.assertEqual(agents[k].get("prompt"), expected)
+        self.assertEqual(
+            agents["team"].get("prompt"),
+            f"{{file:./prompts/{m.ROLE_PROMPT_FILES['team']}}}",
+        )
 
         # permission tiers landed on the right agents
         self.assertEqual(agents["research"]["permission"]["edit"], "deny")
         self.assertEqual(agents["code"]["permission"]["edit"], "ask")
         self.assertEqual(agents["agent"]["permission"]["edit"], "allow")
+        self.assertEqual(agents["agent-test"]["permission"]["edit"], "deny")
+        self.assertEqual(agents["agent-review"]["permission"]["edit"], "deny")
 
         # sampling from the 27B card: reason=1.0, code/agent=0.6
         self.assertEqual(agents["research"]["temperature"], 1.0)
@@ -640,13 +644,14 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(entry["tool_call"])
             self.assertTrue(entry["reasoning"])
 
-    def test_sync_roster_summary_names_current_workers(self):
+    def test_sync_roster_summary_describes_current_workflow(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = make_args(tmp)
             with FakeProbes():
                 out = _capture(m.oc_sync, args, m.build_sampling(args), {"opencode"})
-            self.assertIn("@agent-research", out)
-            self.assertNotIn("@agent-plan", out)
+            self.assertIn("simple -> agent-code", out)
+            self.assertIn("medium/high -> agent-architect", out)
+            self.assertIn("completed -> agent-review", out)
 
     def test_dry_run_does_not_create_default_models_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -661,70 +666,72 @@ class TestSyncEndToEnd(unittest.TestCase):
             finally:
                 m.DEFAULT_MODELS_FILE = old_default_models
 
-    def test_writes_team_orchestration_skill_globally(self):
+    def test_writes_all_role_skills_and_bootstrap_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)
-            skill = os.path.join(tmp, "skills", "team-orchestration", "SKILL.md")
-            self.assertTrue(os.path.exists(skill), "team-orchestration SKILL.md not written")
-            body = open(skill, encoding="utf-8").read()
-            self.assertIn("name: team-orchestration", body)   # frontmatter -> discoverable
-            self.assertIn("PARALLEL", body)                    # the batching guidance
+            for agent_name, skill_name in m.ROLE_SKILL_NAMES.items():
+                skill = os.path.join(tmp, "skills", skill_name, "SKILL.md")
+                prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES[agent_name])
+                self.assertTrue(os.path.exists(skill), f"{skill_name} skill not written")
+                self.assertTrue(os.path.exists(prompt), f"{agent_name} prompt not written")
+                with open(skill, encoding="utf-8") as f:
+                    self.assertIn(f"name: {skill_name}", f.read())
+                with open(prompt, encoding="utf-8") as f:
+                    body = f.read()
+                self.assertIn(f"`{skill_name}-override`", body)
+                self.assertIn(f"`{skill_name}`", body)
+                self.assertIn(f"`{skill_name}-extend`", body)
+                self.assertLess(body.index(f"`{skill_name}-override`"),
+                                body.index(f"`{skill_name}-extend`"))
+                self.assertIn("load it exclusively", body)
+                self.assertIn("cannot weaken or contradict", body)
+                self.assertIn("NEVER probe a missing skill", body)
+                self.assertEqual(len(body.splitlines()), 5, "bootstrap prompt should stay five lines")
 
-    def test_writes_pr_review_skill_globally(self):
-        # The generic pr-review method ships as a GLOBAL skill so a fresh repo (with no
-        # pr-review-project skill) still has a working reviewer.
+    def test_worker_role_skills_carry_return_contract(self):
+        for name in ("agent-code", "agent-research", "agent-test", "agent-instruct",
+                     "agent-architect", "agent-review"):
+            skill = m.ROLE_SKILLS[name]
+            for status in ("STATUS: DONE", "STATUS: CONTINUE", "STATUS: NEEDS_RESEARCH",
+                           "STATUS: BLOCKED"):
+                self.assertIn(status, skill)
+            self.assertIn("Do not spin", skill)
+
+    def test_team_skill_encodes_full_workflow_and_continuity(self):
+        skill = m.AGENT_TEAM_SKILL
+        for text in ("Simple", "Medium/high-risk", "architect first", "NEEDS_RESEARCH",
+                     "Required Review", "verification packet", "one at a time",
+                     "same reviewer `task_id`", "remediation", "scope firewall",
+                     "ask whether to create one"):
+            self.assertIn(text, skill)
+        self.assertIn("send it directly to reviewer", skill)
+        self.assertIn("Do not research, inspect, reconstruct, or pre-review it", skill)
+        self.assertIn("same architect `task_id`", skill)
+        self.assertIn("same coder `task_id`", skill)
+        self.assertIn("substitutes categories", skill)
+        self.assertIn("do not relay or implement", skill)
+        self.assertIn("agent runbook review", skill)
+        self.assertIn("load `agent-runbook-review`", skill)
+
+    def test_architect_and_reviewer_classify_without_expanding_scope(self):
+        for skill in (m.AGENT_ARCHITECT_SKILL, m.AGENT_REVIEW_SKILL):
+            for category in ("blocker", "regression", "pre-existing", "future work",
+                             "out of scope"):
+                self.assertIn(f"`{category}`", skill)
+            self.assertIn("Only `blocker` and `regression` require immediate implementation", skill)
+            self.assertIn("Never expand acceptance criteria", skill)
+        self.assertIn("Never rename categories", m.AGENT_REVIEW_SKILL)
+
+    def test_removes_retired_generated_role_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
+            for relpath in m.LEGACY_ROLE_ARTIFACTS:
+                path = os.path.join(tmp, relpath)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("stale")
             self._sync(tmp)
-            skill = os.path.join(tmp, "skills", "pr-review", "SKILL.md")
-            self.assertTrue(os.path.exists(skill), "pr-review SKILL.md not written")
-            body = open(skill, encoding="utf-8").read()
-            self.assertIn("name: pr-review", body)             # frontmatter -> discoverable
-            self.assertIn("pr-review-project", body)           # points at the project override
-            self.assertIn("Authoring", body)                   # how to add a project skill
-
-    def test_review_prompt_prefers_project_skill_with_global_fallback(self):
-        # agent-review must try the repo's own skill first, then announce + fall back to global.
-        self.assertIn("pr-review-project", m.REVIEW_PROMPT)
-        self.assertIn("No project specific PR skill found, using global default", m.REVIEW_PROMPT)
-        self.assertIn("`pr-review`", m.REVIEW_PROMPT)
-
-    def test_worker_prompts_look_for_optional_project_skill(self):
-        # Every generic/specialist worker prompt tells the worker to load its own
-        # `<agent-name>-project` skill if it exists (optional, absent by default).
-        for prompt in (m.WORKER_PROMPT, m.TEST_PROMPT, m.ARCHITECT_PROMPT):
-            self.assertIn("-project", prompt)
-            self.assertIn("if it does not exist", prompt.lower())
-        # The specialist prompts keep their own guidance AND end with the note last,
-        # so their role instructions aren't buried before it.
-        self.assertIn("NEVER modify", m.TEST_PROMPT)
-        self.assertIn("READ-ONLY planner", m.ARCHITECT_PROMPT)
-        self.assertTrue(m.TEST_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
-        self.assertTrue(m.ARCHITECT_PROMPT.rstrip().endswith(m.PROJECT_SKILL_NOTE.rstrip()))
-
-    def test_worker_prompts_carry_exit_contract(self):
-        # Every worker prompt teaches the DONE/CONTINUE/BLOCKED exit statuses so a
-        # step-limit stop becomes a continue-or-escalate signal for the orchestrator.
-        for prompt in (m.WORKER_PROMPT, m.TEST_PROMPT, m.ARCHITECT_PROMPT):
-            for status in ("STATUS: DONE", "STATUS: CONTINUE", "STATUS: BLOCKED"):
-                self.assertIn(status, prompt)
-            self.assertIn("prefer blocked over spinning", prompt.lower())
-
-    def test_team_skill_has_continue_and_escalate_rules(self):
-        # The orchestrator must know to resume a CONTINUE worker (same task_id) and to
-        # escalate a BLOCKED one -- with the anti-spin guard on repeated CONTINUEs.
-        skill = m.TEAM_ORCHESTRATION_SKILL
-        self.assertIn("CONTINUE", skill)
-        self.assertIn("BLOCKED", skill)
-        self.assertIn("same task_id", skill.lower())
-        self.assertIn("architect re-reviews for the same", skill.lower())
-        self.assertIn("original acceptance criteria", skill.lower())
-        self.assertIn("anti-spin", skill.lower())
-
-    def test_team_skill_loads_project_overlay_without_weakening_globals(self):
-        skill = m.TEAM_ORCHESTRATION_SKILL
-        self.assertIn("Project Overlay", skill)
-        self.assertIn("team-orchestration-project", skill)
-        self.assertIn("must not weaken or bypass", skill.lower())
+            for relpath in m.LEGACY_ROLE_ARTIFACTS:
+                self.assertFalse(os.path.exists(os.path.join(tmp, relpath)))
 
     def test_writes_agent_runbook_review_skill_globally(self):
         # The runbook-review maintenance pass ships globally so "perform an agent runbook
@@ -739,15 +746,18 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("parent_id", body)                    # subagent linkage
             self.assertIn("Runbook Review Report", body)        # report-first output
 
-    def test_team_orchestration_scoped_to_team_only(self):
+    def test_role_skills_are_scoped_to_their_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             ag = self._sync(tmp)["agent"]
-            # every non-team agent denies the team skill...
-            for k in ("research", "code", "agent", "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review",
-                      "agent-instruct", "agent-review"):
-                self.assertEqual(ag[k]["permission"]["skill"], {"team-orchestration": "deny"})
-            # ...and team does NOT (so it alone can load it)
-            self.assertNotIn("skill", ag["team"]["permission"])
+            for agent_name, own_skill in m.ROLE_SKILL_NAMES.items():
+                rules = ag[agent_name]["permission"]["skill"]
+                if agent_name == "team":
+                    self.assertEqual(rules["*"], "deny")
+                self.assertEqual(rules[own_skill], "allow")
+                self.assertEqual(rules[f"{own_skill}-extend"], "allow")
+                self.assertEqual(rules[f"{own_skill}-override"], "allow")
+                for other in set(m.ROLE_SKILLS) - {own_skill}:
+                    self.assertEqual(rules[other], "deny")
 
     def test_writes_git_identity_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1531,8 +1541,10 @@ class TestSkillsCommand(unittest.TestCase):
             out = _capture(m.cmd_skills, _cli_args(cfg, name=None))
             self.assertIn("SKILL", out)
             self.assertIn("agent-runbook-review", out)
-            self.assertIn("pr-review", out)
-            self.assertIn("team-orchestration", out)
+            for skill_name in m.ROLE_SKILLS:
+                self.assertIn(skill_name, out)
+            self.assertNotIn("team-orchestration", out)
+            self.assertNotIn("pr-review", out)
             self.assertIn("global", out)            # scope column
 
     def test_pretty_prints_one_skill(self):
@@ -1748,8 +1760,12 @@ class TestCliMutations(unittest.TestCase):
             with quiet():
                 m.cmd_agents(_cli_args(cfg, name=None, set_model=None, set_work_budget=7))
             self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 7)
-            with open(os.path.join(tmp, "prompts", "otools-team.md"), encoding="utf-8") as f:
-                self.assertIn("7", f.read())
+            prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES["team"])
+            with open(prompt, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("7", body)
+            self.assertEqual(len(body.splitlines()), 5)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "prompts", "otools-team.md")))
 
     def test_set_model_temperature_hits_all_role_agents_and_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:

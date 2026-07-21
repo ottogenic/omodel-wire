@@ -26,14 +26,15 @@ Top-to-bottom, the meaningful sections:
   - `PERM`: permission tiers `readonly` / `ask` / `full` (edit/bash/task/web policy).
   - `AGENT_SPECS`: list of `(key, preset_role, mode, is_worker, perm_profile, color, desc)`.
     This is the single source of truth for the roster.
-  - `TEAM_TARGETS` = the three hidden workers the team may delegate to.
+  - `TEAM_TARGETS` = the six hidden workers the team may delegate to.
   - `BUILTIN_DISABLE` = `["build", "plan"]` — native agents we suppress.
   - `TEAM_COLOR`, and risk-based colors carried per spec.
   - `MANAGED_AGENTS`: the set the tool is allowed to prune. **Anything not in this set
     is left untouched.** Add new managed agent keys here or stale entries won't be
     cleaned.
-  - `TEAM_PROMPT` / `team_prompt_text()` (injects the soft task-budget line),
-    `WORKER_PROMPT` (forces a non-empty final summary on hidden workers).
+  - `ROLE_SKILL_NAMES` / `ROLE_SKILLS` = the generated global role contracts.
+    `ROLE_PROMPTS` are tiny override-first/global-then-extend bootstraps;
+    `team_prompt_text()` adds the soft task-budget line.
 - **Tool registry** — `TOOLS` list + `detect_tools()` / `print_detection()`. This is the
   extension point for new tools: add a `TOOLS` entry with a `sync` key and a matching
   configurator.

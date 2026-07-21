@@ -7,38 +7,42 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- **`team-orchestration` project overlays.** The global Team orchestration skill now tells the
-  Team Lead to load `team-orchestration-project` when a repo provides one, without weakening the
-  global orchestration rules.
-- **Per-worker step caps + a DONE/CONTINUE/BLOCKED exit contract, so workers escalate instead of
-  spinning.** Each delegation worker now carries a `steps` cap (agent-instruct 5, agent-research
+- **Visible global role skills with project extend/override layers.** Team and all six delegation
+  workers now keep their operating logic in `agent-team`, `agent-code`, `agent-research`,
+  `agent-test`, `agent-instruct`, `agent-architect`, and `agent-review` under OpenCode's global
+  `skills/` directory. A repo may add `agent-<role>-extend` for additive rules or
+  `agent-<role>-override` for a complete replacement; override skips both global and extend.
+- **A bounded Team workflow from intake through review.** Simple work goes directly to coder;
+  medium/high-risk work must pass through architect research, plan, criteria, and scope first.
+  Completed work always receives an acceptance-packet review, findings use the blocker/regression/
+  pre-existing/future-work/out-of-scope taxonomy, and only blockers/regressions enter the
+  one-at-a-time fix/re-review loop. Team asks about PR creation after local verification and routes
+  agent runbook reviews to architect with the dedicated workflow skill.
+- **Per-worker step caps + a DONE/CONTINUE/NEEDS_RESEARCH/BLOCKED exit contract.** Workers escalate
+  instead of spinning. Each delegation worker now carries a `steps` cap (agent-instruct 5,
+  agent-research
   10, agent-test 12, agent-architect 15, agent-code 20, agent-review 20); OpenCode forces a
-  text summary when the cap is hit. Worker prompts end with one of three statuses — `DONE`
-  (finished), `CONTINUE` (working plan, just needs another round), or `BLOCKED` (no working
-  hypothesis) — and the `team-orchestration` skill acts on each: `CONTINUE` → resume the SAME
-  worker (same task_id); `BLOCKED` → route to `agent-architect` for a fix. An anti-spin guard
+  text summary when the cap is hit. Role skills end with one of four statuses: `DONE` (finished),
+  `CONTINUE` (working plan, needs another round), `NEEDS_RESEARCH` (focused factual dependency),
+  or `BLOCKED` (no sound path). The `agent-team` skill resumes stable task IDs, routes research,
+  and escalates blocked coders to architect. An anti-spin guard
   escalates a worker that returns `CONTINUE` ~twice without converging. Visible primaries and
   `team` are not step-capped (direct human use). Values are sensible defaults; a tuning flag can
   come later.
-- **Optional per-worker project skills.** Every worker prompt now tells the worker to load a
-  repo-local skill named after itself (`<agent-name>-project`, e.g. `agent-code-project`,
-  `agent-architect-project`) IF one exists — the same try-project-first pattern `agent-review`
-  already uses with `pr-review-project`. These skills are absent by default (a no-op line in a
-  fresh repo), hand-authored under `.agents/skills/`, and never written by `omw sync`, so a repo
-  can give one worker repo-specific guidance without bloating the shared global prompt. The
-  `agent-runbook-review` skill now recommends and drafts `agent-<role>-project` skills when it
-  finds recurring role-specific guidance.
 - **Two new subagents — `agent-test` and `agent-architect` — for model-tiered delegation.**
-  `agent-test` runs lint/tests and reports structured PASS/FAIL (opening a PR only when explicitly
-  asked, and never weakening tests to pass); `agent-architect` is a read-only planner/verifier and
-  the escalation target when `agent-code` reports BLOCKED. Each has its own system prompt
-  (`prompts/otools-test.md`, `prompts/otools-architect.md`); architect is purple (`#8b5cf6`).
+  `agent-test` independently runs lint/tests without editing; `agent-architect` is a read-only
+  planner/verifier and escalation target when `agent-code` reports BLOCKED. Architect is purple
+  (`#8b5cf6`).
 
 ### Changed
-- **Sync roster summary now names the current research worker.** The printed delegation hint says
-  `@agent-research` instead of the retired `@agent-plan` name.
-- **Architect continuity is explicit.** Same-feature `agent-architect` re-reviews reuse the same
-  architect `task_id`, preserving the original acceptance criteria and avoiding scope expansion.
+- **Agent system prompts are now minimal skill bootstraps.** Durable role behavior is visible and
+  editable as skills, while the prompts only enforce override-first, otherwise global-then-extend
+  loading. Role skills restore the relevant OpenCode default safeguards: inspect before editing,
+  preserve unrelated work, follow repo conventions, avoid secrets/destructive git, use specialized
+  tools, verify changes, and keep commits/PRs explicit. Retired generated `team-orchestration` and
+  `pr-review` skills and shared worker prompts are removed on sync.
+- **Review and test workers no longer edit code.** They retain shell access for independent checks;
+  reviewer fixes always route back through Team to coder with stable per-role `task_id` continuity.
 - **Roster reworked for cost-tiered delegation.** `agent-plan` is renamed to `agent-research`
   (read-only web fetch + summarize). The team now delegates to six workers
   (`agent-research`, `agent-code`, `agent-test`, `agent-instruct`, `agent-architect`,
@@ -54,13 +58,6 @@ All notable changes to this project are documented here. The format follows
   `qwen3.6-35b-a3b-nvfp4-unsloth` (≈free at the margin) and falls back to paid GitHub-Copilot
   models only when needed; the two low-volume, high-stakes workers (`agent-architect`,
   `agent-review`) lead with `github-copilot/claude-opus-4.8`.
-- **`team-orchestration` skill expanded** with per-worker delegation contracts (what to ask each
-  worker to return), the escalation loop, session-continuity rules (reuse a worker's own `task_id`;
-  carry payloads across workers rather than sharing task_ids), and an explicit-only git rule: the
-  normal loop stops at working, tested code and never opens a PR / reviews / merges unless the user
-  asks. The global `pr-review` skill notes it runs only on explicit request; this repo's
-  `pr-review-project` skill documents its opt-in aggressive review-and-merge-in-one-pass flow.
-
 - **Every model assignment now applies that model's known-good config — and the redundant
   `--team-model` flag is gone.** Previously only the roster build configured a model correctly;
   `omw agents/subagents --set-model` was a bare string swap and `default_models.json` reassignments
@@ -78,23 +75,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - **`agent-runbook-review` skill + `omw skills` command.** A user-kicked maintenance pass
-  ("perform an agent runbook review") shipped globally by `omw sync` (like `team-orchestration`
-  and `pr-review`). It compacts and de-duplicates a repo's agent-facing docs, mines the **current
+  ("perform an agent runbook review") shipped globally by `omw sync`. It compacts and de-duplicates
+  a repo's agent-facing docs, mines the **current
   OpenCode session — including subagent sessions** — from the SQLite store
   (`~/.local/share/opencode/opencode.db`, read-only; subagents linked via `session.parent_id`) for
   recurring tool failures and drafts fixes into the right file, audits skill sizes (a transparent
-  instruction-count metric with lean/moderate/LARGE verdicts), recommends whether a new
-  `*-project` skill is warranted, and authors first drafts of missing key files (AGENTS.md,
+  instruction-count metric with lean/moderate/LARGE verdicts), recommends role extend/override
+  skills when warranted, and authors first drafts of missing key files (AGENTS.md,
   REVIEW.md) — all **report-first**, never a silent rewrite. New `omw skills` lists skills (global
   + project `.agents/skills`) with their size verdict; `omw skills <name>` pretty-prints every
   `.md` file in the skill.
-- **Generic global `pr-review` skill + project-override pattern.** `omw sync` now writes a
-  repo-agnostic `pr-review` skill globally to `<config-dir>/skills/pr-review/SKILL.md` (like
-  `team-orchestration`), so `agent-review` has a working review method in a **fresh repo**. The
-  `agent-review` prompt now loads the repo's own `pr-review-project` skill first and, if it's
-  absent, prints "No project specific PR skill found, using global default" and falls back to the
-  global `pr-review`. The global skill includes a short section on authoring a `pr-review-project`
-  skill for a repo. omodel-wire's own review skill is renamed `pr-review` → `pr-review-project`.
 - **GitHub Copilot CLI is now a sync target** — `omw sync --target copilot` (or `--target all`)
   writes the agent roster to `~/.copilot/` as `.agent.md` files (Markdown + YAML frontmatter),
   merges `settings.json` (`model`, `includeCoAuthoredBy: false`, `stream: true`), and emits an

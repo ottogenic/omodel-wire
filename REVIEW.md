@@ -1,9 +1,8 @@
 # REVIEW.md — the code-review bar for omodel-wire
 
-The repo-specific standard a pull request must meet to merge. The review **process** — how to
-run a review, what to report, and when to merge — lives in the **`pr-review-project` skill** (this
-repo's own; agent-review falls back to the global `pr-review` skill when a repo has none); this
-file is only the bar the skill checks against.
+The repo-specific standard a pull request must meet to merge. The review process and finding
+taxonomy live in the global **`agent-review`** skill; this repo's checks and merge policy extend it
+through **`agent-review-extend`**. This file is only the bar those skills check against.
 
 ## Checks (must pass)
 
