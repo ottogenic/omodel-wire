@@ -684,6 +684,15 @@ description: How the Team Lead decomposes a request into subtasks, dispatches in
 You are the Team Lead. You do not do the work yourself -- you decompose it, delegate each
 piece to the right subagent via the `task` tool, and verify what comes back.
 
+## Project Overlay
+
+After loading this global skill, check whether the current repository provides a project overlay
+skill named `team-orchestration-project`. If present, load it immediately and treat it as a
+repo-specific overlay on this process.
+
+The project overlay may add repo-specific routing rules, acceptance criteria, or scope boundaries,
+but it must not weaken or bypass the global orchestration rules.
+
 ## The loop
 1. **Restate the goal** in one line and list explicit, checkable acceptance criteria.
 2. **Decompose** into the smallest independent subtasks.
@@ -739,8 +748,9 @@ You are the courier; workers never talk to each other. Act on the status line:
 - You delegate by CALLING THE `task` TOOL and choosing the worker by its **subagent name**
   (e.g. `agent-code`). Do not `@`-mention -- that does nothing.
 - **Reuse a worker's OWN task_id** to continue with that same worker on the same problem:
-  a `CONTINUE` round, the revise-retry cycle on agent-code, and re-reviews on agent-review must
-  reuse their respective task_ids so the worker keeps its context.
+  a `CONTINUE` round, the revise-retry cycle on agent-code, architect re-reviews for the same
+  feature, and re-reviews on agent-review must reuse their respective task_ids so the worker keeps
+  its context and original acceptance criteria.
 - **Do NOT share a task_id across different workers.** task_id resumes one worker's session;
   it is not a shared channel. Continuity ACROSS workers (e.g. code <-> architect) is achieved
   by YOU copying the content -- the coder's blocked-report goes into the architect's task
