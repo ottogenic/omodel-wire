@@ -701,28 +701,80 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertIn("Run focused checks", m.AGENT_CODE_SKILL)
         self.assertIn("Leave full suites", m.AGENT_CODE_SKILL)
         self.assertIn("Run the broad verification", m.AGENT_TEST_SKILL)
-        self.assertIn("coder owns tight edit/test loops", m.AGENT_TEST_SKILL)
-        self.assertIn("tester output as the primary command evidence", m.AGENT_REVIEW_SKILL)
+        self.assertIn("`agent-code` owns tight edit/test loops", m.AGENT_TEST_SKILL)
+        self.assertIn("`agent-test` output as the primary command evidence", m.AGENT_REVIEW_SKILL)
         self.assertIn("run spot", m.AGENT_REVIEW_SKILL)
 
     def test_team_skill_encodes_full_workflow_and_continuity(self):
         skill = m.AGENT_TEAM_SKILL
-        for text in ("Simple", "Medium/high-risk", "architect first", "NEEDS_RESEARCH",
+        for text in ("Simple", "Medium/high-risk", "-> `agent-architect`", "NEEDS_RESEARCH",
                      "Required Test", "agent-test", "Required Review", "verification packet",
-                     "one at a time",
-                     "same reviewer `task_id`", "remediation", "scope firewall",
-                     "ask whether to create one"):
+                     "Fix Loop -- One Finding At A Time", "scope firewall",
+                     "create one and perform PR review"):
             self.assertIn(text, skill)
-        self.assertIn("same tester `task_id`", skill)
-        self.assertIn("After tester pass", skill)
-        self.assertIn("send it directly to reviewer", skill)
+        self.assertIn("same `agent-review` `task_id`", skill)
+        self.assertIn("same `agent-test` `task_id`", skill)
+        self.assertIn("After `agent-test` passes", skill)
+        self.assertIn("send it directly to", skill)
         self.assertIn("Do not research, inspect, reconstruct, or pre-review it", skill)
-        self.assertIn("same architect `task_id`", skill)
-        self.assertIn("same coder `task_id`", skill)
+        self.assertIn("same `agent-architect` `task_id`", skill)
+        self.assertIn("same `agent-code` `task_id`", skill)
         self.assertIn("substitutes categories", skill)
         self.assertIn("do not relay or implement", skill)
         self.assertIn("agent runbook review", skill)
         self.assertIn("load `agent-runbook-review`", skill)
+
+    def test_team_fix_loop_is_one_finding_per_new_code_session(self):
+        # A cheap model running `team` used to batch every review finding into one
+        # agent-code call. The Fix Loop pins: todo-tracked, one at a time, NEW session
+        # per finding, and re-review always resumes the original agent-review session.
+        skill = m.AGENT_TEAM_SKILL
+        self.assertIn("todowrite", skill)
+        self.assertIn("Send that ONE finding to a NEW `agent-code` session", skill)
+        self.assertIn("Never batch multiple findings into one `agent-code` session", skill)
+        self.assertIn("Never open a second `agent-review`", skill)
+        self.assertIn("re-reviews resume the original `task_id`", skill)
+        # agent-code is always followed by agent-test -- no direct code -> review hop.
+        self.assertIn("`agent-code` is ALWAYS followed by `agent-test`", skill)
+
+    def test_worker_skills_end_with_next_steps_for_team(self):
+        # Workers restate the routing so `team` can't misroute on a cheap model.
+        for name in ("agent-code", "agent-research", "agent-test",
+                     "agent-architect", "agent-review"):
+            skill = m.ROLE_SKILLS[name]
+            self.assertIn("## Next Steps", skill)
+            self.assertIn("NEXT STEPS FOR team:", skill)
+        self.assertIn("NEXT STEPS FOR team: Send to agent-test.", m.AGENT_CODE_SKILL)
+        self.assertIn("NEXT STEPS FOR team: Send this blocker to agent-architect.",
+                      m.AGENT_CODE_SKILL)
+        self.assertIn("NEXT STEPS FOR team: Send to agent-review.", m.AGENT_TEST_SKILL)
+        self.assertIn("NEXT STEPS FOR team: Send this plan to agent-code.",
+                      m.AGENT_ARCHITECT_SKILL)
+        self.assertIn("Fix these ONE AT A TIME", m.AGENT_REVIEW_SKILL)
+        # The shared contract mandates the line for every worker, incl. agent-instruct.
+        self.assertIn("NEXT STEPS FOR team:", m.AGENT_INSTRUCT_SKILL)
+
+    def test_architect_plans_and_never_reviews_completed_work(self):
+        skill = m.AGENT_ARCHITECT_SKILL
+        self.assertIn("You do two things and nothing else", skill)
+        self.assertIn("**Plan**", skill)
+        self.assertIn("**Request research**", skill)
+        self.assertIn("You never review completed code. `agent-review` owns that.", skill)
+        self.assertIn("Never reviews completed work.", m.AGENT_TEAM_SKILL)
+
+    def test_role_skills_name_agents_exactly_not_role_words(self):
+        # Cheap models conflate "reviewer"/"coder"/"tester" with the wrong agent, so the
+        # skills must always use the literal config names.
+        for name, skill in m.ROLE_SKILLS.items():
+            body = skill.split("---", 2)[2]  # skip frontmatter (description prose)
+            for word in ("coder", "tester", "reviewer"):
+                # allowed only where the contract names them as words to avoid, and in
+                # GH_TOKEN_REVIEWER / gh-token-reviewer style identifiers.
+                stripped = body.replace("never a role word", "") \
+                               .replace('"coder",', "").replace('"tester", or "reviewer"', "") \
+                               .replace("GH_TOKEN_REVIEWER", "")
+                self.assertNotIn(word, stripped,
+                                 f"{name} still uses the role word {word!r}")
 
     def test_architect_and_reviewer_classify_without_expanding_scope(self):
         for skill in (m.AGENT_ARCHITECT_SKILL, m.AGENT_REVIEW_SKILL):
