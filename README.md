@@ -48,8 +48,8 @@ Common settings you don't want to retype live in `~/.config/otools/wire.json` �
 them once and every command picks them up (precedence: **flag > wire.json > default**):
 
 ```bash
-omw config --set team_model anthropic/claude-opus-4-8
 omw config --set default_agent code
+omw config --set web_search exa
 omw config                       # show resolved settings + their source
 ```
 
@@ -74,35 +74,40 @@ dgx-3` makes the box visible here too. Override with `omw sync --hosts` / `--por
 
 Built from `AGENT_SPECS`, with per-mode sampling from omodel-manager's configs:
 
-| Agent           | Visibility | Role     | Permissions            |
-| --------------- | ---------- | -------- | ---------------------- |
-| `research`      | Tab        | reason   | read-only + web        |
-| `code`          | Tab        | code     | edit/bash **ask** + web |
-| `agent`         | Tab        | agent    | full (edit/bash allow) |
-| `team`          | Tab        | orchestrator | delegation-only (no tools) |
-| `agent-plan`    | hidden     | reason   | read-only + web        |
-| `agent-code`    | hidden     | code     | full                   |
-| `agent-instruct`| hidden     | instruct | full                   |
+| Agent             | Visibility | Role         | Permissions             |
+| ----------------- | ---------- | ------------ | ----------------------- |
+| `research`        | Tab        | reason       | read-only + web         |
+| `code`            | Tab        | code         | edit/bash **ask** + web |
+| `agent`           | Tab        | agent        | full                    |
+| `team`            | Tab        | orchestrator | delegation-only         |
+| `agent-research`  | hidden     | research     | read-only + web         |
+| `agent-code`      | hidden     | implementation | full                  |
+| `agent-test`      | hidden     | verification | read + checks, no edits |
+| `agent-instruct`  | hidden     | mechanical   | full                    |
+| `agent-architect` | hidden     | architecture | read-only               |
+| `agent-review`    | hidden     | review       | read + checks, no edits |
 
-`team` is a **delegation-only** orchestrator: every tool category is denied
-(`read`/`grep`/`glob`/`list`/`edit`/`bash`/`webfetch`/`websearch`), so the only thing it
-can do is **delegate** to the three hidden `agent-*` workers via `task` (its
-`permission.task` is limited to them). The hidden workers carry a
-"worker prompt" that forces a non-empty final summary — a workaround for an OpenCode
-bug where the orchestrator otherwise receives an empty result. The visible agents
-stay clean (no worker prompt) so they're pleasant to drive by hand.
+`team` has no workspace tools; it can only delegate to the six hidden workers through `task`.
+Team and every worker load a visible global role skill from
+`~/.config/opencode/skills/agent-*/SKILL.md`; their system prompts contain only the bootstrap.
+A repo can add `.agents/skills/agent-<role>-extend/SKILL.md` to append role guidance, or
+`agent-<role>-override` to replace both the global role and extend skill. Override wins; otherwise
+the global role loads before extend. Visible `research`/`code`/`agent` remain prompt-free and keep
+OpenCode's model-specific default prompts.
+
+The standard flow sends simple work to `agent-code`, routes medium/high-risk work through
+`agent-architect` for research, plan, and acceptance criteria, and sends every completed
+implementation to `agent-review`. Only findings classified as blockers or regressions enter the
+one-at-a-time fix loop. Once verified, Team asks whether to create a PR and perform PR review.
 
 OpenCode reserves the names `build`/`plan` and ignores overrides on them, so
 `omw sync` **disables** the native pair and ships `research`/`code` in their place,
 pointing the startup agent at `--default-agent` (default `code`, or wire.json
 `default_agent`). `omw sync --keep-builtins` opts out.
 
-Put the `team` orchestrator on a frontier model with `omw sync --team-model` — or persist
-it with `omw config --set team_model anthropic/claude-opus-4-8`; workers stay local.
-`--team-reasoning` (`low`/`medium`/`high` → 10000/24000/32000 thinking-budget tokens) and
-`--team-task-budget N` are preserved across re-syncs. If you don't set a budget, `sync`
-defaults it to the worker model's declared `concurrency` (its `max-num-seqs`) so it won't
-spawn more parallel workers than the server has sequence slots.
+Agent model preferences live in local `default_models.json`. `--team-task-budget N` is preserved
+across re-syncs; without it, sync defaults the budget from the worker model's declared concurrency
+(`max-num-seqs`).
 
 ### Disabled providers by default
 
@@ -166,7 +171,7 @@ copilot --agent code                 # run it
 | Command | What it does |
 | ------- | ------------ |
 | `omw` | Home screen: status + suggested next steps. |
-| `omw sync` | Build/refresh the OpenCode roster from the model configs. Carries all the sync knobs (`--hosts/--ports`, `--team-model/--team-task-budget/--team-reasoning`, `--default-agent/--keep-builtins`, `--web-search`, `--sampling …`, `--dry-run`, …). This is the "reset to known-good" button. |
+| `omw sync` | Build/refresh the OpenCode roster from the model configs. Carries the sync knobs (`--hosts/--ports`, `--team-task-budget`, `--default-agent/--keep-builtins`, `--web-search`, `--sampling …`, `--dry-run`, …). This is the "reset to known-good" button. |
 | `omw sync --add-default-providers` | Enable built-in OpenCode and Hugging Face providers (by default, these are disabled and their models are hidden from the picker). |
 | `omw agents [<name>]` | List primary agents; show one in detail. |
 | `omw agents <name> --set-model REF` | Live-set an agent's model. |

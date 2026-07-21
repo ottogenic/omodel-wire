@@ -55,8 +55,7 @@ via the `skill` tool).
 
 Other docs (read directly when relevant): `README.md` (user-facing), `CHANGELOG.md`.
 
-**PR reviews** are handled by the **`agent-review`** subagent — it checks the PR against `REVIEW.md`
-(the repo's bar), returns an itemized list of issues + suggested fixes, and merges only when the
-review is clean. **If you have the `task` tool, delegate the review to `agent-review`** (call it by
-name — `@agent-review` is only for when a human types it) rather than reviewing inline; when it
-reports issues, get them fixed and re-delegate (same `task_id`) to re-review.
+**Reviews** are handled by **`agent-review`**, whose global role is extended here by
+`agent-review-extend`. It checks completed work against the caller's criteria and `REVIEW.md`,
+classifies findings, and merges a PR only when authorized and clean. Delegate by name through the
+`task` tool; fix one blocker/regression at a time and reuse the same reviewer `task_id`.
