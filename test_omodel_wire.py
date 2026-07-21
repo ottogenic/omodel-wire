@@ -651,7 +651,7 @@ class TestSyncEndToEnd(unittest.TestCase):
                 out = _capture(m.oc_sync, args, m.build_sampling(args), {"opencode"})
             self.assertIn("simple -> agent-code", out)
             self.assertIn("medium/high -> agent-architect", out)
-            self.assertIn("completed -> agent-review", out)
+            self.assertIn("completed -> agent-test -> agent-review", out)
 
     def test_dry_run_does_not_create_default_models_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,13 +697,24 @@ class TestSyncEndToEnd(unittest.TestCase):
                 self.assertIn(status, skill)
             self.assertIn("Do not spin", skill)
 
+    def test_code_test_review_skills_split_verification_work(self):
+        self.assertIn("Run focused checks", m.AGENT_CODE_SKILL)
+        self.assertIn("Leave full suites", m.AGENT_CODE_SKILL)
+        self.assertIn("Run the broad verification", m.AGENT_TEST_SKILL)
+        self.assertIn("coder owns tight edit/test loops", m.AGENT_TEST_SKILL)
+        self.assertIn("tester output as the primary command evidence", m.AGENT_REVIEW_SKILL)
+        self.assertIn("run spot", m.AGENT_REVIEW_SKILL)
+
     def test_team_skill_encodes_full_workflow_and_continuity(self):
         skill = m.AGENT_TEAM_SKILL
         for text in ("Simple", "Medium/high-risk", "architect first", "NEEDS_RESEARCH",
-                     "Required Review", "verification packet", "one at a time",
+                     "Required Test", "agent-test", "Required Review", "verification packet",
+                     "one at a time",
                      "same reviewer `task_id`", "remediation", "scope firewall",
                      "ask whether to create one"):
             self.assertIn(text, skill)
+        self.assertIn("same tester `task_id`", skill)
+        self.assertIn("After tester pass", skill)
         self.assertIn("send it directly to reviewer", skill)
         self.assertIn("Do not research, inspect, reconstruct, or pre-review it", skill)
         self.assertIn("same architect `task_id`", skill)
