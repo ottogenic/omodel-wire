@@ -12,12 +12,13 @@ All notable changes to this project are documented here. The format follows
   `agent-test`, `agent-instruct`, `agent-architect`, and `agent-review` under OpenCode's global
   `skills/` directory. A repo may add `agent-<role>-extend` for additive rules or
   `agent-<role>-override` for a complete replacement; override skips both global and extend.
-- **A bounded Team workflow from intake through review.** Simple work goes directly to coder;
-  medium/high-risk work must pass through architect research, plan, criteria, and scope first.
-  Completed work always receives an acceptance-packet review, findings use the blocker/regression/
-  pre-existing/future-work/out-of-scope taxonomy, and only blockers/regressions enter the
-  one-at-a-time fix/re-review loop. Team asks about PR creation after local verification and routes
-  agent runbook reviews to architect with the dedicated workflow skill.
+- **A bounded Team workflow from intake through test and review.** Simple work goes directly to
+  coder; medium/high-risk work must pass through architect research, plan, criteria, and scope
+  first. Completed work goes to `agent-test` for broad/scripted verification on a cheaper worker,
+  then receives an acceptance-packet review. Findings use the blocker/regression/pre-existing/
+  future-work/out-of-scope taxonomy, and only blockers/regressions enter the one-at-a-time
+  fix/re-review loop. Team asks about PR creation after local verification and routes agent runbook
+  reviews to architect with the dedicated workflow skill.
 - **Per-worker step caps + a DONE/CONTINUE/NEEDS_RESEARCH/BLOCKED exit contract.** Workers escalate
   instead of spinning. Each delegation worker now carries a `steps` cap (agent-instruct 5,
   agent-research
@@ -43,6 +44,10 @@ All notable changes to this project are documented here. The format follows
   `pr-review` skills and shared worker prompts are removed on sync.
 - **Review and test workers no longer edit code.** They retain shell access for independent checks;
   reviewer fixes always route back through Team to coder with stable per-role `task_id` continuity.
+- **Broad verification is assigned to `agent-test` before review.** `agent-code` keeps fast focused
+  checks for edit feedback, `agent-test` runs full suites/scripts and returns exact failures, and
+  `agent-review` treats tester output as primary command evidence while spot-checking only missing
+  or suspicious coverage.
 - **Roster reworked for cost-tiered delegation.** `agent-plan` is renamed to `agent-research`
   (read-only web fetch + summarize). The team now delegates to six workers
   (`agent-research`, `agent-code`, `agent-test`, `agent-instruct`, `agent-architect`,

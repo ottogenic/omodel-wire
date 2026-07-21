@@ -56,6 +56,6 @@ via the `skill` tool).
 Other docs (read directly when relevant): `README.md` (user-facing), `CHANGELOG.md`.
 
 **Reviews** are handled by **`agent-review`**, whose global role is extended here by
-`agent-review-extend`. It checks completed work against the caller's criteria and `REVIEW.md`,
+`agent-review-extend`. It checks tested work against the caller's criteria and `REVIEW.md`,
 classifies findings, and merges a PR only when authorized and clean. Delegate by name through the
 `task` tool; fix one blocker/regression at a time and reuse the same reviewer `task_id`.
