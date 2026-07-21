@@ -716,7 +716,15 @@ class TestSyncEndToEnd(unittest.TestCase):
         self.assertIn("CONTINUE", skill)
         self.assertIn("BLOCKED", skill)
         self.assertIn("same task_id", skill.lower())
+        self.assertIn("architect re-reviews for the same", skill.lower())
+        self.assertIn("original acceptance criteria", skill.lower())
         self.assertIn("anti-spin", skill.lower())
+
+    def test_team_skill_loads_project_overlay_without_weakening_globals(self):
+        skill = m.TEAM_ORCHESTRATION_SKILL
+        self.assertIn("Project Overlay", skill)
+        self.assertIn("team-orchestration-project", skill)
+        self.assertIn("must not weaken or bypass", skill.lower())
 
     def test_writes_agent_runbook_review_skill_globally(self):
         # The runbook-review maintenance pass ships globally so "perform an agent runbook
