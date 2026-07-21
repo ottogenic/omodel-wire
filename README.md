@@ -96,9 +96,10 @@ the global role loads before extend. Visible `research`/`code`/`agent` remain pr
 OpenCode's model-specific default prompts.
 
 The standard flow sends simple work to `agent-code`, routes medium/high-risk work through
-`agent-architect` for research, plan, and acceptance criteria, and sends every completed
-implementation to `agent-review`. Only findings classified as blockers or regressions enter the
-one-at-a-time fix loop. Once verified, Team asks whether to create a PR and perform PR review.
+`agent-architect` for research, plan, and acceptance criteria, sends completed implementation to
+`agent-test` for broad/scripted verification, then sends the tested packet to `agent-review`.
+Only findings classified as blockers or regressions enter the one-at-a-time fix loop. Once verified,
+Team asks whether to create a PR and perform PR review.
 
 OpenCode reserves the names `build`/`plan` and ignores overrides on them, so
 `omw sync` **disables** the native pair and ships `research`/`code` in their place,
