@@ -59,6 +59,17 @@ try:
 except (OSError, ImportError, AttributeError):
     proxy = None
 
+# Loom conductor module (utils/omw_loom.py) -- the v2 deterministic pipeline
+# orchestrator. Loaded by path like the proxy; `omw loom` and the generated
+# OpenCode `loom` tool both dispatch into it. None if missing (loom disabled).
+_LOOM_MOD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "omw_loom.py")
+try:
+    _lspec = _ilu.spec_from_file_location("omw_loom", _LOOM_MOD_PATH)
+    loom_mod = _ilu.module_from_spec(_lspec)
+    _lspec.loader.exec_module(loom_mod)
+except (OSError, ImportError, AttributeError):
+    loom_mod = None
+
 # ----------------------------------------------------------------------------
 # Endpoint discovery defaults -- placeholder examples only. Set your real hosts
 # via `omm install` / `~/.config/otools/hosts`; these are the no-store fallback.
@@ -350,12 +361,14 @@ WORKER_STEPS = {
 # Built-in agents we disable (can't be overridden; replaced by research/code).
 BUILTIN_DISABLE = ["build", "plan"]
 TEAM_COLOR = "#ef4444"   # red -- highest risk (orchestrates, spends $, delegates)
+LOOM_COLOR = "#ec4899"   # pink -- v2 orchestrator (deterministic conductor; A/B with team)
 # Agent keys this tool may write under --profiles (current + legacy). Used to prune
 # stale ones on re-sync -- incl. old plan/build OVERRIDES and old names -- so
 # re-syncing converges. Won't touch the user's own agents.
 MANAGED_AGENTS = {"research", "code", "agent", "team",
                   "agent-research", "agent-code", "agent-test", "agent-instruct",
                   "agent-architect", "agent-review",
+                  "loom",
                   "agent-plan",
                   "plan", "build", "instruct", "architect", "reason", "chat", "fast",
                   "general", "webdev", "agentic"}
@@ -367,6 +380,12 @@ DEFAULT_MODELS_TEMPLATE = {
         # Qwen-first: the local DGX 35B-A3B is ~free at the margin, so it leads every
         # workhorse agent; paid github-copilot models are fallbacks only.
         "team": ["qwen3.6-35b-a3b-nvfp4-unsloth",
+                 "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
+                 "github-copilot/gpt-5.4", "github-copilot/gemini-2.5-pro",
+                 "github-copilot/claude-sonnet-4.6"],
+        # loom's LLM half only does intake + relay, so it ranks like team; the
+        # pipeline workers keep their own per-role rankings below.
+        "loom": ["qwen3.6-35b-a3b-nvfp4-unsloth",
                  "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
                  "github-copilot/gpt-5.4", "github-copilot/gemini-2.5-pro",
                  "github-copilot/claude-sonnet-4.6"],
@@ -627,6 +646,7 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
 # opencode.json and referenced via {file:...}; edit it there to tune behavior.
 ROLE_SKILL_NAMES = {
     "team": "agent-team",
+    "loom": "agent-loom",
     "agent-research": "agent-research",
     "agent-code": "agent-code",
     "agent-test": "agent-test",
@@ -659,6 +679,17 @@ def _role_bootstrap_prompt(agent_name, skill_name):
     part even when empty) and holds even if skill loading fails; the exact message
     FORMAT lives only in the skill's Return Contract to avoid a competing spec.
     """
+    if agent_name == "loom":
+        return f"""You are `loom`, the pipeline lead. Complete feature work by calling the `loom`
+tool -- it runs the whole plan/code/test/review pipeline deterministically, streams
+progress, and returns the final report. You have no workspace tools: never attempt to
+read, edit, or run anything yourself.
+
+{_skill_load_steps(skill_name, then="Then start the work.")}
+
+When the work is finished, end with a plain-text message relaying the loom report --
+the user never sees the pipeline output directly.
+"""
     if agent_name == "team":
         return f"""You are `team`, the lead orchestrator. Complete the assigned work by calling the
 `task` tool to delegate to your workers. Delegate, inspect each worker's result, then
@@ -853,6 +884,48 @@ policy authorizing it.
 
 When the user requests an **agent runbook review**, delegate it to `agent-architect` and explicitly
 tell that task to load `agent-runbook-review` after its normal architect role bootstrap.
+"""
+
+
+AGENT_LOOM_SKILL = """---
+name: agent-loom
+description: Global operating method for `loom`: gather goal, criteria, scope, and risk; run the pipeline with one loom tool call; relay the report verbatim; gate PR creation on explicit user approval.
+---
+
+# loom (pipeline lead)
+
+You run feature work through a deterministic pipeline (agent-architect -> agent-code ->
+agent-test -> agent-review) with ONE call to the `loom` tool. The tool performs all
+delegation, looping, and escalation; you do intake and reporting only.
+
+## Procedure
+
+1. Restate the goal, explicit acceptance criteria, and scope boundary.
+2. Ask one concise clarification only when ambiguity materially changes the result.
+3. Classify risk:
+   - `simple` -- localized, clear, low-risk change (the pipeline skips planning).
+   - `medium` -- a design choice, multiple interacting files, or an unfamiliar API.
+   - `high` -- persistence/migration, concurrency, or security work.
+   When uncertain, use `medium`.
+4. Call the `loom` tool once with:
+   - `action`: `"run"`
+   - `packet`: the goal, acceptance criteria, and scope boundary as plain text.
+   - `risk`: your classification.
+5. The tool streams progress and returns the final report. Relay the report to the
+   user: implementation summary, exact check results, and non-blocking findings
+   listed separately. Quote check results; do not paraphrase them.
+6. If the report says `paused`, tell the user exactly why and show the resume
+   command from the report. To continue after their answer, call the `loom` tool
+   with `action: "resume"`, the `job` id, and their guidance as `note`.
+
+## Rules
+
+- One feature = one `loom` call. Never split a feature across calls, and never
+  start a second call for a feature that is already running.
+- Never create a PR without explicit user approval. On approval, call the `loom`
+  tool with `action: "pr"` and the `job` id from the report.
+- You cannot inspect the workspace. If the user asks a code question, suggest the
+  `research` agent; your only job is running the pipeline.
 """
 
 
@@ -1064,6 +1137,7 @@ End with exactly one:
 
 ROLE_SKILLS = {
     "agent-team": AGENT_TEAM_SKILL,
+    "agent-loom": AGENT_LOOM_SKILL,
     "agent-code": AGENT_CODE_SKILL,
     "agent-research": AGENT_RESEARCH_SKILL,
     "agent-test": AGENT_TEST_SKILL,
@@ -1747,6 +1821,9 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         # continue-or-escalate signal for the team.
         if key in WORKER_STEPS:
             agent["steps"] = WORKER_STEPS[key]
+        # The `loom` custom tool (registered globally by plugins/otools-loom.js) is
+        # for the loom agent ONLY -- hide it from every other agent.
+        agent["tools"] = {"loom": False}
         agents[key] = agent
         agent_sampling[key] = _preset_vec(preset, repetition_detection)
 
@@ -1783,8 +1860,36 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         }
         if "temperature" in rs: team["temperature"] = rs["temperature"]
         if "top_p" in rs: team["top_p"] = rs["top_p"]
+        team["tools"] = {"loom": False}
         agents["team"] = team
         agent_sampling["team"] = _preset_vec(rp, repetition_detection)
+
+        # --- `loom`: the v2 orchestrator, built ALONGSIDE team for A/B. Same reason
+        # preset, but instead of the task tool it holds exactly ONE tool -- the `loom`
+        # custom tool from plugins/otools-loom.js -- whose Python conductor runs the
+        # plan/code/test/review pipeline deterministically over the same workers. ---
+        looma = {
+            "description": "loom: v2 pipeline lead -- one loom-tool call runs "
+                           "plan/code/test/review deterministically over the agent-* workers",
+            "mode": "primary",
+            "model": model_ref,
+            "color": LOOM_COLOR,
+            "prompt": f"{{file:./prompts/{ROLE_PROMPT_FILES['loom']}}}",
+            "options": _preset_options(rp, control, caps),
+            # Intake-and-relay only: deny every workspace tool AND the task tool; the
+            # pipeline (not this agent) does all delegation via the server API.
+            "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
+                           "edit": "deny", "bash": "deny",
+                           "webfetch": "deny", "websearch": "deny",
+                           "task": "deny",
+                           "skill": _role_skill_permissions(ROLE_SKILL_NAMES["loom"],
+                                                            exclusive=True)},
+            "tools": {"loom": True},
+        }
+        if "temperature" in rs: looma["temperature"] = rs["temperature"]
+        if "top_p" in rs: looma["top_p"] = rs["top_p"]
+        agents["loom"] = looma
+        agent_sampling["loom"] = _preset_vec(rp, repetition_detection)
     return agents, agent_sampling
 
 
@@ -1848,6 +1953,94 @@ def _apply_model_config_to_agent(agent_cfg, agent_name, model_ref, configs,
             agent_cfg.pop(field, None)
         if per_model_sampling is not None and model_id in per_model_sampling:
             per_model_sampling[model_id].pop(agent_name, None)
+
+
+def oc_loom_plugin_js():
+    """plugins/otools-loom.js -- registers the `loom` custom tool (v2 orchestrator).
+
+    The tool spawns the stdlib-Python loom conductor (this script's `loom` subcommand)
+    against THIS server (`serverUrl` from PluginInput) with the calling session as the
+    parent, then relays the conductor's --json-events lines into the live TUI tool card
+    (ctx.metadata). Esc in the parent fires ctx.abort -> SIGTERM -> the job pauses
+    resumably. Absolute python/script paths are baked at sync time."""
+    python = sys.executable or "python3"
+    script = os.path.abspath(__file__)
+    return f"""// otools-loom.js  --  AUTO-GENERATED by omodel-wire.py (loom v2 orchestrator).
+// Registers the `loom` custom tool: one call runs the plan/code/test/review pipeline
+// deterministically over the agent-* workers, as REAL child sessions of the caller.
+import {{ tool }} from "@opencode-ai/plugin"
+
+const PYTHON = {json.dumps(python)}
+const SCRIPT = {json.dumps(script)}
+
+export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
+  return {{
+    tool: {{
+      loom: tool({{
+        description:
+          "Deterministic feature pipeline (plan/code/test/review over the agent-* workers). " +
+          "action 'run' starts a job (needs packet, risk); 'resume' continues a paused job " +
+          "(needs job, optional note); 'pr' creates and reviews the PR for a finished job (needs job).",
+        args: {{
+          action: tool.schema.enum(["run", "resume", "pr"]).describe("what to do"),
+          packet: tool.schema.string().optional()
+            .describe("run: goal + acceptance criteria + scope boundary, plain text"),
+          risk: tool.schema.enum(["simple", "medium", "high"]).optional()
+            .describe("run: risk class (default medium)"),
+          job: tool.schema.number().optional().describe("resume/pr: job id from the report"),
+          note: tool.schema.string().optional().describe("resume: operator guidance to fold in"),
+        }},
+        async execute(args, ctx) {{
+          const argv = [PYTHON, SCRIPT, "loom"]
+          if (args.action === "run") {{
+            if (!args.packet) return "loom: 'run' needs a packet (goal + criteria + scope)."
+            argv.push("run", "--attach", String(serverUrl), "--parent", ctx.sessionID,
+                      "--risk", args.risk || "medium", "--dir", directory,
+                      "--json-events", "--packet", args.packet)
+          }} else if (args.action === "resume") {{
+            if (args.job == null) return "loom: 'resume' needs the job id."
+            argv.push("resume", "--job", String(args.job),
+                      "--attach", String(serverUrl), "--json-events")
+            if (args.note) argv.push("--note", args.note)
+          }} else {{
+            if (args.job == null) return "loom: 'pr' needs the job id."
+            argv.push("pr", "--job", String(args.job), "--attach", String(serverUrl))
+          }}
+          const proc = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
+          const onAbort = () => {{ try {{ proc.kill("SIGTERM") }} catch {{}} }}
+          ctx.abort.addEventListener("abort", onAbort, {{ once: true }})
+          let report = ""
+          const lines = []
+          const dec = new TextDecoder()
+          let buf = ""
+          for await (const chunk of proc.stdout) {{
+            buf += dec.decode(chunk, {{ stream: true }})
+            let i
+            while ((i = buf.indexOf("\\n")) >= 0) {{
+              const line = buf.slice(0, i)
+              buf = buf.slice(i + 1)
+              if (!line.trim()) continue
+              let ev
+              try {{ ev = JSON.parse(line) }} catch {{ lines.push(line); continue }}
+              if (ev.type === "report") {{ report = ev.report; continue }}
+              lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
+              try {{ ctx.metadata({{ title: ev.title || ev.detail || ev.type }}) }} catch {{}}
+            }}
+          }}
+          const err = await new Response(proc.stderr).text()
+          const code = await proc.exited
+          const log = lines.join("\\n")
+          if (report)
+            return {{ title: "loom report", output: report, metadata: {{ exitCode: code }} }}
+          if (code !== 0)
+            return {{ title: "loom failed", output: (log + "\\n" + err).trim() || `exit ${{code}}` }}
+          return {{ title: "loom", output: log || "(no output)" }}
+        }},
+      }}),
+    }},
+  }}
+}}
+"""
 
 
 def oc_agent_sampling_plugin_js(per_model_sampling, default_model_id):
@@ -2407,7 +2600,7 @@ def oc_audit(args):
             continue
         exp_agents, exp_sampling = oc_build_recipe_agents(model_ref, rec, caps)
         for name in sorted(exp_sampling):
-            if name == "team":       # orchestrator; audited on its own model, not here
+            if name in ("team", "loom"):  # orchestrators; audited on their own model, not here
                 continue
             act = _audit_vec(agents.get(name, {}), pm.get(name))
             exp = _audit_vec(exp_agents.get(name, {}), exp_sampling.get(name))
@@ -2750,6 +2943,12 @@ def oc_sync(args, sampling, detected_installed):
     else:
         plugin_js, write_plugin = None, False
 
+    # Loom tool plugin: written whenever the roster includes the loom agent (and the
+    # conductor module is importable), so the `loom` custom tool exists server-side.
+    loom_plugin_path = os.path.join(os.path.dirname(config_path), "plugins", "otools-loom.js")
+    write_loom_plugin = bool(cfg.get("agent", {}).get("loom")) and loom_mod is not None
+    loom_plugin_js = oc_loom_plugin_js() if write_loom_plugin else None
+
     print(f"\nDiscovered {len(refs)} model(s); removed {len(removed)} stale provider(s).")
     if args.profiles:
         rc = len(reasoning_caps)
@@ -2788,6 +2987,9 @@ def oc_sync(args, sampling, detected_installed):
         if write_plugin:
             print(f"\n--- DRY RUN: would write {plugin_path} ---")
             print(plugin_js)
+        if write_loom_plugin:
+            print(f"\n--- DRY RUN: would write {loom_plugin_path} ---")
+            print(loom_plugin_js)
         for agent_name, prompt_path in role_prompt_paths.items():
             print(f"\n--- DRY RUN: would write {prompt_path} ---")
             print(team_prompt_text(team_budget) if agent_name == "team"
@@ -2830,6 +3032,17 @@ def oc_sync(args, sampling, detected_installed):
         with open(plugin_path, "w") as f:
             f.write(plugin_js)
         print(f"Wrote {plugin_path}")
+    if write_loom_plugin:
+        os.makedirs(os.path.dirname(loom_plugin_path), exist_ok=True)
+        with open(loom_plugin_path, "w") as f:
+            f.write(loom_plugin_js)
+        print(f"Wrote {loom_plugin_path}  (loom tool)")
+    elif os.path.exists(loom_plugin_path) and not cfg.get("agent", {}).get("loom"):
+        try:
+            os.remove(loom_plugin_path)
+            print(f"Removed {loom_plugin_path} (no loom agent in roster)")
+        except OSError:
+            pass
     elif sampling["mode"] == "opencode-default" and os.path.exists(plugin_path):
         try:
             os.remove(plugin_path)
@@ -4554,6 +4767,10 @@ def _build_parser():
                          help="install the `omw` shell alias")
     psi.set_defaults(func=cmd_shell_init)
 
+    if loom_mod is not None:
+        pl = loom_mod.add_parser(sub)
+        pl.set_defaults(func=cmd_loom)
+
     pp = sub.add_parser("proxy", parents=[io_parent],
                         help="debug proxy: log OpenCode<->model traffic (on|off|replay|read|status)")
     pp.add_argument("action", choices=["on", "off", "replay", "read", "status"],
@@ -4639,6 +4856,15 @@ def _providers_for_target(cfg, target):
     if not mid:
         return []
     return [k for k in managed if mid in ((providers[k].get("models") or {}))]
+
+
+def cmd_loom(args):
+    """Dispatch `omw loom ...` into the conductor module (utils/omw_loom.py)."""
+    if loom_mod is None:
+        print("loom: utils/omw_loom.py is missing or unloadable", file=sys.stderr)
+        return 2
+    return loom_mod.dispatch(args, wire_settings=load_settings(),
+                             default_models_path=DEFAULT_MODELS_FILE)
 
 
 def cmd_proxy(args):

@@ -698,9 +698,41 @@ class TestSyncEndToEnd(unittest.TestCase):
                                 "final-message rule must come last")
                 if agent_name == "team":
                     self.assertIn("never sees worker output directly", body)
+                elif agent_name == "loom":
+                    self.assertIn("relaying the loom report", body)
+                    self.assertIn("calling the `loom`", body)
                 else:
                     self.assertIn("Never stop on a bare tool call", body)
                     self.assertIn("Your role skill defines the exact format", body)
+
+    def test_loom_agent_plugin_and_tool_gating(self):
+        # v2 orchestrator: loom is a primary with exactly ONE tool (the plugin-
+        # provided `loom` custom tool); every other agent has that tool hidden;
+        # the plugin file is generated with the baked conductor invocation.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sync(tmp)
+            with open(os.path.join(tmp, "opencode.json"), encoding="utf-8") as f:
+                cfg = json.load(f)
+            loom_agent = cfg["agent"]["loom"]
+            self.assertEqual(loom_agent["mode"], "primary")
+            self.assertEqual(loom_agent["tools"], {"loom": True})
+            self.assertEqual(loom_agent["permission"]["task"], "deny")
+            self.assertEqual(loom_agent["permission"]["edit"], "deny")
+            self.assertEqual(loom_agent["permission"]["bash"], "deny")
+            self.assertIn("otools-agent-loom.md", loom_agent["prompt"])
+            for name, a in cfg["agent"].items():
+                if name == "loom" or name not in m.MANAGED_AGENTS or a.get("disable"):
+                    continue
+                self.assertEqual((a.get("tools") or {}).get("loom"), False,
+                                 f"{name} must not see the loom tool")
+            pj = os.path.join(tmp, "plugins", "otools-loom.js")
+            self.assertTrue(os.path.exists(pj), "loom tool plugin not written")
+            with open(pj, encoding="utf-8") as f:
+                js = f.read()
+            self.assertIn('tool.schema.enum(["run", "resume", "pr"])', js)
+            self.assertIn("ctx.sessionID", js)
+            self.assertIn("--json-events", js)
+            self.assertIn("omodel-wire.py", js.replace("\\\\", "/"))
 
     def test_worker_role_skills_carry_return_contract(self):
         for name in ("agent-code", "agent-research", "agent-test", "agent-instruct",
