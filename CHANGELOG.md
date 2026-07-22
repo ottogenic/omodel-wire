@@ -36,6 +36,28 @@ All notable changes to this project are documented here. The format follows
   (`#8b5cf6`).
 
 ### Changed
+- **Workers close with a `NEXT STEPS FOR team:` line naming the next agent.** Handoffs used to be
+  one-way: `team` alone knew the pipeline, so a cheaper model running it would misroute (sending a
+  fix to `agent-research` instead of `agent-review`) or batch every review finding into one
+  `agent-code` call. Each worker now restates the route it expects — `agent-code` to `agent-test`,
+  `agent-test` to `agent-review` on pass or back to the same `agent-code` session on failure,
+  `agent-architect` to `agent-code` with a plan or to `agent-research` for facts — so the routing
+  is reinforced from both ends.
+- **`agent-code` is always followed by `agent-test`.** Removing the "does this need testing?"
+  judgment call takes a decision away from `team`; every fix, including a one-line review fix,
+  reaches `agent-review` with test evidence attached.
+- **Review findings are fixed one at a time, tracked with `todowrite`.** `team` opens a NEW
+  `agent-code` session per finding, routes it through `agent-test` back to the SAME `agent-review`
+  session, and only starts the next finding once that one clears. Re-reviews resume the original
+  `agent-review` `task_id` instead of opening a second one. `team` now holds `todowrite: allow`
+  explicitly so a future blanket deny cannot silently drop the ledger.
+- **`agent-architect` plans; it does not review.** Its skill is now scoped to exactly two outputs —
+  an implementation plan, or a request for the research needed before planning — plus blocker
+  diagnosis for a `BLOCKED` `agent-code`. Finding issues in completed work belongs to
+  `agent-review`.
+- **Role skills name agents exactly.** Every skill body now says `agent-code`, `agent-test`, and
+  `agent-review` rather than "coder", "tester", and "reviewer", matching the literal names in
+  `opencode.json` so a cheap model cannot conflate a role word with the wrong agent.
 - **Agent system prompts are now minimal skill bootstraps.** Durable role behavior is visible and
   editable as skills, while the prompts only enforce override-first, otherwise global-then-extend
   loading. Role skills restore the relevant OpenCode default safeguards: inspect before editing,
