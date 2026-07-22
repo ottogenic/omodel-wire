@@ -7,6 +7,37 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Three-part role prompts restore two verified pre-0.2 findings.** Every role prompt (`team` +
+  the six workers) now opens with the action-first instruction ("Complete the task by calling the
+  provided tools...") whose leading position prevents Qwen3-family models from narrating tool calls
+  as text (measured 1/8 vs 15/15 on n1), and closes with the results-bearing final-message rule
+  (OpenCode #18423 countermeasure) so it holds even when skill loading fails. The skill-load logic
+  between them is now numbered steps naming the literal `skill` tool; the exact message format
+  lives only in the skill's Return Contract, so the prompt states the invariant and defers the
+  format ("one rule, one home").
+- **Structured worker returns: RESULT / EVIDENCE / STATUS / NEXT STEPS FOR team.** The shared
+  Return Contract now labels what the worker did, what its commands returned, its status, and the
+  route -- giving `team` a fixed shape to parse. The anti-spin trigger is operational instead of a
+  judgment call: a second `CONTINUE` with nothing new in EVIDENCE must become `BLOCKED`.
+- **`team` skill teaches the exact task-tool mechanics** (restoring the retired TEAM_PROMPT's
+  Continuity section, verified against OpenCode's `task.ts`): delegate with `subagent_type`, read
+  the returned `<task id="...">`, resume by passing it as `task_id` (same context, fresh step
+  budget), never share a task_id across workers. Worker `NEXT STEPS FOR team` lines are declared
+  advisory -- the skill's routing rules stay authoritative.
+- **`agent-instruct` gained the `## Next Steps` section it was missing** (`DONE` -> agent-test,
+  `BLOCKED` -> agent-code) and its run-on rules became bullets, matching the other workers.
+
+### Changed
+- **`agent-architect` is structured as its three actual jobs** (Plan / Request Research / Diagnose
+  A Blocker), fixing the "two things and nothing else" wording that contradicted its diagnosis
+  duty, and adding the missing diagnosis route to its Next Steps.
+- **Clarity pass over the role skills, consolidation-only** (no rule added, dropped, or weakened):
+  `agent-code` restructured into Before Editing / Rules / Verify Your Change with the
+  compatibility-layer jargon simplified to a shim rule; `agent-test`'s pre-existing-failure
+  sentence made operational (label pre-existing only with evidence, else unclassified);
+  `agent-review`'s PR conditions split into a numbered PR Review checklist; `team`'s Mechanical
+  route made explicit (agent-instruct, falling back to agent-code on BLOCKED) and Completion And
+  Git numbered.
 - **Visible global role skills with project extend/override layers.** Team and all six delegation
   workers now keep their operating logic in `agent-team`, `agent-code`, `agent-research`,
   `agent-test`, `agent-instruct`, `agent-architect`, and `agent-review` under OpenCode's global

@@ -683,10 +683,24 @@ class TestSyncEndToEnd(unittest.TestCase):
                 self.assertIn(f"`{skill_name}-extend`", body)
                 self.assertLess(body.index(f"`{skill_name}-override`"),
                                 body.index(f"`{skill_name}-extend`"))
-                self.assertIn("load it exclusively", body)
-                self.assertIn("cannot weaken or contradict", body)
-                self.assertIn("NEVER probe a missing skill", body)
-                self.assertEqual(len(body.splitlines()), 5, "bootstrap prompt should stay five lines")
+                # Three-part prompt, in order: action-first opener (the verified
+                # qwen3 narrate-vs-call fix -- MUST come first), numbered skill-load
+                # steps, then the results-bearing final-message rule (#18423).
+                self.assertTrue(body.startswith(f"You are `{agent_name}`"),
+                                f"{agent_name} prompt must open with its identity")
+                self.assertLess(body.index("calling the"), body.index("load your role skill"),
+                                "action-first opener must precede skill loading")
+                self.assertIn("load only that skill", body)
+                self.assertIn(f"follow `{skill_name}`", body)
+                self.assertIn("Never call `skill` with a name that is not", body)
+                self.assertLess(body.index("load your role skill"),
+                                body.index("end with a plain-text message"),
+                                "final-message rule must come last")
+                if agent_name == "team":
+                    self.assertIn("never sees worker output directly", body)
+                else:
+                    self.assertIn("Never stop on a bare tool call", body)
+                    self.assertIn("Your role skill defines the exact format", body)
 
     def test_worker_role_skills_carry_return_contract(self):
         for name in ("agent-code", "agent-research", "agent-test", "agent-instruct",
@@ -697,9 +711,35 @@ class TestSyncEndToEnd(unittest.TestCase):
                 self.assertIn(status, skill)
             self.assertIn("Do not spin", skill)
 
+    def test_return_contract_structure_and_anti_spin(self):
+        # RESULT/EVIDENCE labels give `team` parseable output; the anti-spin
+        # trigger is operational (nothing new in EVIDENCE), not a judgment call.
+        contract = m.WORKER_STATUS_CONTRACT
+        for label in ("RESULT:", "EVIDENCE:", "STATUS:", "NEXT STEPS FOR team:"):
+            self.assertIn(label, contract)
+        self.assertIn("nothing new in EVIDENCE", contract)
+        self.assertNotIn("about two", contract)
+
+    def test_instruct_has_next_steps_routes(self):
+        self.assertIn("NEXT STEPS FOR team: Send to agent-test.", m.AGENT_INSTRUCT_SKILL)
+        self.assertIn("NEXT STEPS FOR team: Send this task to agent-code instead.",
+                      m.AGENT_INSTRUCT_SKILL)
+
+    def test_team_skill_teaches_task_id_mechanics(self):
+        # The old TEAM_PROMPT's Continuity section, restored with the exact task-tool
+        # semantics from OpenCode's task.ts: result id -> task_id parameter to resume.
+        skill = m.AGENT_TEAM_SKILL
+        self.assertIn("## How To Delegate", skill)
+        self.assertIn("`subagent_type`", skill)
+        self.assertIn('<task id="...">', skill)
+        self.assertIn("`task_id` parameter", skill)
+        self.assertIn("fresh step budget", skill)
+        # Workers suggest routes; team's own rules stay authoritative.
+        self.assertIn("advisory", skill)
+
     def test_code_test_review_skills_split_verification_work(self):
         self.assertIn("Run focused checks", m.AGENT_CODE_SKILL)
-        self.assertIn("Leave full suites", m.AGENT_CODE_SKILL)
+        self.assertIn("Do NOT run full suites", m.AGENT_CODE_SKILL)
         self.assertIn("Run the broad verification", m.AGENT_TEST_SKILL)
         self.assertIn("`agent-code` owns tight edit/test loops", m.AGENT_TEST_SKILL)
         self.assertIn("`agent-test` output as the primary command evidence", m.AGENT_REVIEW_SKILL)
@@ -756,10 +796,14 @@ class TestSyncEndToEnd(unittest.TestCase):
 
     def test_architect_plans_and_never_reviews_completed_work(self):
         skill = m.AGENT_ARCHITECT_SKILL
-        self.assertIn("You do two things and nothing else", skill)
-        self.assertIn("**Plan**", skill)
-        self.assertIn("**Request research**", skill)
-        self.assertIn("You never review completed code. `agent-review` owns that.", skill)
+        self.assertIn("You do exactly three jobs", skill)
+        self.assertIn("## 1. Plan", skill)
+        self.assertIn("## 2. Request Research", skill)
+        self.assertIn("## 3. Diagnose A Blocker", skill)
+        self.assertIn("You never review completed work", skill)
+        self.assertIn("`agent-review` owns that", skill)
+        self.assertIn("Blocker diagnosed -> `NEXT STEPS FOR team: Send this correction to the "
+                      "same agent-code session that was blocked.`", skill)
         self.assertIn("Never reviews completed work.", m.AGENT_TEAM_SKILL)
 
     def test_role_skills_name_agents_exactly_not_role_words(self):
@@ -1826,8 +1870,7 @@ class TestCliMutations(unittest.TestCase):
             prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES["team"])
             with open(prompt, encoding="utf-8") as f:
                 body = f.read()
-            self.assertIn("7", body)
-            self.assertEqual(len(body.splitlines()), 5)
+            self.assertIn("Delegation budget: at most 7 task calls", body)
             self.assertFalse(os.path.exists(os.path.join(tmp, "prompts", "otools-team.md")))
 
     def test_set_model_temperature_hits_all_role_agents_and_plugin(self):
