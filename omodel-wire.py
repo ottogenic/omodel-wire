@@ -2010,6 +2010,55 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             if (args.job == null) return "loom: 'pr' needs the job id."
             argv.push("pr", "--job", String(args.job), "--attach", String(serverUrl))
           }}
+          // ---- live tool-card updates ------------------------------------------
+          // Upstream, plugin ctx.metadata() is a silent no-op (registry.ts bridges
+          // `ask` into a Promise but spreads the Effect-returning `metadata` through
+          // unrun), and the TUI's GenericTool renders ONLY state.input while a tool
+          // runs. So we self-serve: PATCH our own tool part over the server API
+          // (the same session.updatePart primitive the internal callback uses) and
+          // carry the live status in state.input, which GenericTool repaints via
+          // SSE. Original input is restored before the call completes.
+          const base = String(serverUrl).replace(/\\/$/, "")
+          const auth = process.env.OPENCODE_SERVER_PASSWORD
+            ? {{ Authorization: "Basic " +
+                 btoa("opencode:" + process.env.OPENCODE_SERVER_PASSWORD) }}
+            : {{}}
+          let partCache
+          let origInput
+          const findPart = async () => {{
+            const r = await fetch(
+              `${{base}}/session/${{ctx.sessionID}}/message/${{ctx.messageID}}`,
+              {{ headers: auth }})
+            if (!r.ok) return null
+            const msg = await r.json()
+            return (msg.parts || []).find(
+              (p) => p.type === "tool" && p.callID === ctx.callID) || null
+          }}
+          const patchPart = async (mutate) => {{
+            try {{
+              if (partCache === undefined) {{
+                partCache = await findPart()
+                if (partCache) origInput = partCache.state?.input
+              }}
+              if (!partCache || partCache.state?.status !== "running") return
+              const p = {{ ...partCache, state: {{ ...partCache.state }} }}
+              mutate(p)
+              const r = await fetch(
+                `${{base}}/session/${{p.sessionID}}/message/${{p.messageID}}/part/${{p.id}}`,
+                {{ method: "PATCH",
+                   headers: {{ "content-type": "application/json", ...auth }},
+                   body: JSON.stringify(p) }})
+              if (r.ok) partCache = await r.json()
+            }} catch {{}}
+          }}
+          const updateCard = (title) => patchPart((p) => {{
+            p.state.title = title
+            p.state.input = {{ loom: title }}
+          }})
+          const restoreCard = () => patchPart((p) => {{
+            if (origInput !== undefined) p.state.input = origInput
+          }})
+
           const proc = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
           const onAbort = () => {{ try {{ proc.kill("SIGTERM") }} catch {{}} }}
           ctx.abort.addEventListener("abort", onAbort, {{ once: true }})
@@ -2028,11 +2077,14 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
               try {{ ev = JSON.parse(line) }} catch {{ lines.push(line); continue }}
               if (ev.type === "report") {{ report = ev.report; continue }}
               lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
-              try {{ ctx.metadata({{ title: ev.title || ev.detail || ev.type }}) }} catch {{}}
+              const title = ev.title || ev.detail || ev.type
+              try {{ ctx.metadata({{ title }}) }} catch {{}}   // no-op today; upstream fix welcome
+              await updateCard(title)
             }}
           }}
           const err = await new Response(proc.stderr).text()
           const code = await proc.exited
+          await restoreCard()
           const log = lines.join("\\n")
           if (report)
             return {{ title: "loom report", output: report, metadata: {{ exitCode: code }} }}

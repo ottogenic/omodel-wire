@@ -733,6 +733,11 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("ctx.sessionID", js)
             self.assertIn("--json-events", js)
             self.assertIn("omodel-wire.py", js.replace("\\\\", "/"))
+            # Live card updates self-serve via part PATCH (upstream ctx.metadata is
+            # a no-op for plugin tools, and GenericTool only renders state.input).
+            self.assertIn('method: "PATCH"', js)
+            self.assertIn("/part/", js)
+            self.assertIn("restoreCard", js)
 
     def test_worker_role_skills_carry_return_contract(self):
         for name in ("agent-code", "agent-research", "agent-test", "agent-instruct",
