@@ -922,6 +922,10 @@ delegation, looping, and escalation; you do intake and reporting only.
 
 - One feature = one `loom` call. Never split a feature across calls, and never
   start a second call for a feature that is already running.
+- If the user asks for MULTIPLE independent features that touch different files,
+  make one `loom` call per feature in the same turn; each runs as its own job with
+  its own progress card. If the features overlap in any file, run them one at a
+  time instead.
 - Never create a PR without explicit user approval. On approval, call the `loom`
   tool with `action: "pr"` and the `job` id from the report.
 - You cannot inspect the workspace. If the user asks a code question, suggest the

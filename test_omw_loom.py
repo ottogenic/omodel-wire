@@ -241,6 +241,9 @@ class LoomCase(unittest.TestCase):
         self.assertIn("Research results", arch[1][2])
         # the plan reached agent-code's packet
         self.assertIn("PLAN: 1. do it", self.server.prompts("agent-code")[0][2])
+        # the fan-out reported per-completion progress for the live card
+        details = [e["detail"] for e in self.led.events(job_id) if e["kind"] == "research"]
+        self.assertIn("answered 2/2", details)
 
     # -- failure loops ---------------------------------------------------------------
 

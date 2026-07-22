@@ -532,6 +532,8 @@ class Loom:
         Thread errors are collected and re-raised (never swallowed)."""
         results = [None] * len(questions)
         errors = []
+        done = [0]
+        lock = threading.Lock()
         sem = threading.Semaphore(self.cfg["research_parallel"])
 
         def one(i, q):
@@ -544,6 +546,13 @@ class Loom:
                         f"Answer this question for the current repository/goal.\n\n"
                         f"QUESTION: {q}")
                     results[i] = f"QUESTION: {q}\nANSWER:\n{parsed['result'] or raw}"
+                    with lock:
+                        done[0] += 1
+                        n = done[0]
+                    # Keep the live tool card honest about parallel progress.
+                    self.emit("research", f"answered {n}/{len(questions)}",
+                              title=f"research: {n}/{len(questions)} answered "
+                                    f"({len(questions) - n} running)")
                 except LoomPaused:
                     pass
                 except Exception as e:  # noqa: BLE001 -- re-raised below
