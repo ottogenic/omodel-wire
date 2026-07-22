@@ -45,6 +45,9 @@ class FakeOpenCode:
         self.sessions = []          # created session dicts
         self.aborted = []
         self.deleted = []
+        self.sse_events = []        # scripted /event payloads (SSE)
+        self.sse_delay = 0.05       # seconds before the /event stream emits
+        self.message_delay = 0.0    # seconds before a message POST answers
         self._n = 0
         self._lock = threading.Lock()
         outer = self
@@ -69,6 +72,18 @@ class FakeOpenCode:
             def do_GET(self):
                 with outer._lock:
                     outer.requests.append(("GET", self.path, {}))
+                if self.path == "/event":
+                    # Minimal SSE: emit the scripted events once, then close.
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.end_headers()
+                    import time as _t
+                    _t.sleep(outer.sse_delay)
+                    for ev in outer.sse_events:
+                        self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                    self.wfile.flush()
+                    _t.sleep(0.3)
+                    return
                 self._send(outer.sessions)
 
             def do_POST(self):
@@ -90,6 +105,9 @@ class FakeOpenCode:
                     self._send({})
                     return
                 # /session/{id}/message
+                if outer.message_delay:
+                    import time as _t
+                    _t.sleep(outer.message_delay)
                 sid = self.path.split("/")[2]
                 agent = body.get("agent", "?")
                 with outer._lock:
@@ -403,6 +421,58 @@ class LoomCase(unittest.TestCase):
         for _, agent, _, model in self.server.prompts():
             self.assertEqual(model, {"providerID": "google", "modelID": "gemini-cheap"},
                              f"{agent} must run on the override model")
+
+    # -- live activity narration -----------------------------------------------------------
+
+    def test_describe_part_variants(self):
+        d = loom.describe_part
+        self.assertEqual(d({"type": "reasoning"}), "thinking...")
+        self.assertEqual(
+            d({"type": "tool", "tool": "bash",
+               "state": {"status": "running", "input": {"command": "python3  -m pytest -x"}}}),
+            "$ python3 -m pytest -x")
+        self.assertEqual(
+            d({"type": "tool", "tool": "todowrite",
+               "state": {"status": "running", "input": {"todos": [
+                   {"status": "completed"}, {"status": "pending"}, {"status": "completed"}]}}}),
+            "todos 2/3")
+        self.assertEqual(
+            d({"type": "tool", "tool": "edit",
+               "state": {"status": "running", "input": {"filePath": "/a/b/hello.py"}}}),
+            "edit hello.py")
+        self.assertIsNone(d({"type": "text"}))
+        self.assertIsNone(d({"type": "tool", "tool": "bash", "state": {"status": "error"}}))
+
+    def test_activity_watcher_narrates_active_worker(self):
+        # While agent-code's prompt is in flight, a part event for ITS session must
+        # surface as an ephemeral activity line (stdout only, not the ledger).
+        import io
+        self.server.message_delay = 0.6
+        self.server.sse_events = [{
+            "type": "message.part.updated",
+            "properties": {"part": {"sessionID": "ses_1", "type": "tool", "tool": "bash",
+                                    "state": {"status": "running",
+                                              "input": {"command": "pytest -q"}}}},
+        }]
+        self.server.responses = {
+            "agent-code": [reply("DONE")],
+            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        }
+        out = io.StringIO()
+        tp = loom.Transport(self.server.url, retries=1)
+        job_id = self.led.create_job(dir=self.tmp.name, server_url=self.server.url,
+                                     parent_session="ses_parent", goal="g", risk="simple")
+        lm = loom.Loom(self.led, tp, job_id, cfg=self.cfg, json_events=True, out=out)
+        lm.run()
+        lines = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        acts = [l for l in lines if l["type"] == "activity"]
+        self.assertTrue(acts, "no activity events were narrated")
+        self.assertIn("$ pytest -q", acts[0]["detail"])
+        self.assertIn("code", acts[0]["detail"])
+        # ledger stays transition-only
+        kinds = {e["kind"] for e in self.led.events(job_id)}
+        self.assertNotIn("activity", kinds)
 
     # -- stop/resume + hygiene ------------------------------------------------------------
 

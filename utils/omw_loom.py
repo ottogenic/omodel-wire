@@ -144,6 +144,41 @@ def evidence_key(parsed):
     return re.sub(r"\s+", " ", (parsed.get("evidence") or parsed.get("result") or "")).strip().lower()
 
 
+def describe_part(part):
+    """Compact one-liner for a worker's in-flight message part, or None to skip.
+    Feeds the live tool card: 'implement: code . $ pytest -x' beats 'working...'."""
+    ptype = part.get("type")
+    if ptype == "reasoning":
+        return "thinking..."
+    if ptype != "tool":
+        return None
+    tool = part.get("tool") or "tool"
+    state = part.get("state") or {}
+    if state.get("status") not in ("pending", "running", "completed"):
+        return None
+    inp = state.get("input") or {}
+    if tool in ("bash", "shell"):
+        cmd = " ".join(str(inp.get("command", "")).split())[:60]
+        return f"$ {cmd}" if cmd else "running a command"
+    if tool == "todowrite":
+        todos = inp.get("todos") or []
+        done = sum(1 for t in todos if isinstance(t, dict) and t.get("status") == "completed")
+        return f"todos {done}/{len(todos)}" if todos else "updating todos"
+    if tool in ("edit", "write", "read", "apply_patch"):
+        path = str(inp.get("filePath") or inp.get("file_path") or inp.get("path") or "")
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return f"{tool} {name}".strip()
+    if tool in ("grep", "glob"):
+        return f"{tool} {str(inp.get('pattern', ''))[:30]}".strip()
+    if tool == "skill":
+        return f"skill {inp.get('name', '')}".strip()
+    if tool in ("webfetch", "websearch"):
+        target = str(inp.get("url") or inp.get("query") or "")[:40]
+        return f"{tool} {target}".strip()
+    title = state.get("title")
+    return f"{tool} {title}" if title else tool
+
+
 # ---------------------------------------------------------------------------
 # OpenCode server transport (urllib; retries connection errors, not HTTP ones).
 # ---------------------------------------------------------------------------
@@ -386,7 +421,8 @@ class Loom:
         self.json_events = json_events
         self.out = out or sys.stdout
         self.stop_flag = threading.Event()
-        self.active_session = None
+        self.active = {}            # session_id -> (role, purpose) while a prompt is in flight
+        self.act_lock = threading.Lock()
 
     # ---- event/progress plumbing -------------------------------------------------
     def emit(self, kind, detail="", title=None):
@@ -397,11 +433,67 @@ class Loom:
         else:
             print(f"[loom #{self.job_id}] {kind}: {detail}", file=self.out, flush=True)
 
+    def emit_activity(self, text):
+        """Ephemeral live-card line (worker's current bash/edit/todo/thought).
+        Deliberately NOT written to the ledger -- transitions stay the durable log."""
+        if self.json_events:
+            print(json.dumps({"type": "activity", "detail": text, "title": text}),
+                  file=self.out, flush=True)
+        else:
+            print(f"[loom #{self.job_id}] activity: {text}", file=self.out, flush=True)
+
+    def start_activity_watcher(self):
+        """Subscribe to the server's SSE /event stream on a daemon thread and
+        translate the active workers' part updates into live card lines."""
+        threading.Thread(target=self._watch_activity, daemon=True).start()
+
+    def _watch_activity(self):
+        url = self.tp.base + "/event"
+        last_text, last_ts = None, 0.0
+        while not self.stop_flag.is_set():
+            try:
+                req = urllib.request.Request(url, headers={"accept": "text/event-stream"})
+                with urllib.request.urlopen(req) as stream:
+                    for raw in stream:
+                        if self.stop_flag.is_set():
+                            return
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            ev = json.loads(line[5:].strip())
+                        except ValueError:
+                            continue
+                        if ev.get("type") != "message.part.updated":
+                            continue
+                        part = (ev.get("properties") or {}).get("part") or {}
+                        with self.act_lock:
+                            info = self.active.get(part.get("sessionID"))
+                        if not info:
+                            continue
+                        desc = describe_part(part)
+                        if not desc:
+                            continue
+                        role, purpose = info
+                        text = f"{purpose}: {role.replace('agent-', '')} . {desc}"
+                        now = time.time()
+                        if text == last_text and now - last_ts < 5:
+                            continue
+                        last_text, last_ts = text, now
+                        self.emit_activity(text)
+            except Exception:  # noqa: BLE001 -- watcher is best-effort by design
+                pass
+            if self.stop_flag.is_set():
+                return
+            time.sleep(1.0)  # reconnect backoff (also paces non-SSE test servers)
+
     def request_stop(self):
-        """Signal handler / abort path: finish the in-flight call, then pause."""
+        """Signal handler / abort path: finish the in-flight calls, then pause."""
         self.stop_flag.set()
-        if self.active_session:
-            self.tp.abort(self.active_session)
+        with self.act_lock:
+            sids = list(self.active)
+        for sid in sids:
+            self.tp.abort(sid)
 
     def _check_stop(self):
         if self.stop_flag.is_set():
@@ -445,23 +537,15 @@ class Loom:
         prompt = prompt + self._notes_suffix()
         self.emit("dispatch", f"{role} [{purpose}]" + (" (resume)" if resume and not fresh else ""),
                   title=f"{purpose}: {role} working...")
-        self.active_session = sid
-        try:
-            text = self._timed_prompt(sid, prompt, role, model)
-        finally:
-            self.active_session = None
+        text = self._timed_prompt(sid, prompt, role, model, purpose)
         parsed = parse_contract(text)
 
         if parsed["status"] is None and self.cfg.get("nudge_malformed", True):
             self.emit("malformed", f"{role} reply missing STATUS; nudging once")
-            self.active_session = sid
-            try:
-                text = self._timed_prompt(
-                    sid, "Your reply was missing the Return Contract. Repeat your findings and "
-                         "end with the RESULT / EVIDENCE / STATUS / NEXT STEPS FOR team lines "
-                         "exactly as your role skill specifies.", role, model)
-            finally:
-                self.active_session = None
+            text = self._timed_prompt(
+                sid, "Your reply was missing the Return Contract. Repeat your findings and "
+                     "end with the RESULT / EVIDENCE / STATUS / NEXT STEPS FOR team lines "
+                     "exactly as your role skill specifies.", role, model, purpose)
             parsed = parse_contract(text)
         if parsed["status"] is None:
             parsed["status"] = "BLOCKED"
@@ -474,8 +558,9 @@ class Loom:
                   title=f"{purpose}: {role} -> {parsed['status']}")
         return parsed, text
 
-    def _timed_prompt(self, sid, prompt, role, model):
-        """Run the blocking prompt POST in a thread so stop/timeout can abort it."""
+    def _timed_prompt(self, sid, prompt, role, model, purpose=""):
+        """Run the blocking prompt POST in a thread so stop/timeout can abort it.
+        Registers the session as active so the activity watcher narrates it."""
         result, error = {}, {}
 
         def work():
@@ -485,21 +570,28 @@ class Loom:
             except Exception as e:  # noqa: BLE001 -- reported to the state machine
                 error["e"] = e
 
-        t = threading.Thread(target=work, daemon=True)
-        t.start()
-        deadline = time.time() + self.cfg["step_timeout"]
-        while t.is_alive():
-            t.join(timeout=1.0)
-            if self.stop_flag.is_set() or time.time() > deadline:
-                self.tp.abort(sid)
-                t.join(timeout=30)
-                if self.stop_flag.is_set():
-                    raise LoomPaused("stopped during worker step")
-                self.emit("timeout", f"{role} step exceeded {self.cfg['step_timeout']}s; aborted")
-                return result.get("text", "") or ""
-        if "e" in error:
-            raise error["e"]
-        return result.get("text", "")
+        with self.act_lock:
+            self.active[sid] = (role, purpose)
+        try:
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            deadline = time.time() + self.cfg["step_timeout"]
+            while t.is_alive():
+                t.join(timeout=1.0)
+                if self.stop_flag.is_set() or time.time() > deadline:
+                    self.tp.abort(sid)
+                    t.join(timeout=30)
+                    if self.stop_flag.is_set():
+                        raise LoomPaused("stopped during worker step")
+                    self.emit("timeout",
+                              f"{role} step exceeded {self.cfg['step_timeout']}s; aborted")
+                    return result.get("text", "") or ""
+            if "e" in error:
+                raise error["e"]
+            return result.get("text", "")
+        finally:
+            with self.act_lock:
+                self.active.pop(sid, None)
 
     # ---- escalation ladder ----------------------------------------------------------
     def _escalate(self, role, purpose, packet, why):
@@ -574,6 +666,7 @@ class Loom:
         """Single research dispatch -- the loom's Q&A path (no pipeline). Routes a
         factual/current-information question to one agent-research child so the
         loom agent never answers from its own weights."""
+        self.start_activity_watcher()
         try:
             parsed, raw = self._dispatch(
                 "agent-research", "ask",
@@ -596,6 +689,7 @@ class Loom:
             raise
 
     def run(self):
+        self.start_activity_watcher()
         try:
             self._run()
         except LoomPaused:
