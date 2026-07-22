@@ -80,6 +80,7 @@ Built from `AGENT_SPECS`, with per-mode sampling from omodel-manager's configs:
 | `code`            | Tab        | code         | edit/bash **ask** + web |
 | `agent`           | Tab        | agent        | full                    |
 | `team`            | Tab        | orchestrator | delegation-only         |
+| `loom`            | Tab        | orchestrator (v2) | one `loom` tool call |
 | `agent-research`  | hidden     | research     | read-only + web         |
 | `agent-code`      | hidden     | implementation | full                  |
 | `agent-test`      | hidden     | verification | read + checks, no edits |
@@ -100,6 +101,31 @@ The standard flow sends simple work to `agent-code`, routes medium/high-risk wor
 `agent-test` for broad/scripted verification, then sends the tested packet to `agent-review`.
 Only findings classified as blockers or regressions enter the one-at-a-time fix loop. Once verified,
 Team asks whether to create a PR and perform PR review.
+
+### The loom (v2 orchestrator, A/B with `team`)
+
+`loom` runs the SAME pipeline over the SAME workers, but the control flow lives in code instead
+of a model's context window. The `loom` agent does intake only (goal, criteria, scope, risk) and
+makes one call to the `loom` custom tool; the tool runs the stdlib-Python conductor
+(`omw loom run`), which drives the workers as real child sessions of the loom session over the
+server HTTP API. You keep the native TUI experience -- cycle into workers with the arrow keys,
+watch live progress on the tool card -- while routing, fix-loops, anti-spin, and the escalation
+ladder (same session -> fresh session -> bigger model -> pause for you) are deterministic Python
+with every transition in a SQLite ledger.
+
+```bash
+opencode --port 4096       # the TUI is the server; a pinned port lets the CLI reach it
+# ... talk to `loom` in the TUI; or drive it headless:
+omw loom status            # jobs and their phases
+omw loom watch             # live event tail for the newest job
+omw loom say "prefer WAL"  # steer the running job (folded into the next dispatch)
+omw loom resume --job 3 --note "use the staging endpoint"   # continue a paused job
+omw loom pr --job 3        # after your approval: branch/commit/push/PR + PR review
+omw loom clean             # drop finished jobs older than 7 days (+ their sessions)
+```
+
+Both orchestrators ship side by side: Tab to `team` for v1, `loom` for v2, same workers --
+an honest A/B. Tune via `wire.json` `{"loom": {"step_timeout": 1800, "max_attempts": 3, ...}}`.
 
 OpenCode reserves the names `build`/`plan` and ignores overrides on them, so
 `omw sync` **disables** the native pair and ships `research`/`code` in their place,
