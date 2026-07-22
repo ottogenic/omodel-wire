@@ -570,6 +570,31 @@ class Loom:
         return "\n\n".join(r for r in results if r)
 
     # ---- the state machine ---------------------------------------------------------------
+    def run_ask(self, question):
+        """Single research dispatch -- the loom's Q&A path (no pipeline). Routes a
+        factual/current-information question to one agent-research child so the
+        loom agent never answers from its own weights."""
+        try:
+            parsed, raw = self._dispatch(
+                "agent-research", "ask",
+                "Answer this question with current, verified information; cite your "
+                f"sources.\n\nQUESTION: {question}")
+            report = ("LOOM RESEARCH ANSWER\n\n"
+                      f"{parsed['result'] or raw}\n\n"
+                      f"EVIDENCE/SOURCES:\n{parsed['evidence'] or '(inline above)'}")
+            self.led.update_job(self.job_id, status="done", phase="done", report=report)
+            self.emit("done", "research answered", title="answered")
+            if self.json_events:
+                print(json.dumps({"type": "report", "report": report}),
+                      file=self.out, flush=True)
+        except LoomPaused:
+            self.led.update_job(self.job_id, status="paused", report="paused by operator")
+            self.emit("paused", f"ask job {self.job_id} paused")
+        except LoomServerError as e:
+            self.led.update_job(self.job_id, status="error", report=str(e))
+            self.emit("error", str(e))
+            raise
+
     def run(self):
         try:
             self._run()
@@ -841,6 +866,32 @@ def cmd_run(args, wire_settings=None, default_models_path=None):
         led.close()
 
 
+def cmd_ask(args, wire_settings=None, default_models_path=None):
+    led = Ledger(getattr(args, "db", None))
+    try:
+        question = args.question if getattr(args, "question", None) else sys.stdin.read()
+        if not question.strip():
+            print("loom: empty question", file=sys.stderr)
+            return 2
+        tp = Transport(args.attach)
+        job_id = led.create_job(dir=args.dir or os.getcwd(), server_url=args.attach,
+                                parent_session=args.parent, goal=question.strip(),
+                                risk="ask",
+                                worker_model=getattr(args, "worker_model", None))
+        loom = Loom(led, tp, job_id, cfg=loom_config(wire_settings),
+                    model_ranking=_load_ranking(default_models_path) if default_models_path else {},
+                    json_events=getattr(args, "json_events", False))
+        _install_signals(loom)
+        loom.emit("start", f"ask job {job_id}")
+        loom.run_ask(question.strip())
+        job = led.job(job_id)
+        if not getattr(args, "json_events", False):
+            print("\n" + (job["report"] or job["status"]))
+        return 0 if job["status"] == "done" else 3
+    finally:
+        led.close()
+
+
 def cmd_resume(args, wire_settings=None, default_models_path=None):
     led = Ledger(getattr(args, "db", None))
     try:
@@ -1056,6 +1107,15 @@ def add_parser(sub, io_parent=None):
     pr.add_argument("--json-events", action="store_true")
     pr.add_argument("--db", help=argparse_suppress())
 
+    pask = lsub.add_parser("ask", help="route one question to agent-research (no pipeline)")
+    pask.add_argument("--attach", required=True, help="OpenCode server URL")
+    pask.add_argument("--parent", required=True, help="parent (loom agent) session id")
+    pask.add_argument("--question", help="the question (else read from stdin)")
+    pask.add_argument("--dir", help="project directory (default: cwd)")
+    pask.add_argument("--worker-model", help="run the research on this model ref")
+    pask.add_argument("--json-events", action="store_true")
+    pask.add_argument("--db", help=argparse_suppress())
+
     pres = lsub.add_parser("resume", help="resume a paused job")
     pres.add_argument("--job", type=int, required=True)
     pres.add_argument("--note", help="operator note folded into the next dispatch")
@@ -1091,6 +1151,8 @@ def dispatch(args, wire_settings=None, default_models_path=None):
     cmd = args.loom_cmd
     if cmd == "run":
         return cmd_run(args, wire_settings, default_models_path)
+    if cmd == "ask":
+        return cmd_ask(args, wire_settings, default_models_path)
     if cmd == "resume":
         return cmd_resume(args, wire_settings, default_models_path)
     if cmd == "status":

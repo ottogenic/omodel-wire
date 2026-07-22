@@ -682,8 +682,9 @@ def _role_bootstrap_prompt(agent_name, skill_name):
     if agent_name == "loom":
         return f"""You are `loom`, the pipeline lead. Complete feature work by calling the `loom`
 tool -- it runs the whole plan/code/test/review pipeline deterministically, streams
-progress, and returns the final report. You have no workspace tools: never attempt to
-read, edit, or run anything yourself.
+progress, and returns the final report. Answer factual or codebase questions through
+the same tool (`action: "ask"`), never from your own knowledge. You have no workspace
+tools: never attempt to read, edit, or run anything yourself.
 
 {_skill_load_steps(skill_name, then="Then start the work.")}
 
@@ -897,6 +898,14 @@ description: Global operating method for `loom`: gather goal, criteria, scope, a
 You run feature work through a deterministic pipeline (agent-architect -> agent-code ->
 agent-test -> agent-review) with ONE call to the `loom` tool. The tool performs all
 delegation, looping, and escalation; you do intake and reporting only.
+
+## Questions Are Not Features
+
+For a factual, current-information, or codebase question (no code change requested):
+1. Call the `loom` tool with `action: "ask"` and the question as `packet`.
+2. Relay the cited answer.
+Never answer such questions from your own knowledge -- you have no web access and no
+workspace tools, but `action: "ask"` routes to `agent-research`, which has both.
 
 ## Procedure
 
@@ -1983,12 +1992,14 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
       loom: tool({{
         description:
           "Deterministic feature pipeline (plan/code/test/review over the agent-* workers). " +
-          "action 'run' starts a job (needs packet, risk); 'resume' continues a paused job " +
-          "(needs job, optional note); 'pr' creates and reviews the PR for a finished job (needs job).",
+          "action 'run' starts a job (needs packet, risk); 'ask' routes one question to " +
+          "agent-research and returns a cited answer (needs packet=the question); 'resume' " +
+          "continues a paused job (needs job, optional note); 'pr' creates and reviews the " +
+          "PR for a finished job (needs job).",
         args: {{
-          action: tool.schema.enum(["run", "resume", "pr"]).describe("what to do"),
+          action: tool.schema.enum(["run", "ask", "resume", "pr"]).describe("what to do"),
           packet: tool.schema.string().optional()
-            .describe("run: goal + acceptance criteria + scope boundary, plain text"),
+            .describe("run: goal + acceptance criteria + scope boundary; ask: the question"),
           risk: tool.schema.enum(["simple", "medium", "high"]).optional()
             .describe("run: risk class (default medium)"),
           job: tool.schema.number().optional().describe("resume/pr: job id from the report"),
@@ -2001,6 +2012,10 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             argv.push("run", "--attach", String(serverUrl), "--parent", ctx.sessionID,
                       "--risk", args.risk || "medium", "--dir", directory,
                       "--json-events", "--packet", args.packet)
+          }} else if (args.action === "ask") {{
+            if (!args.packet) return "loom: 'ask' needs the question in packet."
+            argv.push("ask", "--attach", String(serverUrl), "--parent", ctx.sessionID,
+                      "--dir", directory, "--json-events", "--question", args.packet)
           }} else if (args.action === "resume") {{
             if (args.job == null) return "loom: 'resume' needs the job id."
             argv.push("resume", "--job", String(args.job),

@@ -461,6 +461,38 @@ class LoomCase(unittest.TestCase):
         # exactly one prompt was sent: no nudge, no escalation ladder
         self.assertEqual(len(self.server.prompts("agent-code")), 1)
 
+    def test_ask_routes_one_question_to_research(self):
+        # Questions are not features: `ask` dispatches exactly one agent-research
+        # child (which has web access) and reports its cited answer -- the loom
+        # agent never answers from its own weights.
+        self.server.responses = {
+            "agent-research": [reply("DONE", "Bananas: rich in potassium [usda.gov]",
+                                     "usda.gov/banana, healthline.com/banana")],
+        }
+
+        class Args:
+            attach = self.server.url
+            parent = "ses_parent"
+            question = "current nutrition facts for bananas?"
+            dir = self.tmp.name
+            worker_model = None
+            json_events = True
+            db = self.dbfile
+
+        rc = loom.cmd_ask(Args())
+        self.assertEqual(rc, 0)
+        prompts = self.server.prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0][1], "agent-research")
+        self.assertIn("nutrition facts", prompts[0][2])
+        led = loom.Ledger(self.dbfile)
+        job = led.jobs(limit=1)[0]
+        led.close()
+        self.assertEqual(job["status"], "done")
+        self.assertIn("usda.gov", job["report"])
+        # the research child is parented under the loom session, like all workers
+        self.assertEqual(self.server.created()[0]["parentID"], "ses_parent")
+
     def test_run_returns_nonzero_when_not_done(self):
         blocked = reply("BLOCKED", "stuck", "no")
         self.server.responses = {"agent-code": [blocked] * 5,

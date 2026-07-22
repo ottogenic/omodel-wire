@@ -729,7 +729,7 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(os.path.exists(pj), "loom tool plugin not written")
             with open(pj, encoding="utf-8") as f:
                 js = f.read()
-            self.assertIn('tool.schema.enum(["run", "resume", "pr"])', js)
+            self.assertIn('tool.schema.enum(["run", "ask", "resume", "pr"])', js)
             self.assertIn("ctx.sessionID", js)
             self.assertIn("--json-events", js)
             self.assertIn("omodel-wire.py", js.replace("\\\\", "/"))
