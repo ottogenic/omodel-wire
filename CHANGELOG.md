@@ -7,6 +7,31 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The loom: a deterministic v2 orchestrator, A/B alongside `team`.** A new visible `loom`
+  primary agent does intake only, then makes ONE call to a `loom` custom tool (registered by the
+  generated `plugins/otools-loom.js`). The tool runs the stdlib-Python conductor
+  (`utils/omw_loom.py`, `omw loom run`) against the live OpenCode server: it drives the same
+  plan/code/test/review pipeline over the unchanged `agent-*` workers as REAL child sessions of
+  the loom session (native TUI subagent navigation), parses the Return Contract in code, and
+  enforces the routing/fix-loop/anti-spin rules that v1 `team` carries as prose. Workers, skills,
+  permissions, and step caps are untouched -- `team` remains fully intact for A/B comparison.
+  - **State machine:** plan phase (risk medium/high) with parallel `agent-research` fan-out;
+    test failures loop to the same `agent-code` session; review findings fixed strictly one at a
+    time (new code session per finding, same review session for re-review); operational anti-spin
+    (second CONTINUE with stale EVIDENCE -> BLOCKED -> `agent-architect` diagnosis).
+  - **Escalation ladder:** same-session retry -> fresh session -> next model up the
+    `default_models.json` ranking -> pause for the human, resumable via
+    `omw loom resume --job N --note '...'`.
+  - **Ledger:** SQLite (WAL) at `~/.local/share/otools/loom.db` -- jobs, tasks (session ids),
+    findings, operator notes, and an event log. `omw loom status|watch|log|say|stop|clean|pr`.
+  - **Observability:** the plugin relays conductor events into the live TUI tool card
+    (`ctx.metadata`); Esc in the loom session aborts via `ctx.abort` -> SIGTERM -> job pauses
+    resumably. Model/provider API errors fail loudly with the API message (never consumed as
+    "malformed worker reply").
+  - Config knobs under `wire.json` `{"loom": {...}}`: `step_timeout`, `max_attempts`,
+    `max_test_cycles`, `max_fix_findings`, `research_parallel`, `nudge_malformed`.
+  - Validated live end-to-end (code -> test -> review, one-shot each) on
+    `google/gemini-3.5-flash-lite` with real child-session parenting confirmed.
 - **Three-part role prompts restore two verified pre-0.2 findings.** Every role prompt (`team` +
   the six workers) now opens with the action-first instruction ("Complete the task by calling the
   provided tools...") whose leading position prevents Qwen3-family models from narrating tool calls
