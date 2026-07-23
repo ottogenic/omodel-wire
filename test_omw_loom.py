@@ -370,7 +370,7 @@ class LoomCase(unittest.TestCase):
         code = self.server.prompts("agent-code")
         self.assertEqual(len(code), 2)
         self.assertEqual(code[0][0], code[1][0])
-        self.assertIn("missing the Return Contract", code[1][2])
+        self.assertIn("Return Contract", code[1][2])
 
     # -- escalation ladder -------------------------------------------------------------
 
@@ -566,6 +566,50 @@ class LoomCase(unittest.TestCase):
         self.assertIn("usda.gov", job["report"])
         # the research child is parented under the loom session, like all workers
         self.assertEqual(self.server.created()[0]["parentID"], "ses_parent")
+
+    def test_template_echo_counts_as_malformed_and_gets_nudged(self):
+        # Seen live on the DGX: a weak worker copied the contract's placeholder
+        # text verbatim ("RESULT: what you did or found, ..."). That must parse as
+        # malformed and trigger the nudge -- never ship as the report.
+        echo = ("RESULT: what you did or found, with files as path:line\n"
+                "EVIDENCE: each command or check you ran and what it RETURNED, or your sources\n"
+                "STATUS: DONE\nNEXT STEPS FOR team: the route from Next Steps above")
+        self.assertIsNone(loom.parse_contract(echo)["status"])
+        self.server.responses = {
+            "agent-research": [echo, reply("DONE", "skill file has 128 lines", "read SKILL.md")],
+        }
+
+        class Args:
+            attach = self.server.url
+            parent = "ses_parent"
+            question = "what is in the skill file?"
+            dir = self.tmp.name
+            worker_model = None
+            json_events = True
+            db = self.dbfile
+
+        rc = loom.cmd_ask(Args())
+        self.assertEqual(rc, 0)
+        prompts = self.server.prompts("agent-research")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("never the placeholder text", prompts[1][2])
+        led = loom.Ledger(self.dbfile)
+        job = led.jobs(limit=1)[0]
+        led.close()
+        self.assertIn("128 lines", job["report"])
+        self.assertNotIn("what you did or found", job["report"])
+
+    def test_server_gone_pauses_resumably_instead_of_error(self):
+        # A TUI restart (dead port) mid-job is routine -- pause with an --attach
+        # hint, never a terminal error.
+        tp = loom.Transport("http://127.0.0.1:9", retries=1)  # port 9: refused
+        job_id = self.led.create_job(dir=self.tmp.name, server_url="http://127.0.0.1:9",
+                                     parent_session="ses_parent", goal="g", risk="simple")
+        lm = loom.Loom(self.led, tp, job_id, cfg=self.cfg, out=open(os.devnull, "w"))
+        lm.run()
+        job = self.led.job(job_id)
+        self.assertEqual(job["status"], "paused")
+        self.assertIn("--attach", job["report"])
 
     def test_run_returns_nonzero_when_not_done(self):
         blocked = reply("BLOCKED", "stuck", "no")

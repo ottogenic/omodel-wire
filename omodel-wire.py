@@ -721,12 +721,13 @@ ROLE_PROMPT_FILES = {key: f"otools-{skill}.md" for key, skill in ROLE_SKILL_NAME
 WORKER_STATUS_CONTRACT = """
 ## Return Contract
 
-End every reply with exactly this structure:
+End every reply with exactly this structure, replacing each <placeholder> with your
+actual content -- NEVER repeat the placeholder text itself:
 
-    RESULT: what you did or found, with files as path:line
-    EVIDENCE: each command or check you ran and what it RETURNED, or your sources
-    STATUS: one of DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED
-    NEXT STEPS FOR team: the route from Next Steps above
+    RESULT: <what you did or found, with files as path:line>
+    EVIDENCE: <each command or check you ran and what it RETURNED, or your sources>
+    STATUS: <one of DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED>
+    NEXT STEPS FOR team: <the route from Next Steps above>
 
 - `STATUS: DONE` -- assigned work is complete.
 - `STATUS: CONTINUE` -- making progress with a concrete next step; `team` should resume this task_id.

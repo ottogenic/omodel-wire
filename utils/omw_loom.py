@@ -97,6 +97,12 @@ _RESEARCH_RE = re.compile(r"RESEARCH REQUEST\s*:?\s*(.*)", re.IGNORECASE)
 _FINDING_RE = re.compile(r"^\s*FINDING\s+(\d+)\s*:\s*(.+?)(?=^\s*FINDING\s+\d+\s*:|\Z)",
                          re.MULTILINE | re.DOTALL)
 _CLEAN_RE = re.compile(r"No blocking findings|Review passed", re.IGNORECASE)
+# Weak models sometimes echo the contract's placeholder text instead of filling it
+# (seen live: RESULT "what you did or found, with files as path:line"). A reply whose
+# sections are template echoes is malformed -- it must trigger the nudge, not ship.
+_TEMPLATE_ECHO_RE = re.compile(
+    r"^<?\s*(what you did or found|what you did, with changed files"
+    r"|each command or check you ran|the route from Next Steps)", re.IGNORECASE)
 
 
 def parse_contract(text):
@@ -128,11 +134,14 @@ def parse_contract(text):
             elif research and not ls:
                 break
     findings = [(int(n), body.strip()) for n, body in _FINDING_RE.findall(text)]
+    result, evidence = section("RESULT"), section("EVIDENCE")
+    if _TEMPLATE_ECHO_RE.match(result) or _TEMPLATE_ECHO_RE.match(evidence):
+        status = None  # template echo -> malformed -> the dispatcher nudges
     return {
         "status": status,
         "next_steps": next_steps,
-        "result": section("RESULT"),
-        "evidence": section("EVIDENCE"),
+        "result": result,
+        "evidence": evidence,
         "research": research,
         "findings": findings,
         "clean": bool(_CLEAN_RE.search(text)),
@@ -206,7 +215,7 @@ class Transport:
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
                 last = e
                 time.sleep(min(2 ** attempt, 5))
-        raise LoomServerError(f"{method} {path} unreachable after {self.retries} tries: {last}")
+        raise LoomUnreachable(f"{method} {path} unreachable after {self.retries} tries: {last}")
 
     def sessions(self):
         return self._call("GET", "/session") or []
@@ -245,6 +254,11 @@ class Transport:
 
 class LoomServerError(RuntimeError):
     pass
+
+
+class LoomUnreachable(LoomServerError):
+    """The OpenCode server went away (TUI restart, new port). Jobs hitting this
+    pause resumably instead of erroring -- resume with --attach <new url>."""
 
 
 class LoomPaused(Exception):
@@ -548,9 +562,10 @@ class Loom:
         if parsed["status"] is None and self.cfg.get("nudge_malformed", True):
             self.emit("malformed", f"{role} reply missing STATUS; nudging once")
             text = self._timed_prompt(
-                sid, "Your reply was missing the Return Contract. Repeat your findings and "
-                     "end with the RESULT / EVIDENCE / STATUS / NEXT STEPS FOR team lines "
-                     "exactly as your role skill specifies.", role, model, purpose)
+                sid, "Your reply was missing a filled-in Return Contract. Repeat your ACTUAL "
+                     "findings and end with the RESULT / EVIDENCE / STATUS / NEXT STEPS FOR "
+                     "team lines exactly as your role skill specifies -- with your real "
+                     "content, never the placeholder text.", role, model, purpose)
             parsed = parse_contract(text)
         if parsed["status"] is None:
             parsed["status"] = "BLOCKED"
@@ -688,10 +703,20 @@ class Loom:
         except LoomPaused:
             self.led.update_job(self.job_id, status="paused", report="paused by operator")
             self.emit("paused", f"ask job {self.job_id} paused")
+        except LoomUnreachable as e:
+            self._pause_unreachable(e)
         except LoomServerError as e:
             self.led.update_job(self.job_id, status="error", report=str(e))
             self.emit("error", str(e))
             raise
+
+    def _pause_unreachable(self, e):
+        """Server restart is routine (TUI closed, new port) -- pause, don't error."""
+        msg = (f"paused: the OpenCode server went away ({e}). Restart opencode, then "
+               f"resume with: omw loom resume --job {self.job_id} "
+               f"--attach http://localhost:<port>")
+        self.led.update_job(self.job_id, status="paused", report=msg)
+        self.emit("paused", msg)
 
     def run(self):
         self.start_activity_watcher()
@@ -704,6 +729,8 @@ class Loom:
                                     report="paused by operator")
             self.emit("paused", f"job {self.job_id} paused; resume with: "
                                 f"omw loom resume --job {self.job_id}")
+        except LoomUnreachable as e:
+            self._pause_unreachable(e)
         except LoomServerError as e:
             self.led.update_job(self.job_id, status="error", report=str(e))
             self.emit("error", str(e))
