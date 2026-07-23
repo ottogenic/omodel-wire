@@ -337,6 +337,24 @@ class TestApplyDefaultModels(unittest.TestCase):
         result = m._apply_default_models(agents, default_models, reasoning_caps, available_models)
         self.assertEqual(result["team"]["model"], "openai/gpt-5.5")
 
+    def test_authed_remote_pref_resolves_without_discovery(self):
+        """Regression: agent-review was downgraded to the local qwen on EVERY sync
+        because native-auth cloud prefs (openai/..., github-copilot/...) never
+        appear in the discovered pool. With the provider authed (remote_ok), the
+        remote pref must win over a later local pref."""
+        agents = {"agent-review": {"model": "openai/gpt-5.6-sol", "mode": "subagent"}}
+        dm = {"subagents": {"agent-review": [
+            "openai/gpt-5.6-sol", "github-copilot/claude-opus-4.8",
+            "qwen3.6-35b-a3b-nvfp4-unsloth"]}}
+        avail = {"dgx-localhost-8000/qwen3.6-35b-a3b-nvfp4-unsloth": {}}
+        out = m._apply_default_models(agents, dm, {}, avail,
+                                      remote_ok=frozenset({"openai"}))
+        self.assertEqual(out["agent-review"]["model"], "openai/gpt-5.6-sol")
+        # without auth, the old (local-fallback) behavior is preserved
+        out2 = m._apply_default_models(dict(agents), dm, {}, avail)
+        self.assertEqual(out2["agent-review"]["model"],
+                         "dgx-localhost-8000/qwen3.6-35b-a3b-nvfp4-unsloth")
+
     def test_agent_review_remote_subagent_preference(self):
         """agent-review can prefer a remote reviewer model (anthropic/claude-opus-4-8) if in pool."""
         agents = {"agent-review": {"model": "dgx-n1-8000/qwen3", "mode": "subagent"}}

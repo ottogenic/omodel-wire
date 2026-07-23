@@ -278,6 +278,27 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 REMOTE_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "azure",
                     "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex",
                     "github-copilot"}
+
+
+def _authed_remote_providers():
+    """Cloud providers the user has authenticated in OpenCode (auth.json).
+
+    Native-auth providers never appear in the discovered/available model pool
+    (it only holds probed DGX endpoints + config-file providers), so without
+    this, a default_models remote pref like openai/gpt-5.6-sol is skipped on
+    EVERY sync and the agent silently falls through to a local model -- seen
+    live: agent-review repeatedly downgraded from its frontier reviewer model
+    to the local qwen. A remote pref for an authed provider resolves directly."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"),
+                                                           ".local", "share")
+    try:
+        with open(os.path.join(base, "opencode", "auth.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return frozenset()
+        return frozenset(k for k in data if isinstance(k, str)) & REMOTE_PROVIDERS
+    except (OSError, ValueError):
+        return frozenset()
 # vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
 # token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
 # Three knobs (vLLM's own defaults in parens):
@@ -466,22 +487,25 @@ def _create_default_models_template(write=True):
     return template
 
 
-def _resolve_model_ref_from_prefs(pref, available_models):
+def _resolve_model_ref_from_prefs(pref, available_models, remote_ok=frozenset()):
     """Resolve a model preference to its full provider-qualified ref if available.
-    
+
     Args:
         pref: model preference string - can be:
             - Full ref: "openai/gpt-5.5" (must match exactly in available_models)
             - Served ID with slash: "unsloth/qwen3-coder-next-fp8" (DGX model, must match model ID)
             - Bare model ID: "qwen3-coder-next-fp8" (must match model ID)
         available_models: dict mapping full refs to {} (e.g., {"dgx-1-8000/qwen3.6-27b": {}})
-    
+        remote_ok: providers whose remote refs resolve WITHOUT appearing in
+            available_models (native-auth clouds -- see _authed_remote_providers)
+
     Returns:
         Full provider-qualified ref if resolvable, None otherwise.
     """
-    if not pref or not available_models:
+    if not pref or not (available_models or remote_ok):
         return None
-    
+    available_models = available_models or {}
+
     # Check if pref is already a full ref (contains / with a known provider)
     if "/" in pref:
         provider_part = pref.split("/", 1)[0]
@@ -489,6 +513,8 @@ def _resolve_model_ref_from_prefs(pref, available_models):
         if provider_part in REMOTE_PROVIDERS or provider_part.startswith("dgx-"):
             if pref in available_models:
                 return pref
+            if provider_part in remote_ok:
+                return pref  # authed native cloud: OpenCode routes it directly
             return None
     
     # pref is a bare model ID or served ID without a known provider - match against model IDs
@@ -540,7 +566,8 @@ def get_preferred_model(available_models, preferences):
     return available_models[0]
 
 
-def _apply_default_models(agents, default_models, reasoning_caps, available_models=None, notes=None):
+def _apply_default_models(agents, default_models, reasoning_caps, available_models=None,
+                          notes=None, remote_ok=frozenset()):
     """Apply user's default model preferences to agents based on available models.
     
     Args:
@@ -601,7 +628,7 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
             preferred = None
             resolved_ref = None
             for pref in prefs:
-                resolved = _resolve_model_ref_from_prefs(pref, available_models)
+                resolved = _resolve_model_ref_from_prefs(pref, available_models, remote_ok)
                 if resolved is not None:
                     preferred = pref  # Use the original preference string for display
                     resolved_ref = resolved
@@ -620,7 +647,8 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
                 elif available_model_ids:
                     # Fall back to first available model
                     preferred = available_model_ids[0]
-                    resolved_ref = _resolve_model_ref_from_prefs(preferred, available_models)
+                    resolved_ref = _resolve_model_ref_from_prefs(preferred, available_models,
+                                                                 remote_ok)
                     if notes is not None:
                         notes.append(f"Fallback to first available: {preferred}")
                 # If no available models, leave unchanged (no update to agent_cfg)
@@ -2929,7 +2957,9 @@ def oc_sync(args, sampling, detected_installed):
 
         # Apply default models preferences to agents (default_models already loaded above)
         model_notes = []
-        agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models, model_notes)
+        agents = _apply_default_models(agents, default_models, reasoning_caps,
+                                       all_available_models, model_notes,
+                                       remote_ok=_authed_remote_providers())
         for note in model_notes:
             print(f"  {note}")
 
