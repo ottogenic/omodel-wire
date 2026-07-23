@@ -473,6 +473,10 @@ class LoomCase(unittest.TestCase):
         # ledger stays transition-only
         kinds = {e["kind"] for e in self.led.events(job_id)}
         self.assertNotIn("activity", kinds)
+        # dispatch events carry the worker session id so the plugin can point the
+        # TUI's native task card at the active worker
+        dispatches = [l for l in lines if l["type"] == "dispatch"]
+        self.assertTrue(all(l.get("session", "").startswith("ses_") for l in dispatches))
 
     # -- stop/resume + hygiene ------------------------------------------------------------
 

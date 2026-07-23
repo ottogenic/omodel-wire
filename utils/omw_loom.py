@@ -425,11 +425,15 @@ class Loom:
         self.act_lock = threading.Lock()
 
     # ---- event/progress plumbing -------------------------------------------------
-    def emit(self, kind, detail="", title=None):
+    def emit(self, kind, detail="", title=None, session=None):
+        """`session` names the worker session this event concerns; the plugin uses
+        it to point the TUI's native task card at the active worker."""
         self.led.event(self.job_id, kind, detail)
         if self.json_events:
-            print(json.dumps({"type": kind, "detail": detail, "title": title or detail}),
-                  file=self.out, flush=True)
+            payload = {"type": kind, "detail": detail, "title": title or detail}
+            if session:
+                payload["session"] = session
+            print(json.dumps(payload), file=self.out, flush=True)
         else:
             print(f"[loom #{self.job_id}] {kind}: {detail}", file=self.out, flush=True)
 
@@ -532,11 +536,12 @@ class Loom:
             sess = self.tp.create_session(job["parent_session"], title, job["dir"])
             sid = sess["id"]
             self.led.upsert_task(self.job_id, role, purpose, session_id=sid, model=model)
-            self.emit("session", f"{role} [{purpose}] -> {sid}" + (f" on {model}" if model else ""))
+            self.emit("session", f"{role} [{purpose}] -> {sid}" + (f" on {model}" if model else ""),
+                      session=sid)
 
         prompt = prompt + self._notes_suffix()
         self.emit("dispatch", f"{role} [{purpose}]" + (" (resume)" if resume and not fresh else ""),
-                  title=f"{purpose}: {role} working...")
+                  title=f"{purpose}: {role} working...", session=sid)
         text = self._timed_prompt(sid, prompt, role, model, purpose)
         parsed = parse_contract(text)
 

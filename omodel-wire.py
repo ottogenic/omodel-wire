@@ -927,6 +927,14 @@ workspace tools, but `action: "ask"` routes to `agent-research`, which has both.
    command from the report. To continue after their answer, call the `loom` tool
    with `action: "resume"`, the `job` id, and their guidance as `note`.
 
+## Troubleshooting
+
+When the user asks what happened, why a run failed, or where a job stands:
+1. Call the `loom` tool with `action: "status"` (add the `job` id when you know it;
+   without it you get the recent job list -- then call again with the right id).
+2. Relay the report and event log it returns. Do not speculate about failures;
+   the log is the truth.
+
 ## Rules
 
 - One feature = one `loom` call. Never split a feature across calls, and never
@@ -1993,11 +2001,12 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
         description:
           "Deterministic feature pipeline (plan/code/test/review over the agent-* workers). " +
           "action 'run' starts a job (needs packet, risk); 'ask' routes one question to " +
-          "agent-research and returns a cited answer (needs packet=the question); 'resume' " +
-          "continues a paused job (needs job, optional note); 'pr' creates and reviews the " +
-          "PR for a finished job (needs job).",
+          "agent-research and returns a cited answer (needs packet=the question); 'status' " +
+          "reports a job's phase, workers, errors, and event log (job optional: latest); " +
+          "'resume' continues a paused job (needs job, optional note); 'pr' creates and " +
+          "reviews the PR for a finished job (needs job).",
         args: {{
-          action: tool.schema.enum(["run", "ask", "resume", "pr"]).describe("what to do"),
+          action: tool.schema.enum(["run", "ask", "status", "resume", "pr"]).describe("what to do"),
           packet: tool.schema.string().optional()
             .describe("run: goal + acceptance criteria + scope boundary; ask: the question"),
           risk: tool.schema.enum(["simple", "medium", "high"]).optional()
@@ -2016,6 +2025,23 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             if (!args.packet) return "loom: 'ask' needs the question in packet."
             argv.push("ask", "--attach", String(serverUrl), "--parent", ctx.sessionID,
                       "--dir", directory, "--json-events", "--question", args.packet)
+          }} else if (args.action === "status") {{
+            argv.push("status")
+            if (args.job != null) argv.push("--job", String(args.job))
+            const st = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
+            const sout = await new Response(st.stdout).text()
+            const serr = await new Response(st.stderr).text()
+            await st.exited
+            let extra = ""
+            if (args.job != null) {{
+              const lg = Bun.spawn([PYTHON, SCRIPT, "loom", "log", "--job", String(args.job)],
+                                   {{ cwd: directory, stdout: "pipe" }})
+              const logText = await new Response(lg.stdout).text()
+              await lg.exited
+              const tail = logText.trim().split("\\n").slice(-30).join("\\n")
+              if (tail) extra = "\\n\\nEVENT LOG (last 30):\\n" + tail
+            }}
+            return {{ title: "loom status", output: (sout + serr).trim() + extra }}
           }} else if (args.action === "resume") {{
             if (args.job == null) return "loom: 'resume' needs the job id."
             argv.push("resume", "--job", String(args.job),
@@ -2040,6 +2066,7 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             : {{}}
           let partCache
           let origInput
+          let origTool
           const findPart = async () => {{
             const r = await fetch(
               `${{base}}/session/${{ctx.sessionID}}/message/${{ctx.messageID}}`,
@@ -2053,7 +2080,10 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             try {{
               if (partCache === undefined) {{
                 partCache = await findPart()
-                if (partCache) origInput = partCache.state?.input
+                if (partCache) {{
+                  origInput = partCache.state?.input
+                  origTool = partCache.tool
+                }}
               }}
               if (!partCache || partCache.state?.status !== "running") return
               const p = {{ ...partCache, state: {{ ...partCache.state }} }}
@@ -2068,9 +2098,23 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
           }}
           const updateCard = (title) => patchPart((p) => {{
             p.state.title = title
-            p.state.input = {{ loom: title }}
+            // once morphed to a task card, the child session provides the live
+            // detail itself -- don't fight it by rewriting the input
+            if (p.tool !== "task") p.state.input = {{ loom: title }}
+          }})
+          // The native subagent experience: morph our part into a `task` tool part
+          // pointing metadata.sessionId at the ACTIVE worker session. The TUI's Task
+          // renderer then does everything v1 does -- live child tool line, spinner,
+          // duration, click/keys into the worker -- and follows each handoff.
+          const followWorker = (session, title) => patchPart((p) => {{
+            p.tool = "task"
+            p.state.title = title
+            p.state.metadata = {{ ...(p.state.metadata || {{}}),
+                                  sessionId: session, parentSessionId: ctx.sessionID }}
+            p.state.input = {{ description: title, subagent_type: "loom" }}
           }})
           const restoreCard = () => patchPart((p) => {{
+            if (origTool !== undefined) p.tool = origTool
             if (origInput !== undefined) p.state.input = origInput
           }})
 
@@ -2094,7 +2138,8 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
               lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
               const title = ev.title || ev.detail || ev.type
               try {{ ctx.metadata({{ title }}) }} catch {{}}   // no-op today; upstream fix welcome
-              await updateCard(title)
+              if (ev.session) await followWorker(ev.session, title)
+              else await updateCard(title)
             }}
           }}
           const err = await new Response(proc.stderr).text()
