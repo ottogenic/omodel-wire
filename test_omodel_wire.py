@@ -729,7 +729,11 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertTrue(os.path.exists(pj), "loom tool plugin not written")
             with open(pj, encoding="utf-8") as f:
                 js = f.read()
-            self.assertIn('tool.schema.enum(["run", "ask", "resume", "pr"])', js)
+            self.assertIn('tool.schema.enum(["run", "ask", "status", "resume", "pr"])', js)
+            # native subagent card: the plugin morphs its part into a task card
+            # following the active worker session
+            self.assertIn('p.tool = "task"', js)
+            self.assertIn("sessionId: session", js)
             self.assertIn("ctx.sessionID", js)
             self.assertIn("--json-events", js)
             self.assertIn("omodel-wire.py", js.replace("\\\\", "/"))
