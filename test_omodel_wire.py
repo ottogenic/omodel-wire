@@ -705,6 +705,33 @@ class TestSyncEndToEnd(unittest.TestCase):
                     self.assertIn("Never stop on a bare tool call", body)
                     self.assertIn("Your role skill defines the exact format", body)
 
+    def test_refresh_role_artifacts_without_models(self):
+        # `git pull` updates artifact SOURCE but deployed copies only changed on a
+        # successful sync -- with the model server down, a new conductor ran under
+        # a stale plugin. The refresh helper must work with zero live models.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "opencode.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"agent": {"team": {"task_budget": 5}, "loom": {},
+                                     "agent-code": {}}}, f)
+            written = m.oc_refresh_role_artifacts(cfg_path)
+            names = {os.path.relpath(p, tmp).replace("\\", "/") for p in written}
+            self.assertIn("skills/agent-code/SKILL.md", names)
+            self.assertIn("skills/agent-loom/SKILL.md", names)
+            self.assertIn("skills/agent-runbook-review/SKILL.md", names)
+            self.assertIn("prompts/otools-agent-team.md", names)
+            self.assertIn("plugins/otools-loom.js", names)
+            with open(os.path.join(tmp, "prompts", "otools-agent-team.md"), encoding="utf-8") as f:
+                self.assertIn("at most 5 task calls", f.read())
+            with open(os.path.join(tmp, "plugins", "otools-loom.js"), encoding="utf-8") as f:
+                self.assertIn("followWorker", f.read())
+            # no loom agent in config -> no plugin write
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"agent": {"agent-code": {}}}, f)
+            os.remove(os.path.join(tmp, "plugins", "otools-loom.js"))
+            written2 = m.oc_refresh_role_artifacts(cfg_path)
+            self.assertFalse(any("otools-loom.js" in p for p in written2))
+
     def test_loom_agent_plugin_and_tool_gating(self):
         # v2 orchestrator: loom is a primary with exactly ONE tool (the plugin-
         # provided `loom` custom tool); every other agent has that tool hidden;
