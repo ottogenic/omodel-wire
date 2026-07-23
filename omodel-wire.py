@@ -278,6 +278,27 @@ PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
 REMOTE_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "azure",
                     "mistral", "xai", "groq", "deepseek", "cohere", "bedrock", "vertex",
                     "github-copilot"}
+
+
+def _authed_remote_providers():
+    """Cloud providers the user has authenticated in OpenCode (auth.json).
+
+    Native-auth providers never appear in the discovered/available model pool
+    (it only holds probed DGX endpoints + config-file providers), so without
+    this, a default_models remote pref like openai/gpt-5.6-sol is skipped on
+    EVERY sync and the agent silently falls through to a local model -- seen
+    live: agent-review repeatedly downgraded from its frontier reviewer model
+    to the local qwen. A remote pref for an authed provider resolves directly."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"),
+                                                           ".local", "share")
+    try:
+        with open(os.path.join(base, "opencode", "auth.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return frozenset()
+        return frozenset(k for k in data if isinstance(k, str)) & REMOTE_PROVIDERS
+    except (OSError, ValueError):
+        return frozenset()
 # vLLM repetition_detection (RepetitionDetectionParams): terminate a generation once a
 # token N-gram keeps repeating, so a degenerate loop can't burn the whole output budget.
 # Three knobs (vLLM's own defaults in parens):
@@ -466,22 +487,25 @@ def _create_default_models_template(write=True):
     return template
 
 
-def _resolve_model_ref_from_prefs(pref, available_models):
+def _resolve_model_ref_from_prefs(pref, available_models, remote_ok=frozenset()):
     """Resolve a model preference to its full provider-qualified ref if available.
-    
+
     Args:
         pref: model preference string - can be:
             - Full ref: "openai/gpt-5.5" (must match exactly in available_models)
             - Served ID with slash: "unsloth/qwen3-coder-next-fp8" (DGX model, must match model ID)
             - Bare model ID: "qwen3-coder-next-fp8" (must match model ID)
         available_models: dict mapping full refs to {} (e.g., {"dgx-1-8000/qwen3.6-27b": {}})
-    
+        remote_ok: providers whose remote refs resolve WITHOUT appearing in
+            available_models (native-auth clouds -- see _authed_remote_providers)
+
     Returns:
         Full provider-qualified ref if resolvable, None otherwise.
     """
-    if not pref or not available_models:
+    if not pref or not (available_models or remote_ok):
         return None
-    
+    available_models = available_models or {}
+
     # Check if pref is already a full ref (contains / with a known provider)
     if "/" in pref:
         provider_part = pref.split("/", 1)[0]
@@ -489,6 +513,8 @@ def _resolve_model_ref_from_prefs(pref, available_models):
         if provider_part in REMOTE_PROVIDERS or provider_part.startswith("dgx-"):
             if pref in available_models:
                 return pref
+            if provider_part in remote_ok:
+                return pref  # authed native cloud: OpenCode routes it directly
             return None
     
     # pref is a bare model ID or served ID without a known provider - match against model IDs
@@ -540,7 +566,8 @@ def get_preferred_model(available_models, preferences):
     return available_models[0]
 
 
-def _apply_default_models(agents, default_models, reasoning_caps, available_models=None, notes=None):
+def _apply_default_models(agents, default_models, reasoning_caps, available_models=None,
+                          notes=None, remote_ok=frozenset()):
     """Apply user's default model preferences to agents based on available models.
     
     Args:
@@ -601,7 +628,7 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
             preferred = None
             resolved_ref = None
             for pref in prefs:
-                resolved = _resolve_model_ref_from_prefs(pref, available_models)
+                resolved = _resolve_model_ref_from_prefs(pref, available_models, remote_ok)
                 if resolved is not None:
                     preferred = pref  # Use the original preference string for display
                     resolved_ref = resolved
@@ -620,7 +647,8 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
                 elif available_model_ids:
                     # Fall back to first available model
                     preferred = available_model_ids[0]
-                    resolved_ref = _resolve_model_ref_from_prefs(preferred, available_models)
+                    resolved_ref = _resolve_model_ref_from_prefs(preferred, available_models,
+                                                                 remote_ok)
                     if notes is not None:
                         notes.append(f"Fallback to first available: {preferred}")
                 # If no available models, leave unchanged (no update to agent_cfg)
@@ -721,12 +749,13 @@ ROLE_PROMPT_FILES = {key: f"otools-{skill}.md" for key, skill in ROLE_SKILL_NAME
 WORKER_STATUS_CONTRACT = """
 ## Return Contract
 
-End every reply with exactly this structure:
+End every reply with exactly this structure, replacing each <placeholder> with your
+actual content -- NEVER repeat the placeholder text itself:
 
-    RESULT: what you did or found, with files as path:line
-    EVIDENCE: each command or check you ran and what it RETURNED, or your sources
-    STATUS: one of DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED
-    NEXT STEPS FOR team: the route from Next Steps above
+    RESULT: <what you did or found, with files as path:line>
+    EVIDENCE: <each command or check you ran and what it RETURNED, or your sources>
+    STATUS: <one of DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED>
+    NEXT STEPS FOR team: <the route from Next Steps above>
 
 - `STATUS: DONE` -- assigned work is complete.
 - `STATUS: CONTINUE` -- making progress with a concrete next step; `team` should resume this task_id.
@@ -926,6 +955,14 @@ workspace tools, but `action: "ask"` routes to `agent-research`, which has both.
 6. If the report says `paused`, tell the user exactly why and show the resume
    command from the report. To continue after their answer, call the `loom` tool
    with `action: "resume"`, the `job` id, and their guidance as `note`.
+
+## Troubleshooting
+
+When the user asks what happened, why a run failed, or where a job stands:
+1. Call the `loom` tool with `action: "status"` (add the `job` id when you know it;
+   without it you get the recent job list -- then call again with the right id).
+2. Relay the report and event log it returns. Do not speculate about failures;
+   the log is the truth.
 
 ## Rules
 
@@ -1993,11 +2030,12 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
         description:
           "Deterministic feature pipeline (plan/code/test/review over the agent-* workers). " +
           "action 'run' starts a job (needs packet, risk); 'ask' routes one question to " +
-          "agent-research and returns a cited answer (needs packet=the question); 'resume' " +
-          "continues a paused job (needs job, optional note); 'pr' creates and reviews the " +
-          "PR for a finished job (needs job).",
+          "agent-research and returns a cited answer (needs packet=the question); 'status' " +
+          "reports a job's phase, workers, errors, and event log (job optional: latest); " +
+          "'resume' continues a paused job (needs job, optional note); 'pr' creates and " +
+          "reviews the PR for a finished job (needs job).",
         args: {{
-          action: tool.schema.enum(["run", "ask", "resume", "pr"]).describe("what to do"),
+          action: tool.schema.enum(["run", "ask", "status", "resume", "pr"]).describe("what to do"),
           packet: tool.schema.string().optional()
             .describe("run: goal + acceptance criteria + scope boundary; ask: the question"),
           risk: tool.schema.enum(["simple", "medium", "high"]).optional()
@@ -2016,6 +2054,23 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             if (!args.packet) return "loom: 'ask' needs the question in packet."
             argv.push("ask", "--attach", String(serverUrl), "--parent", ctx.sessionID,
                       "--dir", directory, "--json-events", "--question", args.packet)
+          }} else if (args.action === "status") {{
+            argv.push("status")
+            if (args.job != null) argv.push("--job", String(args.job))
+            const st = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
+            const sout = await new Response(st.stdout).text()
+            const serr = await new Response(st.stderr).text()
+            await st.exited
+            let extra = ""
+            if (args.job != null) {{
+              const lg = Bun.spawn([PYTHON, SCRIPT, "loom", "log", "--job", String(args.job)],
+                                   {{ cwd: directory, stdout: "pipe" }})
+              const logText = await new Response(lg.stdout).text()
+              await lg.exited
+              const tail = logText.trim().split("\\n").slice(-30).join("\\n")
+              if (tail) extra = "\\n\\nEVENT LOG (last 30):\\n" + tail
+            }}
+            return {{ title: "loom status", output: (sout + serr).trim() + extra }}
           }} else if (args.action === "resume") {{
             if (args.job == null) return "loom: 'resume' needs the job id."
             argv.push("resume", "--job", String(args.job),
@@ -2040,6 +2095,7 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             : {{}}
           let partCache
           let origInput
+          let origTool
           const findPart = async () => {{
             const r = await fetch(
               `${{base}}/session/${{ctx.sessionID}}/message/${{ctx.messageID}}`,
@@ -2053,7 +2109,10 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             try {{
               if (partCache === undefined) {{
                 partCache = await findPart()
-                if (partCache) origInput = partCache.state?.input
+                if (partCache) {{
+                  origInput = partCache.state?.input
+                  origTool = partCache.tool
+                }}
               }}
               if (!partCache || partCache.state?.status !== "running") return
               const p = {{ ...partCache, state: {{ ...partCache.state }} }}
@@ -2068,9 +2127,23 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
           }}
           const updateCard = (title) => patchPart((p) => {{
             p.state.title = title
-            p.state.input = {{ loom: title }}
+            // once morphed to a task card, the child session provides the live
+            // detail itself -- don't fight it by rewriting the input
+            if (p.tool !== "task") p.state.input = {{ loom: title }}
+          }})
+          // The native subagent experience: morph our part into a `task` tool part
+          // pointing metadata.sessionId at the ACTIVE worker session. The TUI's Task
+          // renderer then does everything v1 does -- live child tool line, spinner,
+          // duration, click/keys into the worker -- and follows each handoff.
+          const followWorker = (session, title) => patchPart((p) => {{
+            p.tool = "task"
+            p.state.title = title
+            p.state.metadata = {{ ...(p.state.metadata || {{}}),
+                                  sessionId: session, parentSessionId: ctx.sessionID }}
+            p.state.input = {{ description: title, subagent_type: "loom" }}
           }})
           const restoreCard = () => patchPart((p) => {{
+            if (origTool !== undefined) p.tool = origTool
             if (origInput !== undefined) p.state.input = origInput
           }})
 
@@ -2094,7 +2167,8 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
               lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
               const title = ev.title || ev.detail || ev.type
               try {{ ctx.metadata({{ title }}) }} catch {{}}   // no-op today; upstream fix welcome
-              await updateCard(title)
+              if (ev.session) await followWorker(ev.session, title)
+              else await updateCard(title)
             }}
           }}
           const err = await new Response(proc.stderr).text()
@@ -2883,7 +2957,9 @@ def oc_sync(args, sampling, detected_installed):
 
         # Apply default models preferences to agents (default_models already loaded above)
         model_notes = []
-        agents = _apply_default_models(agents, default_models, reasoning_caps, all_available_models, model_notes)
+        agents = _apply_default_models(agents, default_models, reasoning_caps,
+                                       all_available_models, model_notes,
+                                       remote_ok=_authed_remote_providers())
         for note in model_notes:
             print(f"  {note}")
 
