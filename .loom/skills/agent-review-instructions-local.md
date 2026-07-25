@@ -1,9 +1,4 @@
----
-name: agent-review-extend
-description: Repo-specific extension for reviewing omodel-wire changes and PRs. Adds required checks, invariants, and this repo's reviewer-authorized merge policy to the global agent-review role.
----
-
-# omodel-wire Review Extension
+# omodel-wire Review Overlay (agent-review)
 
 Read `REVIEW.md`; it is this repo's acceptance bar.
 
