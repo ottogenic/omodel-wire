@@ -888,7 +888,9 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("opencode.db", body)                   # worker transcripts
             self.assertIn("mode=ro", body)                       # never disturbs a live run
             self.assertIn("agent-<role>-instructions-local.md", body)  # only writable target
-            self.assertIn("NEVER edit the `-default.md` or `-contract.md`", body)
+            self.assertIn("Never edit the generated files", body)
+        self.assertIn("-default.md", body)
+        self.assertIn("-contract.md", body)
 
     def test_writes_git_identity_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,17 @@
+{
+  "request_id": "sy9frg0",
+  "timestamp": 1784944188.7767522,
+  "route": "dgx-localhost-8000",
+  "model": "",
+  "method": "GET",
+  "url": "http://localhost:8000/v1/models",
+  "headers": {
+    "User-Agent": "curl/8.5.0",
+    "Accept": "*/*"
+  },
+  "body": "",
+  "body_metadata": {
+    "truncated": false,
+    "length": 0
+  }
+}

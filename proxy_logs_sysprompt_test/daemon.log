@@ -1,0 +1,5 @@
+omw-proxy on http://127.0.0.1:9099  logs=/home/otto/Documents/omodel-wire/proxy_logs_sysprompt_test  routes=/home/otto/.config/opencode/proxy_routes.json
+[sy9frg0] GET dgx-localhost-8000 -> 200 (1ms)
+[l64hx7r] POST qwen3-coder-next-fp8 -> 200 (508ms)
+[4xyxzaq] POST qwen3-coder-next-fp8 -> 200 (2520ms)
+[kg8bbex] POST qwen3-coder-next-fp8 -> 200 (48418ms)
