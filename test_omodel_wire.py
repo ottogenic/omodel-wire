@@ -13,11 +13,13 @@ offline and touches nothing outside a temp dir.
 What it covers:
   * roster integrity  -- AGENT_SPECS / PERM / colors / modes / MANAGED_AGENTS
   * config loader     -- see test_configs.py (declared per-model configs)
-  * agent building    -- recipe -> agents + per-agent sampling, thinking knobs, team
+  * agent building    -- recipe -> agents + per-agent sampling, thinking knobs, loom
   * providers         -- tool_call / temperature / vision / reasoning on model entries
   * end-to-end sync   -- oc_sync writes a config with the right agents, disables
-                         build/plan, sets default_agent, and PRESERVES a frontier
-                         team model across re-syncs
+                         build/plan, sets default_agent, and applies default_models
+                         preferences (incl. cloud models for loom)
+  * loom role files   -- LOOM_SKILLS_DIR instruction/contract files + stale-artifact
+                         cleanup + the conductor plumbing handed to `omw loom`
   * plugin directory -- written to plugins/ (plural, per OpenCode docs) + cleanup
 """
 
@@ -39,6 +41,11 @@ MODULE_PATH = os.path.join(HERE, "omodel-wire.py")
 _spec = importlib.util.spec_from_file_location("omodel-wire", MODULE_PATH)
 m = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(m)
+
+# Every sync regenerates the loom instruction/contract files under LOOM_SKILLS_DIR
+# (normally ~/.config/otools/loom/skills). Point it at a temp dir so the suite
+# never writes outside temp.
+m.LOOM_SKILLS_DIR = tempfile.mkdtemp(prefix="omw-loomskills-")
 
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 ROLE_NAMES = {"reason", "code", "agent", "instruct"}
@@ -111,7 +118,6 @@ def make_args(tmpdir, **over):
         mcp_name="websearch", mcp_command=None, mcp_url=None,
         mcp_env=None, mcp_header=None,
         keep_builtins=False, default_agent="code",
-        team_task_budget=None,
         configs=FIXTURE_DIR, recipes=None, no_recipes=False, dry_run=False,
         sampling="server-default", temperature=None, top_p=None, top_k=None,
         presence_penalty=None, frequency_penalty=None,
@@ -184,17 +190,24 @@ class TestRosterIntegrity(unittest.TestCase):
         # Everything the tool can emit must be prunable on re-sync.
         for key, *_ in m.AGENT_SPECS:
             self.assertIn(key, m.MANAGED_AGENTS, f"{key} missing from MANAGED_AGENTS")
+        self.assertIn("loom", m.MANAGED_AGENTS)
+        # retired agents stay listed so stale config entries are pruned on re-sync
         self.assertIn("team", m.MANAGED_AGENTS)
+        self.assertIn("agent-instruct", m.MANAGED_AGENTS)
         for b in m.BUILTIN_DISABLE:
             self.assertIn(b, m.MANAGED_AGENTS, f"disabled builtin {b} not managed")
 
-    def test_team_targets_are_workers(self):
+    def test_loom_roles_are_hidden_workers(self):
+        # The 5 pipeline roles the conductor dispatches to are exactly the hidden
+        # subagent workers in AGENT_SPECS.
         by_key = {s[0]: s for s in m.AGENT_SPECS}
-        for t in m.TEAM_TARGETS:
-            self.assertIn(t, by_key, f"team target {t} not in AGENT_SPECS")
+        for t in m.LOOM_ROLES:
+            self.assertIn(t, by_key, f"loom role {t} not in AGENT_SPECS")
             _, _, mode, is_worker, *_ = by_key[t]
             self.assertTrue(is_worker and mode == "subagent",
-                            f"team target {t} must be a hidden subagent")
+                            f"loom role {t} must be a hidden subagent")
+        workers = {s[0] for s in m.AGENT_SPECS if s[3]}
+        self.assertEqual(workers, set(m.LOOM_ROLES))
 
     def test_perm_tiers(self):
         self.assertEqual(m.PERM["readonly"]["edit"], "deny")
@@ -226,23 +239,20 @@ class TestAgentBuilding(unittest.TestCase):
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
         agents, sampling = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
 
-        for k in ("research", "code", "agent", "team",
-                  "agent-research", "agent-code", "agent-test",
-                  "agent-instruct", "agent-architect", "agent-review"):
+        for k in ("research", "code", "agent", "loom") + m.LOOM_ROLES:
             self.assertIn(k, agents, f"missing agent {k}")
             self.assertEqual(agents[k]["model"], self.REF)
+        # the retired v1 orchestrator agents are never emitted any more
+        self.assertNotIn("team", agents)
+        self.assertNotIn("agent-instruct", agents)
 
-        # Visible direct-use agents retain OpenCode defaults; every delegation role
-        # gets its own minimal role-skill bootstrap prompt.
+        # Visible direct-use agents retain OpenCode defaults; loom and every worker
+        # get their minimal bootstrap prompt file.
         for k in ("research", "code", "agent"):
             self.assertNotIn("prompt", agents[k], f"visible {k} should be prompt-free")
-        for k in m.TEAM_TARGETS:
+        for k in m.LOOM_ROLES + ("loom",):
             expected = f"{{file:./prompts/{m.ROLE_PROMPT_FILES[k]}}}"
             self.assertEqual(agents[k].get("prompt"), expected)
-        self.assertEqual(
-            agents["team"].get("prompt"),
-            f"{{file:./prompts/{m.ROLE_PROMPT_FILES['team']}}}",
-        )
 
         # permission tiers landed on the right agents
         self.assertEqual(agents["research"]["permission"]["edit"], "deny")
@@ -257,20 +267,24 @@ class TestAgentBuilding(unittest.TestCase):
         self.assertEqual(sampling["code"]["topK"], 20)
         self.assertEqual(sampling["code"]["topP"], 0.95)
 
-    def test_team_delegation_lock(self):
+    def test_loom_delegation_lock(self):
+        # loom is intake-and-relay only: ONE tool (the plugin `loom` tool), every
+        # workspace tool and the task tool denied; workers can't see the loom tool.
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
         agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
-        team = agents["team"]
-        self.assertEqual(team["mode"], "primary")
-        self.assertEqual(team["color"], m.TEAM_COLOR)
-        # delegation-only: EVERY tool category denied except `task`
-        for tool in ("read", "grep", "glob", "list", "edit", "bash", "webfetch", "websearch"):
-            self.assertEqual(team["permission"][tool], "deny",
-                             f"team should not be able to use {tool}")
-        task = team["permission"]["task"]
-        self.assertEqual(task["*"], "deny")
-        for t in m.TEAM_TARGETS:
-            self.assertEqual(task[t], "allow", f"team can't delegate to {t}")
+        looma = agents["loom"]
+        self.assertEqual(looma["mode"], "primary")
+        self.assertEqual(looma["color"], m.LOOM_COLOR)
+        for tool in ("read", "grep", "glob", "list", "edit", "bash",
+                     "webfetch", "websearch", "task"):
+            self.assertEqual(looma["permission"][tool], "deny",
+                             f"loom should not be able to use {tool}")
+        self.assertEqual(looma["tools"], {"loom": True})
+        for k, a in agents.items():
+            if k == "loom":
+                continue
+            self.assertEqual(a["tools"], {"loom": False},
+                             f"{k} must not see the loom tool")
 
     def test_code_agent_can_delegate_to_review(self):
         # code/agent get a task_budget so they can hand a PR to agent-review, and
@@ -314,8 +328,7 @@ class TestAgentBuilding(unittest.TestCase):
         # bash allow (the token split is the real merge control).
         recipe = self._recipe("Qwen3.6-27B-NVFP4")
         agents, _ = m.oc_build_recipe_agents(self.REF, recipe, dict(FULL_CAPS))
-        for k in ("agent-research", "agent-code", "agent-test", "agent-instruct",
-                  "agent-architect", "agent-review"):
+        for k in m.LOOM_ROLES:
             self.assertEqual(agents[k]["permission"]["task"], "deny",
                              f"{k} must not sub-delegate")
         for k, a in agents.items():
@@ -343,10 +356,10 @@ class TestAgentBuilding(unittest.TestCase):
         for key, want in m.WORKER_STEPS.items():
             self.assertEqual(agents[key].get("steps"), want, f"{key} step cap")
         # tightest on the well-defined jobs, most headroom on open-ended work.
-        self.assertLess(agents["agent-instruct"]["steps"], agents["agent-code"]["steps"])
+        self.assertLess(agents["agent-research"]["steps"], agents["agent-code"]["steps"])
         self.assertLessEqual(agents["agent-test"]["steps"], agents["agent-code"]["steps"])
-        # visible primaries and team are for direct/human use -> no step cap imposed.
-        for key in ("research", "code", "agent", "team"):
+        # visible primaries and loom are for direct/human use -> no step cap imposed.
+        for key in ("research", "code", "agent", "loom"):
             self.assertNotIn("steps", agents[key], f"{key} should not be step-capped")
 
     def test_thinking_knob_on(self):
@@ -356,9 +369,9 @@ class TestAgentBuilding(unittest.TestCase):
         opt = agents["research"]["options"]["chat_template_kwargs"]
         self.assertTrue(opt["enable_thinking"])
         self.assertEqual(agents["research"]["options"]["reasoning_effort"], "high")
-        # instruct is thinking:false -> enable_thinking false
-        instr = agents["agent-instruct"]["options"]["chat_template_kwargs"]
-        self.assertFalse(instr["enable_thinking"])
+        # the code-preset workers think too on this card
+        code_opt = agents["agent-code"]["options"]["chat_template_kwargs"]
+        self.assertTrue(code_opt["enable_thinking"])
 
     def test_thinking_control_none(self):
         # Nemotron: control 'none' means NO probe-derived reasoning_effort; only the
@@ -372,7 +385,7 @@ class TestAgentBuilding(unittest.TestCase):
 
     def test_generic_fallback_when_no_recipe(self):
         agents, sampling = m.oc_build_agents(self.REF, dict(FULL_CAPS))
-        self.assertIn("team", agents)
+        self.assertIn("loom", agents)
         self.assertEqual(agents["code"]["temperature"], 0.6)  # Qwen precise-coding
 
 
@@ -396,14 +409,14 @@ class TestApplyModelConfig(unittest.TestCase):
     def test_switching_dgx_model_replaces_stale_config(self):
         # The reported bug: an agent carrying one model's config, moved to another model,
         # must get the NEW model's config -- not keep the old temp/thinking.
-        agent = {"mode": "primary", "model": "dgx-x/old", "temperature": 1.0,
-                 "options": {"chat_template_kwargs": {"enable_thinking": True},
-                             "reasoning_effort": "high"}, "permission": {}}
-        # instruct role on the fixture Qwen model: temp 0.7, thinking OFF.
-        m._apply_model_config_to_agent(agent, "agent-instruct",
+        agent = {"mode": "subagent", "model": "dgx-x/old", "temperature": 0.3,
+                 "options": {"chat_template_kwargs": {"enable_thinking": False}},
+                 "permission": {}}
+        # code role on the fixture Qwen model: temp 0.6, thinking ON.
+        m._apply_model_config_to_agent(agent, "agent-code",
                                        "dgx-n1-8000/Qwen3.6-27B-NVFP4", FIXTURE_CONFIGS)
-        self.assertEqual(agent["temperature"], 0.7)
-        self.assertFalse(agent["options"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(agent["temperature"], 0.6)
+        self.assertTrue(agent["options"]["chat_template_kwargs"]["enable_thinking"])
 
     def test_thinking_control_none_has_no_reasoning_effort(self):
         # Nemotron (thinking_control none): only the preset's explicit kwargs, no
@@ -632,9 +645,12 @@ class TestSyncEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._sync(tmp)
             ag = cfg["agent"]
-            for k in ("research", "code", "agent", "team",
-                      "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
+            for k in ("research", "code", "agent", "loom",
+                      "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review"):
                 self.assertIn(k, ag)
+            # retired v1 orchestrator agents are not written
+            self.assertNotIn("team", ag)
+            self.assertNotIn("agent-instruct", ag)
             # native build/plan disabled, default moved off build
             self.assertEqual(ag["build"], {"disable": True})
             self.assertEqual(ag["plan"], {"disable": True})
@@ -649,9 +665,12 @@ class TestSyncEndToEnd(unittest.TestCase):
             args = make_args(tmp)
             with FakeProbes():
                 out = _capture(m.oc_sync, args, m.build_sampling(args), {"opencode"})
-            self.assertIn("simple -> agent-code", out)
-            self.assertIn("medium/high -> agent-architect", out)
-            self.assertIn("completed -> agent-test -> agent-review", out)
+            self.assertIn("Tab cycle (visible): research, code, agent, loom", out)
+            self.assertIn("hidden workers (delegation-only, not in Tab): "
+                          "agent-research, agent-code, agent-test, agent-architect, "
+                          "agent-review", out)
+            self.assertIn("loom pipeline: agent-architect -> agent-code -> "
+                          "agent-test -> agent-review", out)
 
     def test_dry_run_does_not_create_default_models_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -666,44 +685,42 @@ class TestSyncEndToEnd(unittest.TestCase):
             finally:
                 m.DEFAULT_MODELS_FILE = old_default_models
 
-    def test_writes_all_role_skills_and_bootstrap_prompts(self):
+    def test_writes_global_skills_and_bootstrap_prompts(self):
+        # loom v3: the only OpenCode skills written are agent-loom + session-review;
+        # role guidance ships as LOOM_SKILLS_DIR files instead. Bootstrap prompts are
+        # minimal identity text -- no skill-loader steps, no embedded contract.
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)
-            for agent_name, skill_name in m.ROLE_SKILL_NAMES.items():
+            for skill_name in m.GLOBAL_SKILLS:
                 skill = os.path.join(tmp, "skills", skill_name, "SKILL.md")
-                prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES[agent_name])
                 self.assertTrue(os.path.exists(skill), f"{skill_name} skill not written")
-                self.assertTrue(os.path.exists(prompt), f"{agent_name} prompt not written")
                 with open(skill, encoding="utf-8") as f:
                     self.assertIn(f"name: {skill_name}", f.read())
+            self.assertEqual(set(m.GLOBAL_SKILLS), {"agent-loom", "session-review"})
+            for agent_name in m.ROLE_SKILL_NAMES:
+                prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES[agent_name])
+                self.assertTrue(os.path.exists(prompt), f"{agent_name} prompt not written")
                 with open(prompt, encoding="utf-8") as f:
                     body = f.read()
-                self.assertIn(f"`{skill_name}-override`", body)
-                self.assertIn(f"`{skill_name}`", body)
-                self.assertIn(f"`{skill_name}-extend`", body)
-                self.assertLess(body.index(f"`{skill_name}-override`"),
-                                body.index(f"`{skill_name}-extend`"))
-                # Three-part prompt, in order: action-first opener (the verified
-                # qwen3 narrate-vs-call fix -- MUST come first), numbered skill-load
-                # steps, then the results-bearing final-message rule (#18423).
+                # Action-first opener (the verified qwen3 narrate-vs-call fix) then
+                # the results-bearing final-message rule (#18423). The skill-loading
+                # steps are GONE: instructions arrive in the dispatch packet.
                 self.assertTrue(body.startswith(f"You are `{agent_name}`"),
                                 f"{agent_name} prompt must open with its identity")
-                self.assertLess(body.index("calling the"), body.index("load your role skill"),
-                                "action-first opener must precede skill loading")
-                self.assertIn("load only that skill", body)
-                self.assertIn(f"follow `{skill_name}`", body)
-                self.assertIn("Never call `skill` with a name that is not", body)
-                self.assertLess(body.index("load your role skill"),
-                                body.index("end with a plain-text message"),
-                                "final-message rule must come last")
-                if agent_name == "team":
-                    self.assertIn("never sees worker output directly", body)
-                elif agent_name == "loom":
-                    self.assertIn("relaying the loom report", body)
+                self.assertNotIn("load your role skill", body)
+                self.assertNotIn("-override`", body)
+                self.assertIn("end with a plain-text message", body)
+                if agent_name == "loom":
                     self.assertIn("calling the `loom`", body)
+                    self.assertIn("relaying the loom report", body)
                 else:
+                    self.assertIn("Your dispatch message carries your role instructions",
+                                  body)
+                    self.assertIn("Return Contract", body)
                     self.assertIn("Never stop on a bare tool call", body)
-                    self.assertIn("Your role skill defines the exact format", body)
+                    self.assertLess(body.index("calling the provided tools"),
+                                    body.index("end with a plain-text message"),
+                                    "action-first opener must precede the final-message rule")
 
     def test_refresh_role_artifacts_without_models(self):
         # `git pull` updates artifact SOURCE but deployed copies only changed on a
@@ -712,17 +729,20 @@ class TestSyncEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = os.path.join(tmp, "opencode.json")
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump({"agent": {"team": {"task_budget": 5}, "loom": {},
-                                     "agent-code": {}}}, f)
+                json.dump({"agent": {"loom": {}, "agent-code": {}}}, f)
             written = m.oc_refresh_role_artifacts(cfg_path)
             names = {os.path.relpath(p, tmp).replace("\\", "/") for p in written}
-            self.assertIn("skills/agent-code/SKILL.md", names)
             self.assertIn("skills/agent-loom/SKILL.md", names)
-            self.assertIn("skills/agent-runbook-review/SKILL.md", names)
-            self.assertIn("prompts/otools-agent-team.md", names)
+            self.assertIn("skills/session-review/SKILL.md", names)
+            self.assertIn("prompts/otools-agent-loom.md", names)
+            self.assertIn("prompts/otools-agent-code.md", names)
             self.assertIn("plugins/otools-loom.js", names)
-            with open(os.path.join(tmp, "prompts", "otools-agent-team.md"), encoding="utf-8") as f:
-                self.assertIn("at most 5 task calls", f.read())
+            # the loom-managed instruction/contract files are regenerated too
+            for role in m.LOOM_ROLES:
+                for suffix in ("instructions-default.md", "contract.md"):
+                    path = os.path.join(m.LOOM_SKILLS_DIR, f"{role}-{suffix}")
+                    self.assertIn(path, written, f"missing loom file {path}")
+                    self.assertTrue(os.path.exists(path))
             with open(os.path.join(tmp, "plugins", "otools-loom.js"), encoding="utf-8") as f:
                 self.assertIn("followWorker", f.read())
             # no loom agent in config -> no plugin write
@@ -770,132 +790,78 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertIn("/part/", js)
             self.assertIn("restoreCard", js)
 
-    def test_worker_role_skills_carry_return_contract(self):
-        for name in ("agent-code", "agent-research", "agent-test", "agent-instruct",
-                     "agent-architect", "agent-review"):
-            skill = m.ROLE_SKILLS[name]
+    def test_role_contracts_carry_return_contract(self):
+        # Every pipeline role's contract packet (injected per dispatch) carries the
+        # full STATUS vocabulary and the anti-spin rule.
+        for role in m.LOOM_ROLES:
+            contract = m._role_contract_text(role)
             for status in ("STATUS: DONE", "STATUS: CONTINUE", "STATUS: NEEDS_RESEARCH",
                            "STATUS: BLOCKED"):
-                self.assertIn(status, skill)
-            self.assertIn("Do not spin", skill)
+                self.assertIn(status, contract, f"{role}: {status}")
+            self.assertIn("Do not spin", contract)
 
     def test_return_contract_structure_and_anti_spin(self):
-        # RESULT/EVIDENCE labels give `team` parseable output; the anti-spin
+        # RESULT/EVIDENCE labels give the conductor parseable output; the anti-spin
         # trigger is operational (nothing new in EVIDENCE), not a judgment call.
         contract = m.WORKER_STATUS_CONTRACT
-        for label in ("RESULT:", "EVIDENCE:", "STATUS:", "NEXT STEPS FOR team:"):
+        for label in ("RESULT:", "EVIDENCE:", "STATUS:"):
             self.assertIn(label, contract)
-        self.assertIn("nothing new in EVIDENCE", contract)
+        # loom v3: no NEXT STEPS field, and the deliverable goes in the body FIRST
+        self.assertNotIn("NEXT STEPS", contract)
+        self.assertIn("FULL deliverable", contract)
+        self.assertIn("body FIRST", contract)
+        self.assertIn("NEVER repeat the placeholder text", contract)
+        # the anti-spin trigger stays operational (nothing new in EVIDENCE)
+        self.assertIn("nothing new in", contract)
+        self.assertIn("return `BLOCKED` instead", contract)
         self.assertNotIn("about two", contract)
 
-    def test_instruct_has_next_steps_routes(self):
-        self.assertIn("NEXT STEPS FOR team: Send to agent-test.", m.AGENT_INSTRUCT_SKILL)
-        self.assertIn("NEXT STEPS FOR team: Send this task to agent-code instead.",
-                      m.AGENT_INSTRUCT_SKILL)
-
-    def test_team_skill_teaches_task_id_mechanics(self):
-        # The old TEAM_PROMPT's Continuity section, restored with the exact task-tool
-        # semantics from OpenCode's task.ts: result id -> task_id parameter to resume.
-        skill = m.AGENT_TEAM_SKILL
-        self.assertIn("## How To Delegate", skill)
-        self.assertIn("`subagent_type`", skill)
-        self.assertIn('<task id="...">', skill)
-        self.assertIn("`task_id` parameter", skill)
-        self.assertIn("fresh step budget", skill)
-        # Workers suggest routes; team's own rules stay authoritative.
-        self.assertIn("advisory", skill)
-
-    def test_code_test_review_skills_split_verification_work(self):
-        self.assertIn("Run focused checks", m.AGENT_CODE_SKILL)
-        self.assertIn("Do NOT run full suites", m.AGENT_CODE_SKILL)
-        self.assertIn("Run the broad verification", m.AGENT_TEST_SKILL)
-        self.assertIn("`agent-code` owns tight edit/test loops", m.AGENT_TEST_SKILL)
-        self.assertIn("`agent-test` output as the primary command evidence", m.AGENT_REVIEW_SKILL)
-        self.assertIn("run spot", m.AGENT_REVIEW_SKILL)
-
-    def test_team_skill_encodes_full_workflow_and_continuity(self):
-        skill = m.AGENT_TEAM_SKILL
-        for text in ("Simple", "Medium/high-risk", "-> `agent-architect`", "NEEDS_RESEARCH",
-                     "Required Test", "agent-test", "Required Review", "verification packet",
-                     "Fix Loop -- One Finding At A Time", "scope firewall",
-                     "create one and perform PR review"):
-            self.assertIn(text, skill)
-        self.assertIn("same `agent-review` `task_id`", skill)
-        self.assertIn("same `agent-test` `task_id`", skill)
-        self.assertIn("After `agent-test` passes", skill)
-        self.assertIn("send it directly to", skill)
-        self.assertIn("Do not research, inspect, reconstruct, or pre-review it", skill)
-        self.assertIn("same `agent-architect` `task_id`", skill)
-        self.assertIn("same `agent-code` `task_id`", skill)
-        self.assertIn("substitutes categories", skill)
-        self.assertIn("do not relay or implement", skill)
-        self.assertIn("agent runbook review", skill)
-        self.assertIn("load `agent-runbook-review`", skill)
-
-    def test_team_fix_loop_is_one_finding_per_new_code_session(self):
-        # A cheap model running `team` used to batch every review finding into one
-        # agent-code call. The Fix Loop pins: todo-tracked, one at a time, NEW session
-        # per finding, and re-review always resumes the original agent-review session.
-        skill = m.AGENT_TEAM_SKILL
-        self.assertIn("todowrite", skill)
-        self.assertIn("Send that ONE finding to a NEW `agent-code` session", skill)
-        self.assertIn("Never batch multiple findings into one `agent-code` session", skill)
-        self.assertIn("Never open a second `agent-review`", skill)
-        self.assertIn("re-reviews resume the original `task_id`", skill)
-        # agent-code is always followed by agent-test -- no direct code -> review hop.
-        self.assertIn("`agent-code` is ALWAYS followed by `agent-test`", skill)
-
-    def test_worker_skills_end_with_next_steps_for_team(self):
-        # Workers restate the routing so `team` can't misroute on a cheap model.
-        for name in ("agent-code", "agent-research", "agent-test",
-                     "agent-architect", "agent-review"):
-            skill = m.ROLE_SKILLS[name]
-            self.assertIn("## Next Steps", skill)
-            self.assertIn("NEXT STEPS FOR team:", skill)
-        self.assertIn("NEXT STEPS FOR team: Send to agent-test.", m.AGENT_CODE_SKILL)
-        self.assertIn("NEXT STEPS FOR team: Send this blocker to agent-architect.",
-                      m.AGENT_CODE_SKILL)
-        self.assertIn("NEXT STEPS FOR team: Send to agent-review.", m.AGENT_TEST_SKILL)
-        self.assertIn("NEXT STEPS FOR team: Send this plan to agent-code.",
-                      m.AGENT_ARCHITECT_SKILL)
-        self.assertIn("Fix these ONE AT A TIME", m.AGENT_REVIEW_SKILL)
-        # The shared contract mandates the line for every worker, incl. agent-instruct.
-        self.assertIn("NEXT STEPS FOR team:", m.AGENT_INSTRUCT_SKILL)
+    def test_role_instructions_split_verification_work(self):
+        code = m.ROLE_INSTRUCTIONS["agent-code"]
+        test = m.ROLE_INSTRUCTIONS["agent-test"]
+        review = m.ROLE_INSTRUCTIONS["agent-review"]
+        self.assertIn("Run focused checks", code)
+        self.assertIn("Do NOT run full suites", code)
+        self.assertIn("Run the broad verification", test)
+        self.assertIn("tight edit/test loops belong to the implementation step", test)
+        self.assertIn("the supplied test evidence as the primary command evidence", review)
+        self.assertIn("run spot", review)
 
     def test_architect_plans_and_never_reviews_completed_work(self):
-        skill = m.AGENT_ARCHITECT_SKILL
-        self.assertIn("You do exactly three jobs", skill)
-        self.assertIn("## 1. Plan", skill)
-        self.assertIn("## 2. Request Research", skill)
-        self.assertIn("## 3. Diagnose A Blocker", skill)
-        self.assertIn("You never review completed work", skill)
-        self.assertIn("`agent-review` owns that", skill)
-        self.assertIn("Blocker diagnosed -> `NEXT STEPS FOR team: Send this correction to the "
-                      "same agent-code session that was blocked.`", skill)
-        self.assertIn("Never reviews completed work.", m.AGENT_TEAM_SKILL)
+        instr = m.ROLE_INSTRUCTIONS["agent-architect"]
+        self.assertIn("You do exactly three jobs", instr)
+        self.assertIn("## 1. Plan", instr)
+        self.assertIn("## 2. Request Research", instr)
+        self.assertIn("## 3. Diagnose A Blocker", instr)
+        self.assertIn("You never review completed work", instr)
+        self.assertIn("happens later in the pipeline", instr)
+        self.assertIn("Finding Classification", instr)
 
-    def test_role_skills_name_agents_exactly_not_role_words(self):
-        # Cheap models conflate "reviewer"/"coder"/"tester" with the wrong agent, so the
-        # skills must always use the literal config names.
-        for name, skill in m.ROLE_SKILLS.items():
-            body = skill.split("---", 2)[2]  # skip frontmatter (description prose)
+    def test_role_instructions_name_agents_exactly_not_role_words(self):
+        # Cheap models conflate "reviewer"/"coder"/"tester" with the wrong agent, so
+        # the instruction bodies must always use the literal config names.
+        for name, instr in m.ROLE_INSTRUCTIONS.items():
             for word in ("coder", "tester", "reviewer"):
-                # allowed only where the contract names them as words to avoid, and in
-                # GH_TOKEN_REVIEWER / gh-token-reviewer style identifiers.
-                stripped = body.replace("never a role word", "") \
-                               .replace('"coder",', "").replace('"tester", or "reviewer"', "") \
-                               .replace("GH_TOKEN_REVIEWER", "")
+                # GH_TOKEN_REVIEWER-style identifiers are the one allowed spelling.
+                stripped = instr.replace("GH_TOKEN_REVIEWER", "")
                 self.assertNotIn(word, stripped,
                                  f"{name} still uses the role word {word!r}")
 
-    def test_architect_and_reviewer_classify_without_expanding_scope(self):
-        for skill in (m.AGENT_ARCHITECT_SKILL, m.AGENT_REVIEW_SKILL):
+    def test_architect_and_reviewer_contracts_classify_without_expanding_scope(self):
+        # The finding taxonomy ships with the CONTRACT packet for exactly the two
+        # judging roles (review + architect), mirroring the retired role skills.
+        for role in ("agent-architect", "agent-review"):
+            contract = m._role_contract_text(role)
             for category in ("blocker", "regression", "pre-existing", "future work",
                              "out of scope"):
-                self.assertIn(f"`{category}`", skill)
-            self.assertIn("Only `blocker` and `regression` require immediate implementation", skill)
-            self.assertIn("Never expand acceptance criteria", skill)
-        self.assertIn("Never rename categories", m.AGENT_REVIEW_SKILL)
+                self.assertIn(f"`{category}`", contract)
+            self.assertIn("Only `blocker` and `regression` require immediate implementation",
+                          contract)
+            self.assertIn("Never expand acceptance criteria", contract)
+        for role in ("agent-code", "agent-test", "agent-research"):
+            self.assertNotIn("Finding Classification", m._role_contract_text(role),
+                             f"{role} should not carry the finding taxonomy")
+        self.assertIn("Never rename categories", m.ROLE_INSTRUCTIONS["agent-review"])
 
     def test_removes_retired_generated_role_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -908,31 +874,21 @@ class TestSyncEndToEnd(unittest.TestCase):
             for relpath in m.LEGACY_ROLE_ARTIFACTS:
                 self.assertFalse(os.path.exists(os.path.join(tmp, relpath)))
 
-    def test_writes_agent_runbook_review_skill_globally(self):
-        # The runbook-review maintenance pass ships globally so "perform an agent runbook
-        # review" works in any repo, and it carries the tested SQLite session-mining recipe.
+    def test_writes_session_review_skill_globally(self):
+        # The session-review maintenance pass ships globally so "run a session
+        # review" works in any repo, and it carries the loom-ledger mining recipe
+        # plus the repo-local-instructions-only write rule.
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)
-            skill = os.path.join(tmp, "skills", "agent-runbook-review", "SKILL.md")
-            self.assertTrue(os.path.exists(skill), "agent-runbook-review SKILL.md not written")
+            skill = os.path.join(tmp, "skills", "session-review", "SKILL.md")
+            self.assertTrue(os.path.exists(skill), "session-review SKILL.md not written")
             body = open(skill, encoding="utf-8").read()
-            self.assertIn("name: agent-runbook-review", body)   # discoverable
-            self.assertIn("opencode.db", body)                  # the session-mining source
-            self.assertIn("parent_id", body)                    # subagent linkage
-            self.assertIn("Runbook Review Report", body)        # report-first output
-
-    def test_role_skills_are_scoped_to_their_agent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ag = self._sync(tmp)["agent"]
-            for agent_name, own_skill in m.ROLE_SKILL_NAMES.items():
-                rules = ag[agent_name]["permission"]["skill"]
-                if agent_name == "team":
-                    self.assertEqual(rules["*"], "deny")
-                self.assertEqual(rules[own_skill], "allow")
-                self.assertEqual(rules[f"{own_skill}-extend"], "allow")
-                self.assertEqual(rules[f"{own_skill}-override"], "allow")
-                for other in set(m.ROLE_SKILLS) - {own_skill}:
-                    self.assertEqual(rules[other], "deny")
+            self.assertIn("name: session-review", body)          # discoverable
+            self.assertIn("loom.db", body)                       # the ledger source
+            self.assertIn("opencode.db", body)                   # worker transcripts
+            self.assertIn("mode=ro", body)                       # never disturbs a live run
+            self.assertIn("agent-<role>-instructions-local.md", body)  # only writable target
+            self.assertIn("NEVER edit the `-default.md` or `-contract.md`", body)
 
     def test_writes_git_identity_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1148,11 +1104,11 @@ class TestSyncEndToEnd(unittest.TestCase):
             with open(args.config, encoding="utf-8") as f:
                 cfg = json.load(f)
             ag = cfg["agent"]
-            for k in ("research", "code", "agent", "team",
-                      "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
+            for k in ("research", "code", "agent", "loom",
+                      "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review"):
                 self.assertIn(k, ag, f"{k} missing -> roster not rebuilt for a non-reasoning fleet")
             # local agents point at the LIVE model + an existing provider (not a stale ref)
-            for k in ("code", "agent", "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
+            for k in ("code", "agent", "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review"):
                 ref = ag[k]["model"]
                 self.assertIn("qwen3-coder-next-fp8", ref, f"{k} not on the live model: {ref}")
                 self.assertIn(ref.split("/", 1)[0], cfg["provider"],
@@ -1162,8 +1118,8 @@ class TestSyncEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._sync(tmp)
             order = list(cfg["agent"])
-            vis = [order.index(k) for k in ("research", "code", "agent", "team")]
-            hid = [order.index(k) for k in m.TEAM_TARGETS]
+            vis = [order.index(k) for k in ("research", "code", "agent", "loom")]
+            hid = [order.index(k) for k in m.LOOM_ROLES]
             dis = [order.index(k) for k in ("build", "plan")]
             self.assertLess(max(vis), min(hid), "visible must precede hidden workers")
             self.assertLess(max(hid), min(dis), "hidden must precede disabled builtins")
@@ -1193,49 +1149,53 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertGreater(entry["limit"]["output"], 32000)
             self.assertIn("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", buf.getvalue())
 
-    def test_team_on_cloud_model_from_default_models_strips_local_knobs(self):
-        # The team's model comes from default_models.json like any agent. A frontier/cloud
+    def test_loom_on_cloud_model_from_default_models_strips_local_knobs(self):
+        # loom's model comes from default_models.json like any agent. A frontier/cloud
         # choice runs on OpenCode's own defaults -- the DGX-only knobs (options/top_p/
         # temperature) are stripped so we never impose vLLM sampling on a cloud model.
-        dm = {"agents": {"team": ["openai/gpt-5.5"]}, "subagents": {}}
+        dm = {"agents": {"loom": ["openai/gpt-5.5"]}, "subagents": {}}
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
-            team = cfg["agent"]["team"]
-            self.assertEqual(team["model"], "openai/gpt-5.5")
-            self.assertNotIn("options", team)      # no chat_template_kwargs / reasoning_effort
-            self.assertNotIn("top_p", team)
-            self.assertNotIn("temperature", team)
+            looma = cfg["agent"]["loom"]
+            self.assertEqual(looma["model"], "openai/gpt-5.5")
+            self.assertNotIn("options", looma)     # no chat_template_kwargs / reasoning_effort
+            self.assertNotIn("top_p", looma)
+            self.assertNotIn("temperature", looma)
 
-    def test_team_model_from_default_models_persists_across_resync(self):
-        # No special team-model preservation any more: default_models.json IS the persistence,
-        # so an available cloud choice is re-selected every sync.
-        dm = {"agents": {"team": ["openai/gpt-5.5"]}, "subagents": {}}
+    def test_loom_model_from_default_models_persists_across_resync(self):
+        # default_models.json IS the persistence: an available cloud choice is
+        # re-selected every sync.
+        dm = {"agents": {"loom": ["openai/gpt-5.5"]}, "subagents": {}}
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
             cfg = self._sync(tmp, runtime_models=["openai/gpt-5.5"], default_models=dm)
-            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+            self.assertEqual(cfg["agent"]["loom"]["model"], "openai/gpt-5.5")
 
-    def test_stale_unavailable_team_model_not_preserved(self):
-        # Regression: a cloud team model left in the config that ISN'T available (no provider,
-        # not runtime-discovered, and NOT in default_models.json) must not be re-pinned every
-        # sync -- the team reverts to a live local model instead of a broken cloud ref.
+    def test_stale_unavailable_loom_model_not_preserved(self):
+        # Regression: a cloud loom model left in the config that ISN'T available (no
+        # provider, not runtime-discovered, and NOT in default_models.json) must not be
+        # re-pinned every sync -- loom reverts to a live local model instead.
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = os.path.join(tmp, "opencode.json")
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump({"agent": {"team": {"mode": "primary",
+                json.dump({"agent": {"loom": {"mode": "primary",
                                               "model": "anthropic/claude-opus-4-8"}}}, f)
             # No anthropic provider, runtime discovery returns nothing.
             cfg = self._sync(tmp)
-            team_model = cfg["agent"]["team"]["model"]
-            self.assertNotIn("claude", team_model, "stale unavailable team model was preserved")
-            self.assertIn("Qwen3.6-27B-NVFP4", team_model)  # reverted to the live local model
+            loom_model = cfg["agent"]["loom"]["model"]
+            self.assertNotIn("claude", loom_model, "stale unavailable loom model was preserved")
+            self.assertIn("Qwen3.6-27B-NVFP4", loom_model)  # reverted to the live local model
 
-    def test_task_budget_written_and_preserved(self):
+    def test_code_and_agent_carry_task_budget_workers_do_not(self):
+        # The visible code/agent primaries get task_budget=1 (they may hand a PR to
+        # agent-review); workers never sub-delegate so they carry no budget.
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._sync(tmp, team_task_budget=4)
-            self.assertEqual(cfg["agent"]["team"]["task_budget"], 4)
-            cfg2 = self._sync(tmp)  # preserved without re-passing
-            self.assertEqual(cfg2["agent"]["team"]["task_budget"], 4)
+            cfg = self._sync(tmp)
+            ag = cfg["agent"]
+            self.assertEqual(ag["code"]["task_budget"], 1)
+            self.assertEqual(ag["agent"]["task_budget"], 1)
+            for k in m.LOOM_ROLES + ("loom",):
+                self.assertNotIn("task_budget", ag[k], f"{k} should have no task_budget")
 
     def test_user_agent_is_not_clobbered(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1254,34 +1214,39 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertEqual(rc, 2, "should refuse (exit 2) with no endpoints")
             self.assertFalse(os.path.exists(args.config))
 
-    def test_team_model_pref_skips_unavailable_remote_refs(self):
+    def test_loom_model_pref_skips_unavailable_remote_refs(self):
         # Regression: oc_sync preselection should not accept slash-containing
         # preferences when no reasoning models exist, unless they're in available_models.
         # anthropic/claude-opus-4-8 should NOT be selected if not available.
         default_models = {
-            "agents": {"team": ["anthropic/claude-opus-4-8", "openai/gpt-5.5"]},
+            "agents": {"loom": ["anthropic/claude-opus-4-8", "openai/gpt-5.5"]},
             "subagents": {}
         }
         with tempfile.TemporaryDirectory() as tmp:
             args = make_args(tmp, profiles=True)
             sampling = m.build_sampling(args)
-            # No reasoning models - only a local model available
-            with FakeProbes(model="qwen3-coder-next-fp8"), quiet():
-                rc = m.oc_sync(args, sampling, {"opencode"})
+            _orig = m.load_default_models
+            m.load_default_models = lambda: default_models
+            try:
+                # No reasoning models - only a local model available
+                with FakeProbes(model="qwen3-coder-next-fp8"), quiet():
+                    rc = m.oc_sync(args, sampling, {"opencode"})
+            finally:
+                m.load_default_models = _orig
             self.assertEqual(rc, 0)
             with open(args.config, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # team should use the available local model, NOT the unavailable remote refs
-            team_model = cfg["agent"]["team"]["model"]
-            self.assertIn("qwen3-coder-next-fp8", team_model)
-            self.assertNotIn("claude-opus", team_model)
-            self.assertNotIn("gpt-5.5", team_model)
+            # loom should use the available local model, NOT the unavailable remote refs
+            loom_model = cfg["agent"]["loom"]["model"]
+            self.assertIn("qwen3-coder-next-fp8", loom_model)
+            self.assertNotIn("claude-opus", loom_model)
+            self.assertNotIn("gpt-5.5", loom_model)
 
-    def test_team_model_pref_uses_remote_when_available(self):
+    def test_loom_model_pref_uses_remote_when_available(self):
         # When a remote model IS in available_models, it should be selected.
         # We need to set up a config with a remote provider first, then sync.
         default_models = {
-            "agents": {"team": ["openai/gpt-5.5"]},
+            "agents": {"loom": ["openai/gpt-5.5"]},
             "subagents": {}
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -1297,12 +1262,12 @@ class TestSyncEndToEnd(unittest.TestCase):
                     }
                 },
                 "agent": {
-                    "team": {"mode": "primary", "model": "openai/gpt-4"}
+                    "loom": {"mode": "primary", "model": "openai/gpt-4"}
                 }
             }
             with open(cfg_path, "w") as f:
                 json.dump(initial_cfg, f)
-            
+
             args = make_args(tmp, profiles=True, _hosts=["192.0.2.101"], _ports=[8000])
             sampling = m.build_sampling(args)
             _orig = m.load_default_models
@@ -1315,8 +1280,8 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # team should use the remote model from the pool (first preference)
-            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+            # loom should use the remote model from the pool (first preference)
+            self.assertEqual(cfg["agent"]["loom"]["model"], "openai/gpt-5.5")
 
     def test_no_matching_preference_preserves_current_model(self):
         # When no preferences match but current model is still available, keep it.
@@ -1357,12 +1322,12 @@ class TestSyncEndToEnd(unittest.TestCase):
             code_model = cfg["agent"]["code"]["model"]
             self.assertIn("Qwen3.6-27B-NVFP4", code_model)
 
-    def test_team_pref_overrides_stale_existing_when_no_reasoning_models(self):
-        """Regression: previous team openai/gpt-5.5, runtime reports
+    def test_loom_pref_overrides_stale_existing_when_no_reasoning_models(self):
+        """Regression: previous loom openai/gpt-5.5, runtime reports
         github-copilot/gpt-5.5, no reasoning models live. The resolved
         default_models.json preference must win, not preservation."""
         default_models = {
-            "agents": {"team": ["github-copilot/gpt-5.5", "openai/gpt-5.5"]},
+            "agents": {"loom": ["github-copilot/gpt-5.5", "openai/gpt-5.5"]},
             "subagents": {}
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -1377,7 +1342,7 @@ class TestSyncEndToEnd(unittest.TestCase):
                     }
                 },
                 "agent": {
-                    "team": {"mode": "primary", "model": "openai/gpt-5.5"}
+                    "loom": {"mode": "primary", "model": "openai/gpt-5.5"}
                 }
             }
             with open(cfg_path, "w") as f:
@@ -1397,15 +1362,15 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # team must switch to the first resolved preference, not preserve openai
-            self.assertEqual(cfg["agent"]["team"]["model"], "github-copilot/gpt-5.5")
+            # loom must switch to the first resolved preference, not preserve openai
+            self.assertEqual(cfg["agent"]["loom"]["model"], "github-copilot/gpt-5.5")
 
-    def test_team_falls_back_to_live_local_when_no_remote_pref_resolves(self):
-        """When the team's remote preferences are all unavailable, team lands on a
+    def test_loom_falls_back_to_live_local_when_no_remote_pref_resolves(self):
+        """When loom's remote preferences are all unavailable, loom lands on a
         live local model (Qwen-first design), rather than a stale remote. Injects a
-        team pref of only-unavailable remotes so the fallback path is exercised."""
+        loom pref of only-unavailable remotes so the fallback path is exercised."""
         default_models = {
-            "agents": {"team": ["anthropic/claude-opus-4-8"]},  # not available
+            "agents": {"loom": ["anthropic/claude-opus-4-8"]},  # not available
             "subagents": {}
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -1420,7 +1385,7 @@ class TestSyncEndToEnd(unittest.TestCase):
                     }
                 },
                 "agent": {
-                    "team": {"mode": "primary", "model": "openai/gpt-5.5"}
+                    "loom": {"mode": "primary", "model": "openai/gpt-5.5"}
                 }
             }
             with open(cfg_path, "w") as f:
@@ -1439,8 +1404,8 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # No remote pref resolves -> team lands on the live local model, not a stale remote.
-            self.assertEqual(cfg["agent"]["team"]["model"], "dgx-n1-8000/qwen3-coder-next-fp8")
+            # No remote pref resolves -> loom lands on the live local model, not a stale remote.
+            self.assertEqual(cfg["agent"]["loom"]["model"], "dgx-n1-8000/qwen3-coder-next-fp8")
 
     def test_stale_remote_provider_skipped_when_runtime_discovery_succeeds(self):
         """Regression: When runtime discovery succeeds, stale remote providers
@@ -1449,7 +1414,7 @@ class TestSyncEndToEnd(unittest.TestCase):
         Scenario: existing config has Anthropic, but runtime opencode models only
         reports openai/gpt-5.5. agent-review should resolve to OpenAI, not Anthropic."""
         default_models = {
-            "agents": {"team": ["openai/gpt-5.5"]},
+            "agents": {"loom": ["openai/gpt-5.5"]},
             "subagents": {"agent-review": ["anthropic/claude-opus-4-8", "openai/gpt-5.5"]}
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -1494,14 +1459,14 @@ class TestSyncEndToEnd(unittest.TestCase):
             # The provider should be kept (user-authored), but Anthropic model
             # should NOT be in all_available_models
             self.assertIn("anthropic", cfg["provider"])
-            # Verify team gets openai/gpt-5.5 (it's the only remote in pool)
-            self.assertEqual(cfg["agent"]["team"]["model"], "openai/gpt-5.5")
+            # Verify loom gets openai/gpt-5.5 (it's the only remote in pool)
+            self.assertEqual(cfg["agent"]["loom"]["model"], "openai/gpt-5.5")
 
     def test_configured_provider_model_available_when_runtime_discovery_fails(self):
         """When `opencode models` returns nothing, a model from a CONFIGURED provider in the
         existing config is still available as a fallback, so an agent can be placed on it."""
         default_models = {
-            "agents": {"team": ["anthropic/claude-opus-4-8"]},
+            "agents": {"loom": ["anthropic/claude-opus-4-8"]},
             "subagents": {}
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -1519,7 +1484,7 @@ class TestSyncEndToEnd(unittest.TestCase):
                     }
                 },
                 "agent": {
-                    "team": {"mode": "primary", "model": "anthropic/claude-opus-4-8"}
+                    "loom": {"mode": "primary", "model": "anthropic/claude-opus-4-8"}
                 }
             }
             with open(cfg_path, "w") as f:
@@ -1528,11 +1493,11 @@ class TestSyncEndToEnd(unittest.TestCase):
             # Runtime discovery fails; the configured anthropic provider's model is the fallback.
             cfg = self._sync(tmp, _hosts=["192.0.2.101"], _ports=[8000],
                              runtime_models=[], default_models=default_models)
-            team = cfg["agent"]["team"]
-            self.assertEqual(team["model"], "anthropic/claude-opus-4-8")
+            looma = cfg["agent"]["loom"]
+            self.assertEqual(looma["model"], "anthropic/claude-opus-4-8")
             # cloud model -> local vLLM knobs stripped, runs on OpenCode's own defaults
-            self.assertNotIn("top_p", team)
-            self.assertNotIn("options", team)
+            self.assertNotIn("top_p", looma)
+            self.assertNotIn("options", looma)
 
 
 # --------------------------------------------------------------------------- #
@@ -1715,9 +1680,11 @@ class TestSkillsCommand(unittest.TestCase):
             cfg = self._synced(tmp)
             out = _capture(m.cmd_skills, _cli_args(cfg, name=None))
             self.assertIn("SKILL", out)
-            self.assertIn("agent-runbook-review", out)
-            for skill_name in m.ROLE_SKILLS:
+            for skill_name in m.GLOBAL_SKILLS:      # agent-loom + session-review
                 self.assertIn(skill_name, out)
+            # the retired role/team/runbook skills are gone from the listing
+            self.assertNotIn("agent-runbook-review", out)
+            self.assertNotIn("agent-team", out)
             self.assertNotIn("team-orchestration", out)
             self.assertNotIn("pr-review", out)
             self.assertIn("global", out)            # scope column
@@ -1725,11 +1692,11 @@ class TestSkillsCommand(unittest.TestCase):
     def test_pretty_prints_one_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._synced(tmp)
-            out = _capture(m.cmd_skills, _cli_args(cfg, name="agent-runbook-review"))
-            self.assertIn("skill: agent-runbook-review", out)
+            out = _capture(m.cmd_skills, _cli_args(cfg, name="session-review"))
+            self.assertIn("skill: session-review", out)
             self.assertIn("instruction(s)", out)    # size line
             self.assertIn("# SKILL.md", out)         # per-file header
-            self.assertIn("opencode.db", out)        # renders the body
+            self.assertIn("loom.db", out)            # renders the body
 
     def test_unknown_skill_exits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1789,24 +1756,23 @@ class TestCliViews(unittest.TestCase):
 
     def test_agents_list_and_detail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._synced(tmp, team_task_budget=4)
+            cfg = self._synced(tmp)
             out = _capture(m.cmd_agents, _cli_args(cfg))
-            for name in ("research", "code", "agent", "team"):
+            for name in ("research", "code", "agent", "loom"):
                 self.assertIn(name, out)
             self.assertNotIn("agent-research", out)  # workers are not primaries
-            detail = _capture(m.cmd_agents, _cli_args(cfg, name="team"))
-            self.assertIn("agent: team", detail)
-            self.assertIn("work-budget", detail)
-            self.assertIn("4", detail)
+            detail = _capture(m.cmd_agents, _cli_args(cfg, name="loom"))
+            self.assertIn("agent: loom", detail)
+            self.assertIn("permission", detail)
 
     def test_subagents_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._synced(tmp)
             out = _capture(m.cmd_subagents, _cli_args(cfg))
-            for w in ("agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
+            for w in ("agent-research", "agent-code", "agent-test", "agent-architect", "agent-review"):
                 self.assertIn(w, out)
-            # primaries are excluded from the subagents view (team is primary-only)
-            self.assertNotIn("team", out)
+            # primaries are excluded from the subagents view (loom is primary-only)
+            self.assertNotIn("\n  loom ", out)
             self.assertNotIn("\n  research ", out)
 
     def test_models_list_and_role_table(self):
@@ -1896,7 +1862,7 @@ class TestCliMutations(unittest.TestCase):
             with quiet():
                 m.cmd_subagents(_cli_args(cfg, name=None, set_model="anthropic/x"))
             ag = self._load(cfg)["agent"]
-            for w in ("agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review"):
+            for w in m.LOOM_ROLES:
                 self.assertEqual(ag[w]["model"], "anthropic/x")
 
     def test_set_model_to_cloud_strips_local_knobs(self):
@@ -1929,18 +1895,6 @@ class TestCliMutations(unittest.TestCase):
             self.assertTrue(research["options"]["chat_template_kwargs"]["enable_thinking"])
             self.assertEqual(research["temperature"], 1.0)   # reason preset
 
-    def test_set_work_budget_updates_team_and_prompt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = _sync_fixture(tmp)
-            with quiet():
-                m.cmd_agents(_cli_args(cfg, name=None, set_model=None, set_work_budget=7))
-            self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 7)
-            prompt = os.path.join(tmp, "prompts", m.ROLE_PROMPT_FILES["team"])
-            with open(prompt, encoding="utf-8") as f:
-                body = f.read()
-            self.assertIn("Delegation budget: at most 7 task calls", body)
-            self.assertFalse(os.path.exists(os.path.join(tmp, "prompts", "otools-team.md")))
-
     def test_set_model_temperature_hits_all_role_agents_and_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _sync_fixture(tmp)
@@ -1959,55 +1913,10 @@ class TestCliMutations(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _sync_fixture(tmp)
             with quiet():
-                m.cmd_models(_cli_args(cfg, name="Qwen3.6-27B", role="instruct",
-                                       set_temperature=None, set_thinking=True))
-            opts = self._load(cfg)["agent"]["agent-instruct"]["options"]["chat_template_kwargs"]
-            self.assertTrue(opts["enable_thinking"])
-
-    def test_main_dispatch_set_work_budget(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = _sync_fixture(tmp)
-            with quiet():
-                m.main(["agents", "team", "--config", cfg, "--set-work-budget", "5"])
-            self.assertEqual(self._load(cfg)["agent"]["team"]["task_budget"], 5)
-
-
-class TestWorkBudget(unittest.TestCase):
-    """Stage 4: team work-budget defaults from a config's [capabilities] concurrency."""
-
-    def _configs_with_concurrency(self, root, n):
-        cdir = os.path.join(root, "cfgs")
-        os.makedirs(cdir)
-        with open(os.path.join(cdir, "q.toml"), "w", encoding="utf-8") as f:
-            f.write('match = ["Qwen3.6-27B-NVFP4"]\n'
-                    '[capabilities]\nreasoning = true\ntool_call = true\n'
-                    f'concurrency = {n}\nthinking_control = "enable_thinking"\n'
-                    '[presets.reason]\nthinking = true\n[presets.reason.sampling]\ntemperature = 1.0\n'
-                    '[presets.code]\nthinking = true\n[presets.code.sampling]\ntemperature = 0.6\n'
-                    '[presets.agent]\nthinking = true\n[presets.agent.sampling]\ntemperature = 0.6\n'
-                    '[presets.instruct]\nthinking = false\n[presets.instruct.sampling]\ntemperature = 0.7\n')
-        return cdir
-
-    def _budget(self, cfg):
-        with open(cfg, encoding="utf-8") as f:
-            return json.load(f)["agent"]["team"].get("task_budget")
-
-    def test_defaults_from_concurrency(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cdir = self._configs_with_concurrency(tmp, 3)
-            cfg = _sync_fixture(tmp, configs=cdir)
-            self.assertEqual(self._budget(cfg), 3)
-
-    def test_flag_overrides_concurrency(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cdir = self._configs_with_concurrency(tmp, 3)
-            cfg = _sync_fixture(tmp, configs=cdir, team_task_budget=9)
-            self.assertEqual(self._budget(cfg), 9)
-
-    def test_no_concurrency_leaves_budget_unset(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = _sync_fixture(tmp)  # FIXTURE_DIR configs have no concurrency
-            self.assertIsNone(self._budget(cfg))
+                m.cmd_models(_cli_args(cfg, name="Qwen3.6-27B", role="code",
+                                       set_temperature=None, set_thinking=False))
+            opts = self._load(cfg)["agent"]["agent-code"]["options"]["chat_template_kwargs"]
+            self.assertFalse(opts["enable_thinking"])
 
 
 class TestBareModelNameResolution(unittest.TestCase):
@@ -2152,6 +2061,12 @@ class TestBareModelNameResolution(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Proxy tests
 # --------------------------------------------------------------------------- #
+# The proxy helper is an optional sibling module; skip its suites when this
+# checkout does not ship utils/omw_proxy.py (the loader then leaves m.proxy None).
+_PROXY_SHIPPED = os.path.exists(os.path.join(HERE, "utils", "omw_proxy.py"))
+
+
+@unittest.skipUnless(_PROXY_SHIPPED, "utils/omw_proxy.py not shipped in this tree")
 class TestProxyModule(unittest.TestCase):
     """Unit tests for the proxy helper module (loaded by omw as m.proxy)."""
     PX = m.proxy
@@ -2189,6 +2104,7 @@ class TestProxyModule(unittest.TestCase):
         self.assertNotIn("\\n", out)  # newlines rendered, not literal backslash-n
 
 
+@unittest.skipUnless(_PROXY_SHIPPED, "utils/omw_proxy.py not shipped in this tree")
 class TestProxyIntegration(unittest.TestCase):
     """End-to-end: mock upstream -> proxy -> client, incl. SSE streaming."""
 
@@ -2517,6 +2433,23 @@ class TestDisabledProviders(unittest.TestCase):
             self.assertIn("huggingface", disabled, "huggingface should be in disabled_providers by default")
 
 
+def _fake_opencode(tmp, lines=(), exit_code=0):
+    """Write a portable fake `opencode` executable into tmp and return its path.
+    A shell script on POSIX, a .bat on Windows (so subprocess can spawn it)."""
+    if os.name == "nt":
+        path = os.path.join(tmp, "opencode.bat")
+        body = "@echo off\r\n" + "".join(f"echo {l}\r\n" for l in lines) \
+               + f"exit /b {exit_code}\r\n"
+    else:
+        path = os.path.join(tmp, "opencode")
+        body = "#!/bin/sh\n" + "".join(f"echo '{l}'\n" for l in lines) \
+               + f"exit {exit_code}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    os.chmod(path, 0o755)
+    return path
+
+
 class TestRuntimeModelDiscovery(unittest.TestCase):
     """Test the discover_opencode_runtime_models helper function."""
 
@@ -2529,17 +2462,10 @@ class TestRuntimeModelDiscovery(unittest.TestCase):
 
     def test_discover_accepts_github_copilot_gpt_5_5(self):
         """github-copilot/gpt-5.5 should be recognized as a valid remote provider model."""
-        import subprocess
-        import tempfile
-
-        # Create a fake opencode script that returns output with github-copilot/gpt-5.5
+        # Create a fake opencode executable whose output includes github-copilot/gpt-5.5
         with tempfile.TemporaryDirectory() as tmp:
-            fake_opencode = os.path.join(tmp, "opencode")
-            # Simulate opencode models output with github-copilot/gpt-5.5
-            with open(fake_opencode, "w") as f:
-                f.write("#!/bin/bash\necho 'github-copilot/gpt-5.5'\necho 'openai/gpt-5.5'\n")
-            os.chmod(fake_opencode, 0o755)
-
+            fake_opencode = _fake_opencode(
+                tmp, lines=["github-copilot/gpt-5.5", "openai/gpt-5.5"])
             models, note = m.discover_opencode_runtime_models(fake_opencode)
             # Should include github-copilot/gpt-5.5
             self.assertIn("github-copilot/gpt-5.5", models)
@@ -2568,16 +2494,9 @@ class TestRuntimeModelDiscovery(unittest.TestCase):
 
     def test_discover_empty_when_opencode_models_fails(self):
         """When opencode models returns nonzero exit code, returns empty list."""
-        import subprocess
-        import tempfile
-        
-        # Create a fake opencode script that exits with error
+        # Create a fake opencode executable that exits with error
         with tempfile.TemporaryDirectory() as tmp:
-            fake_opencode = os.path.join(tmp, "opencode")
-            with open(fake_opencode, "w") as f:
-                f.write("#!/bin/bash\nexit 1\n")
-            os.chmod(fake_opencode, 0o755)
-            
+            fake_opencode = _fake_opencode(tmp, exit_code=1)
             models, note = m.discover_opencode_runtime_models(fake_opencode)
             self.assertEqual(models, [])
             # Note should indicate failure
@@ -2628,6 +2547,122 @@ class TestOcBuildOpencodeProviders(unittest.TestCase):
         self.assertEqual(models, {})
 
 
+class TestLoomRoleFiles(unittest.TestCase):
+    """loom v3: role instructions/contracts as LOOM_SKILLS_DIR files, stale-artifact
+    cleanup, and the conductor plumbing `omw loom` hands to utils/omw_loom.py."""
+
+    def setUp(self):
+        self._saved_dir = m.LOOM_SKILLS_DIR
+        self.tmp = tempfile.TemporaryDirectory()
+        m.LOOM_SKILLS_DIR = os.path.join(self.tmp.name, "loom-skills")
+
+    def tearDown(self):
+        m.LOOM_SKILLS_DIR = self._saved_dir
+        self.tmp.cleanup()
+
+    def test_write_loom_role_files_writes_5_roles_x_2_files(self):
+        written = m.write_loom_role_files()
+        self.assertEqual(len(written), 2 * len(m.LOOM_ROLES))
+        for role in m.LOOM_ROLES:
+            instr = os.path.join(m.LOOM_SKILLS_DIR, f"{role}-instructions-default.md")
+            contract = os.path.join(m.LOOM_SKILLS_DIR, f"{role}-contract.md")
+            self.assertIn(instr, written)
+            self.assertIn(contract, written)
+            with open(instr, encoding="utf-8") as f:
+                self.assertEqual(f.read(), m.ROLE_INSTRUCTIONS[role])
+            with open(contract, encoding="utf-8") as f:
+                self.assertEqual(f.read(), m._role_contract_text(role))
+
+    def test_review_and_architect_contracts_carry_finding_classification(self):
+        m.write_loom_role_files()
+        for role in m.LOOM_ROLES:
+            path = os.path.join(m.LOOM_SKILLS_DIR, f"{role}-contract.md")
+            with open(path, encoding="utf-8") as f:
+                body = f.read()
+            if role in ("agent-review", "agent-architect"):
+                self.assertIn("## Finding Classification", body, role)
+            else:
+                self.assertNotIn("## Finding Classification", body, role)
+            # every contract is the Return Contract first
+            self.assertIn("## Return Contract", body, role)
+
+    def test_cleanup_removes_stale_dirs_but_spares_loom_and_session_review(self):
+        root = self.tmp.name
+        cfg_path = os.path.join(root, "opencode.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        # stale skill dirs from the retired layout + the two keepers
+        for name in m.LEGACY_SKILL_DIRS + ("agent-loom", "session-review"):
+            d = os.path.join(root, "skills", name)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("body")
+        # stale prompt files from the retired layout
+        for relpath in m.LEGACY_ROLE_ARTIFACTS:
+            path = os.path.join(root, relpath)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("stale")
+        removed = m.oc_cleanup_stale_role_artifacts(cfg_path)
+        self.assertTrue(removed)
+        for name in m.LEGACY_SKILL_DIRS:
+            self.assertFalse(os.path.isdir(os.path.join(root, "skills", name)),
+                             f"stale skill dir {name} survived cleanup")
+        for name in ("agent-loom", "session-review"):
+            self.assertTrue(
+                os.path.exists(os.path.join(root, "skills", name, "SKILL.md")),
+                f"cleanup must spare {name}")
+        for relpath in m.LEGACY_ROLE_ARTIFACTS:
+            self.assertFalse(os.path.exists(os.path.join(root, relpath)),
+                             f"stale artifact {relpath} survived cleanup")
+
+    def test_loom_role_models_reads_opencode_agent_models(self):
+        cfg_path = os.path.join(self.tmp.name, "opencode.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"agent": {
+                "agent-code": {"model": "dgx-n1-8000/qwen"},
+                "agent-review": {"model": "github-copilot/claude-opus-4-8"},
+                "agent-test": {},                       # no model -> omitted
+                "code": {"model": "x/y"},               # not a pipeline role
+            }}, f)
+        out = m._loom_role_models({"opencode_config": cfg_path})
+        self.assertEqual(out, {"agent-code": "dgx-n1-8000/qwen",
+                               "agent-review": "github-copilot/claude-opus-4-8"})
+        # unreadable/missing config degrades to {} (conductor falls back)
+        self.assertEqual(m._loom_role_models(
+            {"opencode_config": os.path.join(self.tmp.name, "nope.json")}), {})
+
+    def test_cmd_loom_passes_conductor_plumbing(self):
+        # cmd_loom must hand the conductor the fallback contract, the explicit
+        # per-role models, and the LOOM_SKILLS_DIR instruction-file dir.
+        cfg_path = os.path.join(self.tmp.name, "opencode.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"agent": {"agent-code": {"model": "p/mod"}}}, f)
+        captured = {}
+        saved = (m.loom_mod, m.load_settings)
+        try:
+            m.loom_mod = types.SimpleNamespace(
+                dispatch=lambda args, **kw: captured.update(kw) or 0)
+            m.load_settings = lambda: {"opencode_config": cfg_path}
+            rc = m.cmd_loom(types.SimpleNamespace(loom_cmd="status", job=None))
+        finally:
+            m.loom_mod, m.load_settings = saved
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["status_contract"], m.WORKER_STATUS_CONTRACT)
+        self.assertEqual(captured["role_models"], {"agent-code": "p/mod"})
+        self.assertEqual(captured["loom_dir"], m.LOOM_SKILLS_DIR)
+        self.assertEqual(captured["default_models_path"], m.DEFAULT_MODELS_FILE)
+
+    def test_loom_plugin_filters_event_kinds_and_reports_failure_tail(self):
+        js = m.oc_loom_plugin_js()
+        # milestone-only relay into the TUI card
+        self.assertIn('new Set(["start", "phase", "done", "error", "paused", "malformed"])',
+                      js)
+        # failure output = last 10 kept lines + stderr
+        self.assertIn("lines.slice(-10)", js)
+        self.assertIn("proc.stderr", js)
+
+
 class TestCopilotSync(unittest.TestCase):
     """The GitHub Copilot CLI target: .agent.md roster + settings.json + env snippet."""
 
@@ -2643,10 +2678,13 @@ class TestCopilotSync(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._sync(tmp)
             adir = os.path.join(tmp, "agents")
-            for name in ("research", "code", "agent", "team",
-                         "agent-research", "agent-code", "agent-test", "agent-instruct", "agent-architect", "agent-review", "agent-review"):
+            for name in ("research", "code", "agent",
+                         "agent-research", "agent-code", "agent-test", "agent-architect", "agent-review"):
                 self.assertTrue(os.path.exists(os.path.join(adir, f"{name}.agent.md")),
                                 f"{name}.agent.md missing")
+            # retired agents are not emitted for Copilot either
+            self.assertFalse(os.path.exists(os.path.join(adir, "team.agent.md")))
+            self.assertFalse(os.path.exists(os.path.join(adir, "agent-instruct.agent.md")))
             body = open(os.path.join(adir, "code.agent.md"), encoding="utf-8").read()
             self.assertTrue(body.startswith("---\nname: code\n"))
             self.assertIn("description:", body)

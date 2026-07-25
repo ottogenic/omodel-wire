@@ -27,13 +27,13 @@ _spec.loader.exec_module(loom)
 MODEL_ERROR = "___MODEL_ERROR___"   # sentinel: fake server answers with an API error
 
 
-def reply(status, result="ok", evidence="checks ran", next_steps="", extra=""):
-    """A well-formed Return-Contract worker reply."""
+def reply(status, result="ok", evidence="checks ran", extra="", body=""):
+    """A well-formed Return-Contract worker reply (loom v3: no NEXT STEPS field).
+    `body` is the optional full deliverable ABOVE the contract block."""
     lines = [f"RESULT: {result}", f"EVIDENCE: {evidence}", extra,
              f"STATUS: {status}"]
-    if next_steps:
-        lines.append(f"NEXT STEPS FOR team: {next_steps}")
-    return "\n".join(l for l in lines if l)
+    block = "\n".join(l for l in lines if l)
+    return f"{body}\n\n{block}" if body else block
 
 
 class FakeOpenCode:
@@ -180,24 +180,31 @@ class LoomCase(unittest.TestCase):
     # -- contract parser ----------------------------------------------------------
 
     def test_parse_contract_full(self):
-        p = loom.parse_contract(reply("DONE", "changed a.py:12", "pytest: 3 passed",
-                                      "Send to agent-test."))
+        p = loom.parse_contract(reply("DONE", "changed a.py:12", "pytest: 3 passed"))
         self.assertEqual(p["status"], "DONE")
         self.assertIn("a.py:12", p["result"])
         self.assertIn("3 passed", p["evidence"])
-        self.assertEqual(p["next_steps"], "Send to agent-test.")
+        # loom v3 dropped the NEXT STEPS field entirely -- routing is the
+        # conductor's job, never parsed from the worker's reply.
+        self.assertEqual(set(p), {"status", "result", "evidence",
+                                  "research", "findings", "clean"})
 
     def test_parse_contract_tolerates_backticks_and_case(self):
-        p = loom.parse_contract("stuff\n`STATUS`: `blocked`\nNEXT STEPS FOR team: x")
+        p = loom.parse_contract("stuff\n`STATUS`: `blocked`\ntrailing text")
         self.assertEqual(p["status"], "BLOCKED")
 
     def test_parse_contract_malformed(self):
         self.assertIsNone(loom.parse_contract("I did some things, all good!")["status"])
 
+    def test_parse_result_stops_at_next_contract_label(self):
+        # Section lookahead is RESULT|EVIDENCE|STATUS only.
+        p = loom.parse_contract("RESULT: the summary\nEVIDENCE: cmd -> ok\nSTATUS: DONE")
+        self.assertEqual(p["result"], "the summary")
+        self.assertEqual(p["evidence"], "cmd -> ok")
+
     def test_parse_research_requests(self):
         text = ("RESULT: need facts\nEVIDENCE: none\nSTATUS: NEEDS_RESEARCH\n"
-                "RESEARCH REQUEST:\n1. What DB engine is used?\n2. Which auth lib?\n\n"
-                "NEXT STEPS FOR team: Send these questions to agent-research")
+                "RESEARCH REQUEST:\n1. What DB engine is used?\n2. Which auth lib?\n")
         p = loom.parse_contract(text)
         self.assertEqual(p["research"],
                          ["What DB engine is used?", "Which auth lib?"])
@@ -205,19 +212,42 @@ class LoomCase(unittest.TestCase):
     def test_parse_findings_and_clean(self):
         text = ("RESULT:\nFINDING 1: a.py:3 missing null check | PASS CONDITION: check added\n"
                 "FINDING 2: b.py:9 secret logged | PASS CONDITION: removed\n"
-                "EVIDENCE: read diff\nSTATUS: DONE\nNEXT STEPS FOR team: Fix these ONE AT A TIME.")
+                "EVIDENCE: read diff\nSTATUS: DONE")
         p = loom.parse_contract(text)
         self.assertEqual([n for n, _ in p["findings"]], [1, 2])
         self.assertIn("null check", p["findings"][0][1])
         self.assertTrue(loom.parse_contract("No blocking findings.\nSTATUS: DONE")["clean"])
 
+    def test_strip_contract_tail_returns_body_above_final_result(self):
+        text = ("## The full plan\n\n1. do this\n2. do that\n\n"
+                "RESULT: a short synopsis\nEVIDENCE: read the repo\nSTATUS: DONE")
+        self.assertEqual(loom.strip_contract_tail(text),
+                         "## The full plan\n\n1. do this\n2. do that")
+
+    def test_strip_contract_tail_no_result_line_returns_whole_text(self):
+        self.assertEqual(loom.strip_contract_tail("just prose, no contract"),
+                         "just prose, no contract")
+
+    def test_strip_contract_tail_contract_only_reply_returns_whole_text(self):
+        text = "RESULT: all of it\nEVIDENCE: ran x\nSTATUS: DONE"
+        self.assertEqual(loom.strip_contract_tail(text), text)
+
+    def test_strip_contract_tail_multiple_result_lines_cuts_at_last(self):
+        text = ("intro\nRESULT: an inline echo in the body\nmore body\n"
+                "RESULT: final summary\nEVIDENCE: e\nSTATUS: DONE")
+        self.assertEqual(loom.strip_contract_tail(text),
+                         "intro\nRESULT: an inline echo in the body\nmore body")
+
+    def test_strip_contract_tail_empty(self):
+        self.assertEqual(loom.strip_contract_tail(""), "")
+        self.assertEqual(loom.strip_contract_tail(None), "")
+
     # -- happy path -----------------------------------------------------------------
 
     def test_simple_happy_path(self):
         self.server.responses = {
-            "agent-code": [reply("DONE", "implemented x", next_steps="Send to agent-test.")],
-            "agent-test": [reply("DONE", "all pass", "34/34 PASS",
-                                 next_steps="Send to agent-review.")],
+            "agent-code": [reply("DONE", "implemented x")],
+            "agent-test": [reply("DONE", "all pass", "34/34 PASS")],
             "agent-review": ["No blocking findings.\n" + reply("DONE", "clean review")],
         }
         lm, job_id = self.make_loom(risk="simple")
@@ -243,7 +273,7 @@ class LoomCase(unittest.TestCase):
             "agent-research": [reply("DONE", "framework: flask"),
                                reply("DONE", "runner: pytest")],
             "agent-code": [reply("DONE", "implemented")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom(risk="medium")
@@ -263,16 +293,209 @@ class LoomCase(unittest.TestCase):
         details = [e["detail"] for e in self.led.events(job_id) if e["kind"] == "research"]
         self.assertIn("answered 2/2", details)
 
+    # -- packet composition (loom v3: instructions + contract injected per dispatch) --
+
+    def _write(self, *parts, text):
+        path = os.path.join(*parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def _skill_dirs(self):
+        """(global loom_dir, repo .loom/skills dir) under the job dir."""
+        gdir = os.path.join(self.tmp.name, "gskills")
+        rdir = os.path.join(self.tmp.name, ".loom", "skills")
+        os.makedirs(gdir, exist_ok=True)
+        os.makedirs(rdir, exist_ok=True)
+        return gdir, rdir
+
+    def test_compose_packet_override_beats_default_and_local(self):
+        gdir, rdir = self._skill_dirs()
+        self._write(gdir, "agent-code-instructions-default.md", text="DEFAULT INSTRUCTIONS")
+        self._write(rdir, "agent-code-instructions-local.md", text="LOCAL OVERLAY")
+        self._write(rdir, "agent-code-instructions-override.md", text="OVERRIDE TEXT")
+        self._write(gdir, "agent-code-contract.md", text="ROLE CONTRACT TEXT")
+        self.cfg["loom_dir"] = gdir
+        lm, _ = self.make_loom()
+        packet, files = lm._compose_packet("agent-code", "TASK PROMPT")
+        self.assertTrue(packet.startswith("TASK PROMPT"))
+        self.assertIn("OVERRIDE TEXT", packet)
+        # override is EXCLUSIVE: default and local must not leak in beside it
+        self.assertNotIn("DEFAULT INSTRUCTIONS", packet)
+        self.assertNotIn("LOCAL OVERLAY", packet)
+        # the contract sits at the tail (most-recent instruction wins)
+        self.assertTrue(packet.endswith("ROLE CONTRACT TEXT"))
+        self.assertTrue(any(f.startswith("override:") for f in files), files)
+        self.assertIn("contract", files)
+
+    def test_compose_packet_default_plus_local_when_no_override(self):
+        gdir, rdir = self._skill_dirs()
+        self._write(gdir, "agent-code-instructions-default.md", text="DEFAULT INSTRUCTIONS")
+        self._write(rdir, "agent-code-instructions-local.md", text="LOCAL OVERLAY")
+        self._write(gdir, "agent-code-contract.md", text="ROLE CONTRACT TEXT")
+        self.cfg["loom_dir"] = gdir
+        lm, _ = self.make_loom()
+        packet, files = lm._compose_packet("agent-code", "TASK PROMPT")
+        # order: task, default instructions, repo overlay, contract last
+        self.assertLess(packet.index("TASK PROMPT"), packet.index("DEFAULT INSTRUCTIONS"))
+        self.assertLess(packet.index("DEFAULT INSTRUCTIONS"), packet.index("LOCAL OVERLAY"))
+        self.assertLess(packet.index("LOCAL OVERLAY"), packet.index("ROLE CONTRACT TEXT"))
+        self.assertTrue(packet.endswith("ROLE CONTRACT TEXT"))
+        self.assertTrue(any(f.startswith("default:") for f in files), files)
+        self.assertTrue(any(f.startswith("local:") for f in files), files)
+
+    def test_compose_packet_missing_files_is_bare_prompt(self):
+        gdir, _ = self._skill_dirs()   # both dirs exist but are empty
+        self.cfg["loom_dir"] = gdir
+        lm, _ = self.make_loom()
+        packet, files = lm._compose_packet("agent-code", "TASK PROMPT")
+        self.assertEqual(packet, "TASK PROMPT")
+        self.assertEqual(files, [])
+
+    def test_compose_packet_contract_falls_back_to_injected_text(self):
+        # No per-role contract file -> cfg["status_contract"] (wire-injected) is used.
+        gdir, _ = self._skill_dirs()
+        self.cfg["loom_dir"] = gdir
+        self.cfg["status_contract"] = "FALLBACK CONTRACT"
+        lm, _ = self.make_loom()
+        packet, files = lm._compose_packet("agent-code", "TASK PROMPT")
+        self.assertTrue(packet.endswith("FALLBACK CONTRACT"))
+        self.assertIn("contract", files)
+        # ...but a per-role contract file WINS over the fallback
+        self._write(gdir, "agent-code-contract.md", text="ROLE CONTRACT TEXT")
+        packet2, _ = lm._compose_packet("agent-code", "TASK PROMPT")
+        self.assertTrue(packet2.endswith("ROLE CONTRACT TEXT"))
+        self.assertNotIn("FALLBACK CONTRACT", packet2)
+
+    def test_fresh_dispatch_composes_packet_resume_does_not(self):
+        # Fresh sessions get [prompt + instructions + contract] and a "compose"
+        # ledger event; resumed sessions get the bare prompt (already in-context).
+        gdir, _ = self._skill_dirs()
+        self._write(gdir, "agent-code-instructions-default.md", text="DEFAULT INSTRUCTIONS")
+        self.cfg["loom_dir"] = gdir
+        self.cfg["status_contract"] = "FALLBACK CONTRACT"
+        self.server.responses = {
+            "agent-code": [reply("DONE", "implemented"),
+                           reply("DONE", "fixed the assert")],
+            "agent-test": [reply("DONE", "1 failure", "FAIL test_x: boom"),
+                           reply("DONE", "all pass", "34/34 PASS")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        }
+        lm, job_id = self.make_loom()
+        lm.run()
+        self.assertEqual(self.led.job(job_id)["status"], "done")
+        code = self.server.prompts("agent-code")
+        self.assertIn("DEFAULT INSTRUCTIONS", code[0][2])
+        self.assertTrue(code[0][2].endswith("FALLBACK CONTRACT"))
+        # the resumed fix prompt is NOT re-composed (no wasted tokens)
+        self.assertNotIn("DEFAULT INSTRUCTIONS", code[1][2])
+        self.assertNotIn("FALLBACK CONTRACT", code[1][2])
+        # one compose event per fresh session, named per role
+        composes = [e["detail"] for e in self.led.events(job_id) if e["kind"] == "compose"]
+        self.assertEqual(len(composes), len(self.server.created()))
+        self.assertTrue(any(c.startswith("agent-code:") for c in composes), composes)
+
+    def test_plan_handoff_carries_full_deliverable_not_result_summary(self):
+        # Regression (job 60): the architect's 3.5k-char plan was collapsed to its
+        # 624-char RESULT synopsis. The stored plan must be the body ABOVE the
+        # contract block, with the RESULT summary as fallback only.
+        plan_body = "## Full plan\n1. step one\n2. step two\nCRITERIA: it works"
+        self.server.responses = {
+            "agent-architect": [reply("DONE", "short synopsis", body=plan_body)],
+            "agent-code": [reply("DONE", "implemented")],
+            "agent-test": [reply("DONE")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        }
+        lm, job_id = self.make_loom(risk="medium")
+        lm.run()
+        job = self.led.job(job_id)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["plan"], plan_body)
+        # the FULL plan (not the synopsis) reaches agent-code's packet
+        code_packet = self.server.prompts("agent-code")[0][2]
+        self.assertIn("2. step two", code_packet)
+
+    def test_nudge_merges_original_body_with_nudged_contract(self):
+        # A malformed (no STATUS) plan reply is nudged for ONLY the contract block;
+        # the deliverable from the first reply and the contract from the second are
+        # merged, so the plan handoff keeps the full artifact.
+        self.cfg["status_contract"] = ("CONTRACT-MARKER\nRESULT: <r>\n"
+                                       "EVIDENCE: <e>\nSTATUS: <s>")
+        plan_body = "## The real plan\nstep A\nstep B"
+        self.server.responses = {
+            "agent-architect": [plan_body,                    # no STATUS -> nudge
+                                reply("DONE", "nudged synopsis")],
+            "agent-code": [reply("DONE", "implemented")],
+            "agent-test": [reply("DONE")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        }
+        lm, job_id = self.make_loom(risk="medium")
+        lm.run()
+        job = self.led.job(job_id)
+        self.assertEqual(job["status"], "done")
+        arch = self.server.prompts("agent-architect")
+        self.assertEqual(len(arch), 2)
+        self.assertEqual(arch[0][0], arch[1][0], "nudge stays in the same session")
+        # the nudge asks for ONLY the contract block, quoting the contract text,
+        # and explicitly forbids regenerating the delivered work
+        self.assertIn("ONLY the", arch[1][2])
+        self.assertIn("CONTRACT-MARKER", arch[1][2])
+        self.assertIn("do NOT repeat or rewrite it", arch[1][2])
+        # merged handoff: the plan is the original body, not the nudged synopsis
+        self.assertEqual(job["plan"], plan_body)
+
+    def test_model_for_falls_back_to_role_models(self):
+        # No job-wide override, no ranking bump -> the wire-injected per-role model
+        # is passed EXPLICITLY on every dispatch (never server-side resolution).
+        self.cfg["role_models"] = {"agent-code": "prov/mod"}
+        self.server.responses = {
+            "agent-code": [reply("DONE")],
+            "agent-test": [reply("DONE")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        }
+        lm, job_id = self.make_loom()
+        lm.run()
+        self.assertEqual(self.led.job(job_id)["status"], "done")
+        code_models = [mdl for _, _, _, mdl in self.server.prompts("agent-code")]
+        self.assertEqual(code_models, [{"providerID": "prov", "modelID": "mod"}])
+        # roles without an entry send no explicit model
+        test_models = [mdl for _, _, _, mdl in self.server.prompts("agent-test")]
+        self.assertEqual(test_models, [None])
+
+    def test_dispatch_kwargs_fold_into_loom_config(self):
+        # omodel-wire injects the contract, per-role models, and the loom files dir
+        # via dispatch(...); loom_config() must fold all three into every job cfg.
+        import contextlib
+        import io
+        saved = (loom._STATUS_CONTRACT, loom._ROLE_MODELS, loom._LOOM_DIR)
+
+        class Args:
+            loom_cmd = "status"
+            job = None
+            db = self.dbfile
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = loom.dispatch(Args(), role_models={"agent-code": "p/m"},
+                                   loom_dir="/cfg/loom/skills",
+                                   status_contract="THE CONTRACT")
+            self.assertEqual(rc, 0)
+            cfg = loom.loom_config()
+            self.assertEqual(cfg["role_models"], {"agent-code": "p/m"})
+            self.assertEqual(cfg["loom_dir"], "/cfg/loom/skills")
+            self.assertEqual(cfg["status_contract"], "THE CONTRACT")
+        finally:
+            loom._STATUS_CONTRACT, loom._ROLE_MODELS, loom._LOOM_DIR = saved
+
     # -- failure loops ---------------------------------------------------------------
 
     def test_test_failure_routes_back_to_same_code_session(self):
         self.server.responses = {
             "agent-code": [reply("DONE", "implemented"),
                            reply("DONE", "fixed the assert")],
-            "agent-test": [reply("DONE", "1 failure", "FAIL test_x: boom",
-                                 next_steps="Send the failures above to the same agent-code session that made this change."),
-                           reply("DONE", "all pass", "34/34 PASS",
-                                 next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE", "1 failure", "FAIL test_x: boom"),
+                           reply("DONE", "all pass", "34/34 PASS")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom()
@@ -288,14 +511,14 @@ class LoomCase(unittest.TestCase):
     def test_review_findings_fixed_one_at_a_time_in_new_sessions(self):
         finding_reply = ("FINDING 1: a.py:3 null check | PASS CONDITION: added\n"
                          "FINDING 2: b.py:9 secret log | PASS CONDITION: removed\n"
-                         "STATUS: DONE\nNEXT STEPS FOR team: Fix these ONE AT A TIME.")
+                         "STATUS: DONE")
         second = ("FINDING 2: b.py:9 secret log | PASS CONDITION: removed\n"
-                  "STATUS: DONE\nNEXT STEPS FOR team: Fix these ONE AT A TIME.")
+                  "STATUS: DONE")
         self.server.responses = {
             "agent-code": [reply("DONE", "implemented"),
                            reply("DONE", "fixed finding 1"),
                            reply("DONE", "fixed finding 2")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review."),
+            "agent-test": [reply("DONE"),
                            reply("DONE", "recheck 1 pass"),
                            reply("DONE", "recheck 2 pass")],
             "agent-review": [finding_reply, second, "No blocking findings.\nSTATUS: DONE"],
@@ -329,7 +552,7 @@ class LoomCase(unittest.TestCase):
             "agent-code": [reply("BLOCKED", "cannot find api", "tried x, error y"),
                            reply("DONE", "applied correction")],
             "agent-architect": [reply("DONE", "correction: use client.v2")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom()
@@ -348,7 +571,7 @@ class LoomCase(unittest.TestCase):
                            reply("CONTINUE", "working", "same evidence"),
                            reply("DONE", "after correction")],
             "agent-architect": [reply("DONE", "correction: do z")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom()
@@ -361,7 +584,7 @@ class LoomCase(unittest.TestCase):
         self.server.responses = {
             "agent-code": ["did stuff, looks fine!",       # no STATUS -> nudge
                            reply("DONE", "proper contract")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom()
@@ -397,7 +620,7 @@ class LoomCase(unittest.TestCase):
         # now the human fixes the world: resume completes the job
         self.server.responses = {
             "agent-code": [reply("DONE", "unblocked after human note")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         self.led.update_job(job_id, status="running")
@@ -413,7 +636,7 @@ class LoomCase(unittest.TestCase):
     def test_worker_model_override_applies_to_every_dispatch(self):
         self.server.responses = {
             "agent-code": [reply("DONE")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom(worker_model="google/gemini-cheap")
@@ -456,7 +679,7 @@ class LoomCase(unittest.TestCase):
         }]
         self.server.responses = {
             "agent-code": [reply("DONE")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         out = io.StringIO()
@@ -483,7 +706,7 @@ class LoomCase(unittest.TestCase):
     def test_request_stop_pauses_job(self):
         self.server.responses = {
             "agent-code": [reply("DONE")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
         }
         lm, job_id = self.make_loom()
         lm.stop_flag.set()
@@ -502,7 +725,7 @@ class LoomCase(unittest.TestCase):
     def test_clean_deletes_old_jobs_and_their_sessions(self):
         self.server.responses = {
             "agent-code": [reply("DONE")],
-            "agent-test": [reply("DONE", next_steps="Send to agent-review.")],
+            "agent-test": [reply("DONE")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
         lm, job_id = self.make_loom()
@@ -573,7 +796,7 @@ class LoomCase(unittest.TestCase):
         # malformed and trigger the nudge -- never ship as the report.
         echo = ("RESULT: what you did or found, with files as path:line\n"
                 "EVIDENCE: each command or check you ran and what it RETURNED, or your sources\n"
-                "STATUS: DONE\nNEXT STEPS FOR team: the route from Next Steps above")
+                "STATUS: DONE")
         self.assertIsNone(loom.parse_contract(echo)["status"])
         self.server.responses = {
             "agent-research": [echo, reply("DONE", "skill file has 128 lines", "read SKILL.md")],

@@ -21,15 +21,14 @@ Quick start:
   omodel-wire.py --install-aliases     # add the `omw` shell alias (re-open shell after)
   omw                                 # detect tools + sync (default sampling)
   omw --profiles                      # + build the agent roster for reasoning models
-  omw --profiles --team-task-budget 4 --web-search exa --write-shell-env
+  omw --profiles --web-search exa --write-shell-env
   omw --dry-run                       # preview opencode.json + plugin, write nothing
 
 --profiles builds, per reasoning model, an agent roster from omodel-manager's
 declared per-model configs (configs/*.toml) -- capabilities + per-mode sampling are
-DECLARED, not probed (fast). Roster: visible `research` / `code` / `agent` + a
-`team` orchestrator (which
-delegates to hidden `agent-research` / `agent-code` / `agent-test` / `agent-instruct` /
-`agent-architect` / `agent-review` workers) -- plus
+DECLARED, not probed (fast). Roster: visible `research` / `code` / `agent` + the
+`loom` pipeline lead (whose conductor dispatches the hidden `agent-research` /
+`agent-code` / `agent-test` / `agent-architect` / `agent-review` workers) -- plus
 Ctrl+T thinking variants and an agent-aware chat.params plugin that pins sampling.
 """
 
@@ -325,8 +324,8 @@ LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provi
 # Agents emitted per recipe. We explicitly override OpenCode's built-in plan/build
 # (full defs, our sampling + permissions). Two tiers:
 #   VISIBLE (Tab, mode primary, provider-default prompt) -- direct-use agents.
-#   HIDDEN  (mode subagent, minimal role-skill bootstrap) -- Team's targets;
-#           role logic is visible under the global skills/ directory.
+#   HIDDEN  (mode subagent, minimal bootstrap prompt) -- the loom conductor's
+#           workers; role guidance is injected per-dispatch from LOOM_SKILLS_DIR.
 # Permission profiles (risk tiers). websearch/webfetch allowed on all.
 #   readonly: no edits/bash/delegation (research only)
 #   ask:      full access but PROMPTS for confirmation on edits/bash
@@ -347,7 +346,7 @@ PERM = {
 }
 # Each spec: (key, preset role, mode, is_worker, perm profile, color, description).
 # color = FIXED hex by risk: green (read-only) -> yellow-green (ask) -> orange
-# (autonomous) -> red (team). Tweak the hexes here.
+# (autonomous). Tweak the hexes here.
 # Visible names avoid the reserved built-ins `build`/`plan` (which OpenCode won't
 # let you override -- they'd show as "native" and ignore our settings). We instead
 # disable the natives and use `research` (planner) + `code` (coder).
@@ -358,21 +357,16 @@ AGENT_SPECS = [
     ("agent-research", "reason",   "subagent", True, "readonly", "#22c55e", "[worker] research & data-gathering, read-only + web (fetch/summarize)"),
     ("agent-code",     "code",     "subagent", True, "full",     "#f97316", "[worker] coding / implementation / debugging, full access"),
     ("agent-test",     "code",     "subagent", True, "test",     "#eab308", "[worker] runs broad lint/test/build/script verification and reports exact results; never edits"),
-    ("agent-instruct", "instruct", "subagent", True, "full",     "#facc15", "[worker] fast mechanical subtasks, no thinking"),
     ("agent-architect","reason",   "subagent", True, "readonly", "#8b5cf6", "[worker] read-only planner/verifier + escalation target for hard problems; returns a plan, research list, and acceptance criteria"),
     ("agent-review",   "reason",   "subagent", True, "review", "#3b82f6", "[worker] verifies completed implementations and reviews Pull Requests; classifies findings and never edits"),
 ]
-# Hidden workers the team may delegate to (its permission.task allowlist).
-TEAM_TARGETS = ["agent-research", "agent-code", "agent-test", "agent-instruct",
-                "agent-architect", "agent-review"]
 # Per-worker `steps` cap (max agentic iterations before OpenCode forces a text-only
 # summary -- see opencode.ai/docs/agents#max-steps). Tightest on the well-defined jobs
-# (instruct/test), most headroom on open-ended work (code/review). This bounds runaway
+# (test), most headroom on open-ended work (code/review). This bounds runaway
 # TOOL-ACTION loops; combined with the DONE/CONTINUE/BLOCKED exit contract in the worker
-# prompts, a worker that hits the wall reports back so the team can continue it (same
-# task_id) or escalate to agent-architect. Not set on visible primaries (direct human use).
+# packets, a worker that hits the wall reports back so the loom conductor can continue
+# it (same session) or escalate to agent-architect. Not set on visible primaries.
 WORKER_STEPS = {
-    "agent-instruct":  5,   # one mechanical edit; long iteration = wrong tool
     "agent-research":  10,  # fetch + read a few sources + summarize (read-only)
     "agent-test":      12,  # run harness + read result files + report (runaway-prone)
     "agent-architect": 15,  # read-and-reason across the code, but read-only
@@ -381,11 +375,10 @@ WORKER_STEPS = {
 }
 # Built-in agents we disable (can't be overridden; replaced by research/code).
 BUILTIN_DISABLE = ["build", "plan"]
-TEAM_COLOR = "#ef4444"   # red -- highest risk (orchestrates, spends $, delegates)
-LOOM_COLOR = "#ec4899"   # pink -- v2 orchestrator (deterministic conductor; A/B with team)
+LOOM_COLOR = "#ec4899"   # pink -- pipeline lead (deterministic conductor)
 # Agent keys this tool may write under --profiles (current + legacy). Used to prune
-# stale ones on re-sync -- incl. old plan/build OVERRIDES and old names -- so
-# re-syncing converges. Won't touch the user's own agents.
+# stale ones on re-sync -- incl. old plan/build OVERRIDES and RETIRED names (team,
+# agent-instruct) -- so re-syncing converges. Won't touch the user's own agents.
 MANAGED_AGENTS = {"research", "code", "agent", "team",
                   "agent-research", "agent-code", "agent-test", "agent-instruct",
                   "agent-architect", "agent-review",
@@ -400,11 +393,7 @@ DEFAULT_MODELS_TEMPLATE = {
     "agents": {
         # Qwen-first: the local DGX 35B-A3B is ~free at the margin, so it leads every
         # workhorse agent; paid github-copilot models are fallbacks only.
-        "team": ["qwen3.6-35b-a3b-nvfp4-unsloth",
-                 "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
-                 "github-copilot/gpt-5.4", "github-copilot/gemini-2.5-pro",
-                 "github-copilot/claude-sonnet-4.6"],
-        # loom's LLM half only does intake + relay, so it ranks like team; the
+        # loom's LLM half only does intake + relay, so a cheap local model leads; the
         # pipeline workers keep their own per-role rankings below.
         "loom": ["qwen3.6-35b-a3b-nvfp4-unsloth",
                  "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
@@ -430,9 +419,6 @@ DEFAULT_MODELS_TEMPLATE = {
         "agent-test": ["qwen3.6-35b-a3b-nvfp4-unsloth",
                        "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
                        "github-copilot/claude-haiku-4.5", "github-copilot/gpt-5.4-mini"],
-        "agent-instruct": ["qwen3.6-35b-a3b-nvfp4-unsloth",
-                           "unsloth/qwen3-coder-next-fp8", "qwen3-coder-next-fp8", "qwen3-coder-next-nvfp4",
-                           "github-copilot/gpt-5.4-mini", "github-copilot/gemini-3.5-flash"],
         # Expensive-but-low-volume: architect (read-only planner/verifier) and review
         # (merge gate) are the only agents that lead with a top-tier paid model.
         "agent-architect": ["github-copilot/claude-opus-4.8", "github-copilot/gpt-5.6-sol",
@@ -670,104 +656,73 @@ def _apply_default_models(agents, default_models, reasoning_caps, available_mode
     return agents_copy
 
 
-# System prompt for the `team` lead/orchestrator. Written to a file next to
-# opencode.json and referenced via {file:...}; edit it there to tune behavior.
+# Agent -> basename for the {file:./prompts/otools-<name>.md} bootstrap prompts
+# written next to opencode.json; edit them there to tune behavior (sync resets).
 ROLE_SKILL_NAMES = {
-    "team": "agent-team",
     "loom": "agent-loom",
     "agent-research": "agent-research",
     "agent-code": "agent-code",
     "agent-test": "agent-test",
-    "agent-instruct": "agent-instruct",
     "agent-architect": "agent-architect",
     "agent-review": "agent-review",
 }
 
 
-def _skill_load_steps(skill_name, then="Then start the task."):
-    """Part 2 of every role prompt: numbered skill-load steps via the `skill` tool."""
-    return f"""Before the task, load your role skill using the `skill` tool:
-1. If `{skill_name}-override` is listed as available: load only that skill. Skip steps 2-3.
-2. Load `{skill_name}`.
-3. If `{skill_name}-extend` is listed as available: load it too. If one of its rules
-   conflicts with `{skill_name}`, follow `{skill_name}`.
-Load only exact names shown as available. Never call `skill` with a name that is not
-listed, and never load another role's skills. {then}"""
-
-
 def _role_bootstrap_prompt(agent_name, skill_name):
-    """Three-part role system prompt (replaces OpenCode's default entirely).
+    """Minimal role system prompt (replaces OpenCode's default entirely).
 
-    Part 1 (opener) MUST stay action-first and MUST come before any output/summary
+    The opener MUST stay action-first and MUST come before any output/summary
     framing: leading with summary wording makes Qwen3-family models (vLLM
     --tool-call-parser qwen3_coder) NARRATE tool calls as text instead of emitting
     native calls -> the parser drops them and the worker fabricates (verified on
     n1: 1/8 leading with summary framing vs 15/15 action-first).
-    Part 3 counters OpenCode #18423 (orchestrator receives the subagent's last text
-    part even when empty) and holds even if skill loading fails; the exact message
-    FORMAT lives only in the skill's Return Contract to avoid a competing spec.
+    The closing paragraph counters OpenCode #18423 (orchestrator receives the
+    subagent's last text part even when empty). Role instructions and the Return
+    Contract are NOT in this prompt: the loom conductor injects both into every
+    dispatch packet deterministically (from LOOM_SKILLS_DIR), so they live in
+    exactly one place and never depend on model-invoked skill loading.
     """
     if agent_name == "loom":
-        return f"""You are `loom`, the pipeline lead. Complete feature work by calling the `loom`
+        return """You are `loom`, the pipeline lead. Complete feature work by calling the `loom`
 tool -- it runs the whole plan/code/test/review pipeline deterministically, streams
 progress, and returns the final report. Answer factual or codebase questions through
 the same tool (`action: "ask"`), never from your own knowledge. You have no workspace
 tools: never attempt to read, edit, or run anything yourself.
 
-{_skill_load_steps(skill_name, then="Then start the work.")}
-
 When the work is finished, end with a plain-text message relaying the loom report --
 the user never sees the pipeline output directly.
 """
-    if agent_name == "team":
-        return f"""You are `team`, the lead orchestrator. Complete the assigned work by calling the
-`task` tool to delegate to your workers. Delegate, inspect each worker's result, then
-continue until the work is done. Track multi-step work with `todowrite`. You have no
-workspace tools: never attempt to read, edit, or run anything yourself.
-
-{_skill_load_steps(skill_name, then="Then start the work.")}
-
-When the work is finished, end with a plain-text message summarizing the outcome and
-each worker's concrete results -- the user never sees worker output directly.
-"""
-    return f"""You are `{agent_name}`, a delegated worker. Complete the task by calling the provided
-tools. Act, inspect each tool result, then continue until the task is done.
-
-{_skill_load_steps(skill_name)}
-
+    return f"""You are `{agent_name}`, a delegated worker in a deterministic pipeline. Complete the
+task by calling the provided tools. Act, inspect each tool result, then continue until
+the task is done. Your dispatch message carries your role instructions and the required
+format of your final reply (the Return Contract); both are mandatory.
 When the work is finished, end with a plain-text message containing your concrete
 results -- your caller receives ONLY this final message. Never stop on a bare tool call
-or an empty message. Your role skill defines the exact format of this final message.
+or an empty message.
 """
 
 
-ROLE_PROMPTS = {key: _role_bootstrap_prompt(key, skill)
-                for key, skill in ROLE_SKILL_NAMES.items()}
 ROLE_PROMPT_FILES = {key: f"otools-{skill}.md" for key, skill in ROLE_SKILL_NAMES.items()}
 
 
 WORKER_STATUS_CONTRACT = """
 ## Return Contract
 
-End every reply with exactly this structure, replacing each <placeholder> with your
-actual content -- NEVER repeat the placeholder text itself:
+Put your FULL deliverable (the plan, findings, or description of changes) in the
+message body FIRST. Then end every reply with exactly this block, replacing each
+<placeholder> with your actual content -- NEVER repeat the placeholder text itself:
 
-    RESULT: <what you did or found, with files as path:line>
+    RESULT: <one-paragraph summary of what you did or found, with files as path:line>
     EVIDENCE: <each command or check you ran and what it RETURNED, or your sources>
     STATUS: <one of DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED>
-    NEXT STEPS FOR team: <the route from Next Steps above>
 
 - `STATUS: DONE` -- assigned work is complete.
-- `STATUS: CONTINUE` -- making progress with a concrete next step; `team` should resume this task_id.
-- `STATUS: NEEDS_RESEARCH` -- blocked on specific facts; include a focused `RESEARCH REQUEST:`.
+- `STATUS: CONTINUE` -- making progress with a concrete next step.
+- `STATUS: NEEDS_RESEARCH` -- blocked on specific facts; include a focused `RESEARCH REQUEST:` list of questions.
 - `STATUS: BLOCKED` -- no sound path forward; EVIDENCE shows attempts and the exact error.
 
-In `NEXT STEPS FOR team:` always name the exact agent `team` calls next, using the literal
-agent name (`agent-code`, `agent-test`, `agent-review`, `agent-architect`, `agent-research`,
-`agent-instruct`) -- never a role word like "coder", "tester", or "reviewer".
-
-Do not spin: if you would return `CONTINUE` a second time with nothing new in EVIDENCE,
-return `BLOCKED` instead. Escalating early is correct behavior, not failure.
+Do not spin: if you would return `CONTINUE` a second time with nothing new in
+EVIDENCE, return `BLOCKED` instead. Escalating early is correct behavior, not failure.
 """
 
 
@@ -786,135 +741,8 @@ separately. Never expand acceptance criteria unless the caller explicitly reques
 """
 
 
-AGENT_TEAM_SKILL = """---
-name: agent-team
-description: Global operating method for `team`: route simple work to agent-code, send medium/high-risk work to agent-architect first, always follow agent-code with agent-test, then agent-review; fix review findings one at a time with stable task IDs, enforce scope, and offer the PR workflow after verification.
----
-
-# team (orchestrator)
-
-You are the delegation-only Team Lead. You do not inspect or modify the workspace yourself.
-Workers do not coordinate directly -- you carry context between them.
-
-## How To Delegate
-
-1. Call the `task` tool with `subagent_type` set to the literal worker name (e.g.
-   `agent-code`). Never use `@` mentions.
-2. Every result arrives as `<task id="...">`. Record that id next to the worker's name --
-   it is that worker's task_id.
-3. To continue a worker, call `task` again with its id in the `task_id` parameter: it keeps
-   its context and gets a fresh step budget. Never pass one worker another worker's task_id;
-   move information between workers by copying it into the next task prompt.
-4. Every worker ends with `RESULT` / `EVIDENCE` / `STATUS` / `NEXT STEPS FOR team` lines.
-   `NEXT STEPS FOR team` is advisory -- the routing rules in this skill always win.
-
-## Intake And Routing
-
-1. Restate the goal, explicit acceptance criteria, and scope boundary.
-2. Ask one concise clarification only when ambiguity materially changes the result.
-3. Classify the request:
-   - **Simple:** localized, clear, low-risk change -> send directly to `agent-code`.
-   - **Mechanical:** one obvious edit/rename/format -> send to `agent-instruct`; if it
-     returns `BLOCKED`, send the task to `agent-code`.
-   - **Medium/high-risk:** design choice, multiple interacting files, unfamiliar runtime/API,
-     persistence/migration, concurrency/security, or unclear implementation -> `agent-architect`
-     first.
-   - When uncertain, treat it as medium.
-
-## Medium/High-Risk Planning
-
-1. Send `agent-architect` the original goal, preliminary criteria, scope, and known context.
-2. `agent-architect` should request focused research for most non-trivial unfamiliar domains.
-3. On `NEEDS_RESEARCH`, dispatch independent questions to `agent-research` in parallel, then
-   resume the same `agent-architect` `task_id` with results.
-4. Require a final plan, acceptance criteria, scope exclusions, and verification commands.
-5. Give that complete packet to `agent-code`.
-
-## Implementation
-
-- Give `agent-code` the goal, plan (if any), criteria, research, paths, scope, and focused checks.
-- On `CONTINUE`, resume the same `agent-code` `task_id`.
-- On `NEEDS_RESEARCH`, dispatch to `agent-research`, then return the results to the same
-  `agent-code` `task_id`.
-- On `agent-code` `BLOCKED`, resume the same `agent-architect` `task_id` for that feature with the
-  blocked report, then return its correction to the same `agent-code` `task_id`.
-- A second `CONTINUE` with nothing new in its EVIDENCE counts as `BLOCKED`.
-
-## Required Test
-
-`agent-code` is ALWAYS followed by `agent-test`. After `agent-code` completes, send `agent-test`
-the goal, acceptance criteria, scope, changed files, `agent-code`'s focused check results, and any
-verification commands suggested by `agent-architect` or `agent-code`. `agent-test` runs the broad
-or scripted checks and reports exact PASS/FAIL evidence; it never edits files.
-
-On test failure, send the exact command, failing output, and pass condition to the same
-`agent-code` `task_id`; then resume the same `agent-test` `task_id` with the fix evidence. Call
-`agent-review` only after `agent-test` passes, unless tests are impossible or explicitly out of
-scope.
-
-## Required Review
-
-After `agent-test` passes, always send `agent-review` this verification packet:
-- original user goal and acceptance criteria;
-- explicit scope boundary and exclusions;
-- `agent-architect` plan and `agent-research` findings, when used;
-- implementation summary and changed files;
-- `agent-code` focused checks, `agent-test` broad checks, exact results, and known pre-existing
-  failures.
-
-When the caller already supplies a complete verification packet, send it directly to
-`agent-review`. Do not research, inspect, reconstruct, or pre-review it. Do not load task-specific
-worker skills; each delegated worker loads its own role and project guidance.
-
-`agent-review` inspects the completed implementation and test evidence, spot-checking only missing
-or suspicious checks, and classifies every finding as `blocker`, `regression`, `pre-existing`,
-`future work`, or `out of scope`. Only blockers and regressions enter the immediate fix loop. You
-are the scope firewall: do not turn other categories into required work.
-Before acting on a report, verify it preserved the supplied criteria, taxonomy, and scope. If
-`agent-review` substitutes categories, invents criteria, or blocks unrelated work, resume the
-same `agent-review` `task_id` with a correction; do not relay or implement the invalid findings.
-
-### Fix Loop -- One Finding At A Time
-
-When `agent-review` reports blockers or regressions:
-
-1. Call `todowrite` with one item per finding (`pending`, priority `high`).
-2. Mark the first item `in_progress`.
-3. Send that ONE finding to a NEW `agent-code` session.
-4. Send its fix to `agent-test`, then back to the SAME `agent-review` `task_id`.
-5. If `agent-review` rejects the fix, resume that same `agent-code` session. Repeat until it
-   clears.
-6. Mark the item `completed`. Return to step 2 for the next finding.
-
-Never batch multiple findings into one `agent-code` session. Never open a second `agent-review`
-session for the same feature -- re-reviews resume the original `task_id`. A re-review checks only
-that finding and regressions from its fix; it does not restart a broad audit.
-
-## Completion And Git
-
-When `agent-review` has no blockers/regressions:
-1. Summarize the implementation, the checks, and -- separately -- the non-blocking findings.
-2. If the user did not already request a PR, ask whether to create one and perform PR review.
-3. On approval, resume the `agent-code` `task_id` to branch/commit/push/create the PR.
-4. Then resume the feature's `agent-review` `task_id` for PR review.
-
-Do not commit, push, open a PR, approve, or merge without explicit user authorization. Merge
-only when explicitly requested or when an applicable project role overlay supplies a repo
-policy authorizing it.
-
-## Routing Reference
-
-- `agent-research`: read-only facts, codebase/doc/web research.
-- `agent-code`: implementation, debugging, focused checks, PR creation when explicitly requested.
-- `agent-test`: broad lint/test/build/script execution only.
-- `agent-instruct`: one mechanical change.
-- `agent-architect`: read-only planning and research requests; diagnoses a `BLOCKED` `agent-code`.
-  Never reviews completed work.
-- `agent-review`: completed-work verification and PR review; never fixes code.
-
-When the user requests an **agent runbook review**, delegate it to `agent-architect` and explicitly
-tell that task to load `agent-runbook-review` after its normal architect role bootstrap.
-"""
+ROLE_PROMPTS = {key: _role_bootstrap_prompt(key, skill)
+                for key, skill in ROLE_SKILL_NAMES.items()}
 
 
 AGENT_LOOM_SKILL = """---
@@ -928,9 +756,25 @@ You run feature work through a deterministic pipeline (agent-architect -> agent-
 agent-test -> agent-review) with ONE call to the `loom` tool. The tool performs all
 delegation, looping, and escalation; you do intake and reporting only.
 
-## Questions Are Not Features
+## Feature Or Question? (decide this first)
 
-For a factual, current-information, or codebase question (no code change requested):
+DEFAULT TO A FEATURE. Use `action: "ask"` ONLY when the entire message is a question
+and requests no change to the code or repo. If the message asks you to add, implement,
+build, create, change, expand, wire up, or refactor ANYTHING, it is a feature -- use
+`action: "run"`, even when the same message also says "compare to the PRD", "check the
+docs", or "look for any existing X". Comparing, checking, and researching are steps the
+pipeline performs DURING the build; they are never a reason to route to `ask`. When in
+doubt between the two, choose `run`. 
+
+`ask` answers THE USER's questions -- it is never for you. Never call `ask` to gather
+context, inspect files, or prepare a packet for a feature request: you do not need repo
+knowledge to write the packet. Pass the user's requirements as given; the pipeline's
+planning step reads the code itself and requests research when it needs facts. In a feature
+conversation never call `ask` at all -- not to prepare, and not to verify afterward:
+the pipeline tests and reviews its own work, and your report already contains that
+evidence. Relay the report and stop. `ask` is only for conversations that ARE questions.
+
+For a pure question (nothing in the request would change code or files):
 1. Call the `loom` tool with `action: "ask"` and the question as `packet`.
 2. Relay the cited answer.
 Never answer such questions from your own knowledge -- you have no web access and no
@@ -979,12 +823,12 @@ When the user asks what happened, why a run failed, or where a job stands:
 """
 
 
-AGENT_CODE_SKILL = """---
-name: agent-code
-description: Global implementation rules for agent-code: inspect first, make the smallest correct change, preserve user work, verify it, and return actionable status to Team.
----
-
-# agent-code
+# Per-role instruction bodies (plain markdown, no frontmatter). The loom conductor
+# injects these into every dispatch packet from LOOM_SKILLS_DIR -- deterministic
+# delivery, unlike the retired model-invoked role skills. The Return Contract is
+# delivered separately (see WORKER_STATUS_CONTRACT), never restated here.
+ROLE_INSTRUCTIONS = {
+    "agent-code": """# agent-code
 
 Implement exactly the delegated goal -- no more, no less.
 
@@ -1004,7 +848,8 @@ Implement exactly the delegated goal -- no more, no less.
 - Run independent reads and checks in parallel.
 - Match the existing code style. Keep comments rare and useful.
 - Never expose, log, or commit secrets.
-- Do not commit, push, open a PR, or merge unless the delegated task explicitly says to.
+- Do not commit or push unless the delegated task explicitly says to. Never open, approve, or
+  merge a PR; those steps are dispatched separately by the pipeline.
 - Do not guess URLs, APIs, versions, or other external facts -- return
   `STATUS: NEEDS_RESEARCH` instead.
 
@@ -1012,24 +857,10 @@ Implement exactly the delegated goal -- no more, no less.
 
 Run focused checks that give fast feedback: a syntax check, the targeted tests, or a narrow
 smoke command. Do NOT run full suites, long scripts, or broad lint/build passes --
-`agent-test` runs those after you -- unless the delegated task explicitly asks you to or
-says no `agent-test` is available. State any risk you could not verify.
-
-## Next Steps
-
-End with exactly one, matching your status line:
-- `DONE` -> `NEXT STEPS FOR team: Send to agent-test.`
-- `BLOCKED` -> `NEXT STEPS FOR team: Send this blocker to agent-architect.`
-- `NEEDS_RESEARCH` -> `NEXT STEPS FOR team: Send the research request to agent-research, then return the answers to me in this same session.`
-""" + WORKER_STATUS_CONTRACT
-
-
-AGENT_RESEARCH_SKILL = """---
-name: agent-research
-description: Global read-only research rules for agent-research: answer the exact question from local code and authoritative sources, distinguish evidence from inference, and return concise cited findings.
----
-
-# agent-research
+broad verification runs later in the pipeline -- unless the delegated task explicitly
+asks you to. State any risk you could not verify.
+""",
+    "agent-research": """# agent-research
 
 Answer the delegated questions only. You are read-only: never edit files or run side-effecting
 commands. Search local code first when relevant; use authoritative/current documentation for
@@ -1040,77 +871,30 @@ external claims. Never invent URLs, APIs, versions, file contents, or certainty.
 - Separate verified facts, reasonable inference, and unresolved uncertainty.
 - Return concise findings, absolute or workspace-relative `path:line` references, and source URLs.
 - If evidence is unavailable or conflicting, state exactly what remains unknown.
+""",
+    "agent-test": """# agent-test
 
-## Next Steps
-
-End with: `NEXT STEPS FOR team: Return these findings to the agent that requested them.`
-""" + WORKER_STATUS_CONTRACT
-
-
-AGENT_TEST_SKILL = """---
-name: agent-test
-description: Global broad-verification rules for agent-test: run lint/test/build/scripted checks on a cheap model, preserve tests and source, and report exact PASS/FAIL evidence.
----
-
-# agent-test
-
-Run the broad verification delegated by `team` after implementation. Read project instructions,
-review the changed files and `agent-code`'s focused check results, then run the relevant full suites,
+Run the broad verification delegated to you after implementation. Read project instructions,
+review the changed files and the focused check results supplied in your packet, then run the relevant full suites,
 lint/typecheck/build commands, or scripted workflows. You may inspect files and execute checks, but
 never edit implementation or tests.
 
 - Never delete, skip, weaken, or rewrite a test/assertion to make it pass.
-- Prefer one comprehensive pass over repeated narrow reruns; `agent-code` owns tight edit/test loops.
+- Prefer one comprehensive pass over repeated narrow reruns; tight edit/test loops belong to the implementation step.
 - Label a failure pre-existing only with evidence: it also fails without this change, or the
   task listed it as known. Otherwise report it as unclassified; never guess.
 - Report each command, exit result, failing test name, and the shortest useful output excerpt.
-- Do not commit, push, open a PR, approve, or merge.
-
-## Next Steps
-
-End with exactly one:
-- All checks pass -> `NEXT STEPS FOR team: Send to agent-review.`
-- Any check fails -> `NEXT STEPS FOR team: Send the failures above to the same agent-code session that made this change.`
-""" + WORKER_STATUS_CONTRACT
-
-
-AGENT_INSTRUCT_SKILL = """---
-name: agent-instruct
-description: Global rules for agent-instruct: perform one clear mechanical change with no scope expansion and report the concrete result.
----
-
-# agent-instruct
-
-Perform only the single, explicit mechanical task you were given: a rename, formatting,
-boilerplate, or one obvious edit.
-
-- Inspect the immediate context before editing.
-- Match the existing style. Preserve unrelated work.
-- Use the read/search/edit tools, not shell file operations. No destructive git commands.
-- Never expose, log, or commit secrets.
-- Verify the edit narrowly: re-read the changed lines, or run the file's syntax check.
-- If the task needs design judgment, broad debugging, or is ambiguous, stop and return
-  `STATUS: BLOCKED` -- do not invent scope.
-- Never commit, push, open a PR, or merge unless explicitly instructed.
-
-## Next Steps
-
-End with exactly one, matching your status line:
-- `DONE` -> `NEXT STEPS FOR team: Send to agent-test.`
-- `BLOCKED` -> `NEXT STEPS FOR team: Send this task to agent-code instead.`
-""" + WORKER_STATUS_CONTRACT
-
-
-AGENT_ARCHITECT_SKILL = """---
-name: agent-architect
-description: Global read-only rules for agent-architect: produce an implementation plan, or request the research needed before planning. Diagnoses a BLOCKED agent-code. Never reviews completed work.
----
-
-# agent-architect
+- Do not commit, push, or open a PR unless the dispatched task explicitly delegates it.
+- When PR creation is delegated to you: create the branch, commit exactly the change's
+  files, push, and open the PR with your verification evidence in the body. Use the
+  default (bot) token -- never `GH_TOKEN_REVIEWER`, or the PR cannot later be approved.
+- Never approve or merge a PR; that happens in a later review step.
+""",
+    "agent-architect": """# agent-architect
 
 You are read-only. Inspect project instructions, relevant code, tests, and supplied evidence;
 never edit files or run side-effecting commands. You never review completed work --
-`agent-review` owns that. You do exactly three jobs:
+that happens later in the pipeline. You do exactly three jobs:
 
 ## 1. Plan
 
@@ -1127,73 +911,86 @@ focused questions you need answered before you can plan.
 
 ## 3. Diagnose A Blocker
 
-When `team` sends you a `BLOCKED` report from `agent-code`, diagnose the smallest correction
+When you are sent a `BLOCKED` implementation report, diagnose the smallest correction
 that unblocks the original goal. Do not redesign unrelated areas or expand the plan. Use only
 caller-provided criteria and project bars supplied in the task.
 
-Report observations outside the delegated goal under Finding Classification below; only
-`blocker` and `regression` block.
+Report observations outside the delegated goal under the Finding Classification taxonomy
+(delivered with your Return Contract); only `blocker` and `regression` block.
+""",
+    "agent-review": """# agent-review
 
-## Next Steps
-
-End with exactly one, matching your job:
-- Plan delivered -> `NEXT STEPS FOR team: Send this plan to agent-code.`
-- Research needed -> `NEXT STEPS FOR team: Send these questions to agent-research, then return the answers to me in this same session.`
-- Blocker diagnosed -> `NEXT STEPS FOR team: Send this correction to the same agent-code session that was blocked.`
-""" + FINDING_CLASSIFICATION + WORKER_STATUS_CONTRACT
-
-
-AGENT_REVIEW_SKILL = """---
-name: agent-review
-description: Global rules for agent-review on completed implementations and pull requests: inspect the supplied acceptance packet and agent-test evidence, spot-check when needed, classify findings, return them for one-at-a-time fixes, preserve scope, and never edit code.
----
-
-# agent-review
-
-Review the completed implementation against the packet from `team`: original goal, acceptance
-criteria, scope, plan/research when applicable, changed files, `agent-code` checks, and
-`agent-test` evidence. If essential context is missing, return `BLOCKED` and list it; do not
+Review the completed implementation against the dispatched packet: original goal, acceptance
+criteria, scope, plan/research when applicable, changed files, the implementation's
+focused checks, and the supplied test evidence. If essential context is missing, return `BLOCKED` and list it; do not
 invent acceptance criteria.
 The caller's criteria, taxonomy, and scope are authoritative. Never rename categories, substitute a
 different review framework, or promote an unrelated observation into a blocking finding.
 
 - Read project instructions and `REVIEW.md`/CONTRIBUTING/CI when relevant.
-- Inspect changed code and callers. Use `agent-test` output as the primary command evidence; run spot
+- Inspect changed code and callers. Use the supplied test evidence as the primary command evidence; run spot
   checks only for missing, suspicious, or PR/base-diff-specific coverage.
 - Preserve unrelated work; use a clean checkout/worktree and never reset or revert user changes.
 - Check correctness, regressions, invariants, scope creep, stale-branch reversions, secrets, and
   required tests/changelog entries.
 - Never edit or fix code. Give each finding `path:line`, classification, impact, and concrete pass
   condition. If clean, say `No blocking findings.`
-- On re-review, check the specified issue and regression surface using the same task_id. Do not
+- On re-review, check the specified issue and regression surface in the same session. Do not
   restart a broad audit or add acceptance criteria.
 
 ## PR Review
 
+You never open PRs; creation happens in an earlier pipeline step when the operator approves one.
 For a pull request, inspect the PR claim and the full diff against the base branch. Then:
 1. Approve or merge ONLY when all three hold: the user or an applicable project
-   extend/override skill explicitly authorized it; all checks are acceptable; and no
+   policy explicitly authorized it; all checks are acceptable; and no
    `blocker` or `regression` remains.
 2. Use `GH_TOKEN_REVIEWER` for approve and merge actions.
 3. Never push directly to the base branch.
-
-## Next Steps
-
-End with exactly one:
-- Blockers or regressions found -> `NEXT STEPS FOR team: Fix these ONE AT A TIME. Track them with todowrite. Send finding #1 ONLY to a NEW agent-code session, send its fix to agent-test, then return it to me in this same session. Do not send me finding #2 until #1 clears.`
-- No blockers or regressions -> `NEXT STEPS FOR team: Review passed. Proceed to completion and git.`
-""" + FINDING_CLASSIFICATION + WORKER_STATUS_CONTRACT
+""",
+}
 
 
-ROLE_SKILLS = {
-    "agent-team": AGENT_TEAM_SKILL,
+# The five pipeline roles, in dispatch-precedence order. Single source of truth for
+# the loom instruction/contract files and the role_models map handed to the conductor.
+LOOM_ROLES = ("agent-architect", "agent-code", "agent-test", "agent-review",
+              "agent-research")
+
+# loom-managed instruction files (regenerated on every sync; python constants are the
+# source of truth). Lives under the same ~/.config root as this tool's own settings
+# (WIRE_SETTINGS_FILE) rather than under opencode/ -- these files feed the loom
+# conductor, not OpenCode.
+LOOM_SKILLS_DIR = os.path.expanduser("~/.config/otools/loom/skills")
+
+
+def _role_contract_text(role):
+    """Contract packet for one role. Review and architect also carry the finding
+    taxonomy -- mirroring the retired role skills, which appended it for those two."""
+    if role in ("agent-review", "agent-architect"):
+        return WORKER_STATUS_CONTRACT + FINDING_CLASSIFICATION
+    return WORKER_STATUS_CONTRACT
+
+
+def write_loom_role_files():
+    """Write <LOOM_SKILLS_DIR>/agent-<role>-instructions-default.md + -contract.md for
+    every pipeline role. Returns the paths written. Repo-local overlays
+    (.loom/skills/agent-<role>-instructions-local.md) are hand-authored, never touched."""
+    os.makedirs(LOOM_SKILLS_DIR, exist_ok=True)
+    written = []
+    for role in LOOM_ROLES:
+        for suffix, text in ((f"{role}-instructions-default.md", ROLE_INSTRUCTIONS[role]),
+                             (f"{role}-contract.md", _role_contract_text(role))):
+            path = os.path.join(LOOM_SKILLS_DIR, suffix)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            written.append(path)
+    return written
+
+
+# Global OpenCode skills still written by sync: loom's own operating method plus the
+# user-kicked session-review pass. Role guidance no longer ships as skills.
+GLOBAL_SKILLS = {
     "agent-loom": AGENT_LOOM_SKILL,
-    "agent-code": AGENT_CODE_SKILL,
-    "agent-research": AGENT_RESEARCH_SKILL,
-    "agent-test": AGENT_TEST_SKILL,
-    "agent-instruct": AGENT_INSTRUCT_SKILL,
-    "agent-architect": AGENT_ARCHITECT_SKILL,
-    "agent-review": AGENT_REVIEW_SKILL,
 }
 
 
@@ -1205,7 +1002,17 @@ LEGACY_ROLE_ARTIFACTS = (
     os.path.join("prompts", "otools-test.md"),
     os.path.join("prompts", "otools-architect.md"),
     os.path.join("prompts", "otools-review.md"),
+    # Retired with the team orchestrator / model-invoked role skills:
+    os.path.join("prompts", "otools-agent-team.md"),
+    os.path.join("prompts", "otools-agent-instruct.md"),
 )
+
+# Whole skill DIRECTORIES retired by the loom-managed instruction rework: role
+# guidance now ships in LOOM_SKILLS_DIR, team/instruct/runbook-review are gone.
+# agent-loom (and session-review) stay.
+LEGACY_SKILL_DIRS = ("agent-code", "agent-test", "agent-architect", "agent-review",
+                     "agent-research", "agent-instruct", "agent-team",
+                     "agent-runbook-review")
 
 
 def _role_skill_path(cfg_path, skill_name):
@@ -1216,25 +1023,37 @@ def _role_prompt_path(cfg_path, agent_name):
     return os.path.join(os.path.dirname(cfg_path), "prompts", ROLE_PROMPT_FILES[agent_name])
 
 
-def _agent_runbook_skill_path(cfg_path):
-    return os.path.join(os.path.dirname(cfg_path), "skills", "agent-runbook-review", "SKILL.md")
-
-
-def _role_skill_permissions(skill_name, exclusive=False):
-    """Expose unrelated workflow skills, but hide every other agent role contract."""
-    rules = {"*": "deny"} if exclusive else {}
-    for other in ROLE_SKILLS:
-        for name in (other, f"{other}-extend", f"{other}-override"):
-            rules[name] = "deny"
-    for name in (skill_name, f"{skill_name}-extend", f"{skill_name}-override"):
-        rules[name] = "allow"
-    return rules
+def oc_cleanup_stale_role_artifacts(config_path):
+    """Delete deployed artifacts of the retired layout: the per-role/team/instruct/
+    runbook skill directories and the retired prompt files. Returns removed paths."""
+    root = os.path.dirname(config_path)
+    removed = []
+    for name in LEGACY_SKILL_DIRS:
+        d = os.path.join(root, "skills", name)
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d)
+    for relpath in LEGACY_ROLE_ARTIFACTS:
+        stale = os.path.join(root, relpath)
+        if not os.path.exists(stale):
+            continue
+        try:
+            os.remove(stale)
+            removed.append(stale)
+            try:
+                os.rmdir(os.path.dirname(stale))
+            except OSError:
+                pass
+        except OSError:
+            pass
+    return removed
 
 
 def oc_refresh_role_artifacts(config_path):
     """Rewrite the model-independent GENERATED artifacts from current code: global
-    role skills, the runbook skill, role prompts (for roster agents present in the
-    existing config), and the loom tool plugin (when the loom agent exists).
+    skills (agent-loom, session-review), the loom-managed instruction/contract files,
+    role prompts (for roster agents present in the existing config), and the loom
+    tool plugin (when the loom agent exists). Also removes retired-layout artifacts.
 
     Called on the sync paths that build no roster (no live models). Rationale,
     learned the hard way: `git pull` updates these artifacts' SOURCE but the
@@ -1248,148 +1067,93 @@ def oc_refresh_role_artifacts(config_path):
 
     def _write(path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         written.append(path)
 
-    for skill_name, text in ROLE_SKILLS.items():
+    for skill_name, text in GLOBAL_SKILLS.items():
         _write(_role_skill_path(config_path, skill_name), text)
-    _write(_agent_runbook_skill_path(config_path), AGENT_RUNBOOK_REVIEW_SKILL)
-    budget = (agent_cfg.get("team") or {}).get("task_budget")
+    written.extend(write_loom_role_files())
     for agent_name in ROLE_SKILL_NAMES:
         if agent_name not in agent_cfg:
             continue
-        _write(_role_prompt_path(config_path, agent_name),
-               team_prompt_text(budget) if agent_name == "team" else ROLE_PROMPTS[agent_name])
+        _write(_role_prompt_path(config_path, agent_name), ROLE_PROMPTS[agent_name])
     if "loom" in agent_cfg and loom_mod is not None:
         _write(os.path.join(os.path.dirname(config_path), "plugins", "otools-loom.js"),
                oc_loom_plugin_js())
+    oc_cleanup_stale_role_artifacts(config_path)
     return written
 
 
-def team_prompt_text(task_budget=None):
-    """Minimal Team bootstrap plus its effective delegation budget."""
-    text = ROLE_PROMPTS["team"].rstrip()
-    if task_budget is not None:
-        text += f" Delegation budget: at most {task_budget} task calls in this run."
-    return text + "\n"
-
-# `agent-runbook-review` skill -- a user-kicked maintenance pass ("perform an agent runbook
-# review"). Written GLOBALLY by sync alongside the agent-* role skills so it is available in
-# every repo. It compacts the agent-facing docs, mines the CURRENT OpenCode session (incl.
-# subagents, via the SQLite store) for recurring failures, proposes note additions, audits skill
-# sizes, and authors first drafts of missing key files -- REPORT-FIRST, never a silent rewrite.
-AGENT_RUNBOOK_REVIEW_SKILL = r"""---
-name: agent-runbook-review
-description: Periodic maintenance pass for a repo's agent-facing files (AGENTS.md, REVIEW.md, the .agents/skills/*, CHANGELOG, CONTRIBUTING). Use when the user says "perform an agent runbook review" (or asks to review/compact/tidy the agent runbook, instructions, or skills). Compacts and de-duplicates the docs, mines the current session for recurring errors and drafts fixes into the right file, audits skill sizes, recommends whether a new project skill is needed, and authors first drafts of missing key files -- as a REPORT with proposed diffs, not a silent rewrite.
+# `session-review` skill -- a user-kicked maintenance pass ("run a session review").
+# Written GLOBALLY by sync so it is available in every repo. It mines the loom ledger
+# (and optionally the OpenCode session store) for failures, timings, and instruction
+# gaps, then proposes repo-local instruction updates -- REPORT-FIRST, approval-gated.
+SESSION_REVIEW_SKILL = r"""---
+name: session-review
+description: Audit recent loom pipeline sessions -- mine loom.db and opencode.db for failures, timing, and instruction gaps; propose updates to the repo's .loom/skills/*-local.md instruction files.
 ---
 
-# Agent runbook review
+# Session review
 
-A maintenance pass over the files that steer the agent roster in THIS repo. You do NOT silently
-rewrite them -- you produce a **Runbook Review Report** with proposed changes, apply only the
-low-risk docs-only ones, and gate edits to the invariant files (AGENTS.md, REVIEW.md) behind the
-user's OK or a PR. These files govern the agents doing the editing, so treat every change as
-load-bearing until proven otherwise.
+An audit pass over recent loom pipeline runs. You mine the deterministic ledger for what
+actually happened, diagnose why workers failed or stalled, and turn each diagnosis into a
+concrete repo-local instruction update. REPORT-FIRST: propose every change and write only
+after approval.
 
-## Guardrails (always)
-- **Report-first.** Lead with the report (below). Apply docs-only, non-normative tidy-ups
-  directly; for anything that changes a rule/invariant, show the diff and wait for approval.
-- **Preserve every normative statement.** You may reorder, de-duplicate, and tighten prose, but
-  never drop or weaken a MUST/NEVER/invariant. You may NOT add or strengthen rules during a
-  compaction -- consolidation only.
-- **Docs-only diffs.** A runbook review never rides along with code changes; keep it to `*.md`
-  and `.agents/skills/**`. If it warrants a PR, it's a docs-only PR.
-- **Respect fences.** Never touch content between `<!-- do-not-compact -->` and
-  `<!-- /do-not-compact -->`.
-- **One rule, one home.** De-duplicate by pointer, not by copy: state a rule once in its
-  canonical file and reference it elsewhere by name.
+## 1. Read the loom ledger
 
-## Phase A -- Inventory & size
-List the agent-facing files and skills and judge their weight. Run `omw skills` for the skill
-table (name, scope, instruction count, size verdict). The size metric = number of normative
-lines (bullets/numbered steps + lines with MUST/NEVER/ALWAYS/DO NOT), excluding frontmatter and
-fenced code. Thresholds: **<=40 lean, 41-80 moderate, >80 LARGE (consider splitting)**. Flag any
-LARGE skill, e.g. "agent-review-extend: 104 instructions -- LARGE, consider extracting the merge
-section into its own skill."
+The conductor records every job in a SQLite ledger. Open it READ-ONLY so a live run is
+never disturbed:
 
-Key files a roster-ready repo should have (author first drafts in Phase E if missing):
-- **AGENTS.md** -- the agent operating manual: invariants, working agreement, and a skill index.
-- **REVIEW.md** -- the review *bar* (checks + invariants). The process lives in the global
-  `agent-review` role skill plus an optional project overlay.
-- **CHANGELOG.md**, **CONTRIBUTING.md**, **README.md** -- conventional roles.
-- **.agents/skills/agent-<role>-extend/** -- optional additive role guidance for this repo.
-- **.agents/skills/agent-<role>-override/** -- optional full role replacement; use sparingly.
+    DB="file:$HOME/.local/share/otools/loom.db?mode=ro"
 
-## Phase B -- Hygiene & compaction (docs-only)
-For AGENTS.md and each skill: find duplicated guidance, out-of-order sections, and bloat.
-Consolidate to one home + pointers, put sections in a sensible order, and tighten wording without
-losing meaning. Keep the change mechanical and reviewable.
+- Recent jobs: id, packet, risk, state, created/finished timestamps.
+- Events per job -- especially the kinds `compose`, `malformed`, `timeout`, `escalate`,
+  `blocked`, and `antispin`; each is a symptom (bad reply format, stall, hand-off up the
+  ladder, dead end, or a spin cut short).
+- Per-phase durations: diff consecutive event timestamps to see where a job spent its
+  time (plan vs code vs test vs review).
 
-## Phase C -- Mine the CURRENT session for recurring failures
-OpenCode records every session -- INCLUDING subagent sessions -- in a SQLite store. Use it to find
-"we keep failing on X" and turn each into a concrete note in the right file. Open it READ-ONLY so
-you never disturb a live session:
+If `sqlite3` isn't on PATH, Python's stdlib `sqlite3` module reads the same file.
 
-    DB="file:$HOME/.local/share/opencode/opencode.db?mode=ro"
+## 2. Optionally mine the worker transcripts
 
-1. **Find the session to review** -- normally the most recently active top-level session in this
-   directory (the one you're in). `parent_id IS NULL` means top-level (not a subagent):
+Each task row in the ledger carries the worker's OpenCode session id. For any suspicious
+task, open `~/.local/share/opencode/opencode.db` (read-only, same `?mode=ro` trick) and
+read the `message` / `part` tables for that session id to see what the worker actually
+said and did -- tool calls, errors, and its final reply.
 
-       sqlite3 "$DB" "SELECT id, agent, title FROM session WHERE parent_id IS NULL AND directory='$(pwd)' ORDER BY time_updated DESC LIMIT 5;"
+## 3. Diagnose
 
-   Pick the row the user means (usually the top one); call it SID.
+Look for patterns, not one-offs:
+- repeated malformed replies (contract not followed) -- which role, which field;
+- spins: `CONTINUE` loops with nothing new, or `antispin` events;
+- escalations and timeouts -- and whether the phase budget or the task was at fault;
+- instruction gaps: the worker did X wrong because nothing in its instructions said
+  otherwise. These are the highest-value findings.
 
-2. **List its subagent sessions** -- workers like agent-review / agent-code are child rows:
+## 4. Propose instruction updates (approval-gated)
 
-       sqlite3 "$DB" "SELECT id, agent, title FROM session WHERE parent_id='SID' ORDER BY time_created;"
+Turn each diagnosis into a specific addition to a repo-local instruction file, quote the
+exact text, and write it ONLY after approval -- and ONLY to:
 
-3. **Pull tool ERRORS across the session + its subagents** -- your primary recurring-failure signal
-   (a failed command shows up as a tool part with state.status='error'):
+    <repo>/.loom/skills/agent-<role>-instructions-local.md
 
-       sqlite3 "$DB" "SELECT s.agent, json_extract(p.data,'\$.tool') tool, json_extract(p.data,'\$.state.input') input, json_extract(p.data,'\$.state.error') error FROM part p JOIN session s ON s.id=p.session_id WHERE (s.id='SID' OR s.parent_id='SID') AND json_extract(p.data,'\$.type')='tool' AND json_extract(p.data,'\$.state.status')='error';"
+NEVER edit the `-default.md` or `-contract.md` files under
+`~/.config/otools/loom/skills/` -- those are regenerated by `omw sync` and hand edits
+are silently lost. If a finding warrants a GLOBAL improvement (every repo would benefit),
+report it as a suggestion for the omodel-wire repo maintainer instead of editing anything.
 
-4. **Read the ordered transcript** (text + reasoning + tool titles) across agent + subagents when
-   you need context around an error:
+## 5. Report (your final message)
 
-       sqlite3 "$DB" "SELECT s.agent, json_extract(m.data,'\$.role') role, json_extract(p.data,'\$.type') type, coalesce(json_extract(p.data,'\$.text'), json_extract(p.data,'\$.state.title')) content FROM part p JOIN message m ON m.id=p.message_id JOIN session s ON s.id=p.session_id WHERE (s.id='SID' OR s.parent_id='SID') ORDER BY p.time_created, p.id;"
-
-Notes: the store is WAL-mode, so the in-flight session may lag by a message or two (fine); if
-`sqlite3` isn't on PATH, Python's stdlib `sqlite3` module reads it the same way; you only need the
-CURRENT session -- don't trawl the whole DB.
-
-For each recurring failure, propose a **specific note** in the file that would have prevented it --
-e.g. a repeated `gh pr merge` worktree error -> a line in `agent-review-extend`; a common code bug ->
-a line in AGENTS.md or the relevant skill. If the failure is specific to ONE worker's role (e.g.
-agent-code repeatedly mishandles this repo's plugin layout, or agent-test runs the wrong test
-command), prefer a per-role project skill (`agent-<role>-extend`, see Phase D) over bloating the
-global worker prompt. Quote the target file and the exact text to add.
-
-## Phase D -- New project skill?
-From the session, judge whether recurring role guidance deserves a project overlay:
-- **Extend** (`agent-code-extend`, `agent-test-extend`, `agent-architect-extend`, etc.) adds
-  repo-specific rules after the global role skill. Prefer this for almost every project.
-- **Override** (`agent-code-override`, etc.) replaces both the global role and extend skill. Use it
-  only when the global role is fundamentally incompatible; restate every required safety rule.
-- **Workflow skills** remain appropriate for reusable task-specific processes not tied to one role.
-Recommend yes/no with one line of justification and include draft frontmatter + skeleton when yes.
-Project skills live under `.agents/skills/`, are hand-authored, and are never written by `omw sync`.
-
-## Phase E -- Author missing key files
-For any key file from Phase A that's absent, draft a first iteration tailored to this repo (infer
-checks from README/CI, invariants from the code). Present drafts in the report; write the docs-only
-ones, and gate AGENTS.md / REVIEW.md behind approval.
-
-## The report (your final message)
-Deliver a structured report:
-- **Inventory & size** -- files present/missing; skill size table with verdicts.
-- **Hygiene** -- duplicates/order/bloat found; what you compacted.
-- **Session findings** -- recurring failures (with the evidence source) -> proposed notes (file + exact text).
-- **New-skill recommendation** -- yes/no + draft if yes.
-- **Missing files** -- first drafts authored.
-- **Change ledger** -- exactly which instructions you changed/moved/cut and why (old -> new), so a
-  reviewer can confirm nothing normative was lost.
+- **Findings** -- each failure pattern with its evidence (job id, event kind, excerpt).
+- **Per-phase timings** -- where the pipeline spends its time; outliers flagged.
+- **Changes made** -- every `-local.md` line added, with the diagnosis it addresses.
+- **Follow-ups** -- global suggestions for the maintainer, and anything unresolved.
 """
+
+GLOBAL_SKILLS["session-review"] = SESSION_REVIEW_SKILL
 
 
 # The blue test image + the word we expect a real vision model to say back.
@@ -1867,16 +1631,15 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "options": _preset_options(preset, control, caps),
             "permission": dict(PERM[perm]),
         }
-        # Delegation roles get tiny bootstrap prompts; their visible behavior lives
-        # in global agent-* skills plus optional project extend/override skills.
-        # Visible direct-use agents stay prompt-free and retain OpenCode's provider
-        # default system prompts.
+        # Delegation roles get tiny bootstrap prompts; their role instructions and
+        # Return Contract arrive in every dispatch packet (injected by the loom
+        # conductor from LOOM_SKILLS_DIR). Visible direct-use agents stay prompt-free
+        # and retain OpenCode's provider default system prompts.
         if is_worker:
             agent["prompt"] = f"{{file:./prompts/{ROLE_PROMPT_FILES[key]}}}"
-            agent["permission"]["skill"] = _role_skill_permissions(ROLE_SKILL_NAMES[key])
-        # Workers never sub-delegate -- only `team` calls the task tool. Deny it on
-        # every worker (the PERM `full`/`readonly` profiles allow agent-review, which
-        # is correct for the VISIBLE code/agent primaries but not for the workers).
+        # Workers never sub-delegate -- the loom conductor does all dispatching. Deny
+        # task on every worker (the PERM `full`/`readonly` profiles allow agent-review,
+        # which is correct for the VISIBLE code/agent primaries but not the workers).
         if is_worker:
             agent["permission"]["task"] = "deny"
         # Merge tripwire. The REAL control that only agent-review can merge is the
@@ -1904,7 +1667,7 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             agent["task_budget"] = 1
         # Per-worker step cap: bound runaway tool-action loops. On the wall OpenCode
         # forces a text summary, which our DONE/CONTINUE/BLOCKED contract turns into a
-        # continue-or-escalate signal for the team.
+        # continue-or-escalate signal for the loom conductor.
         if key in WORKER_STEPS:
             agent["steps"] = WORKER_STEPS[key]
         # The `loom` custom tool (registered globally by plugins/otools-loom.js) is
@@ -1913,49 +1676,16 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
         agents[key] = agent
         agent_sampling[key] = _preset_vec(preset, repetition_detection)
 
-    # --- `team`: lead orchestrator with the reason preset's sampling/thinking
-    # that DELEGATES to the hidden agent-* workers instead of editing. Built when
-    # a reason preset + at least one worker exist. Model comes from default_models. ---
+    # --- `loom`: the pipeline lead. Holds exactly ONE tool -- the `loom` custom tool
+    # from plugins/otools-loom.js -- whose Python conductor runs the plan/code/test/
+    # review pipeline deterministically over the hidden agent-* workers. Built when a
+    # reason preset + at least one worker exist. Model comes from default_models. ---
     rp = presets.get("reason")
-    targets = [k for k in TEAM_TARGETS if k in agents]
-    if rp and targets:
-        task_map = {"*": "deny"}
-        for k in targets:
-            task_map[k] = "allow"
+    workers = [k for k in agents if agents[k].get("mode") == "subagent"]
+    if rp and workers:
         rs = rp.get("sampling", {})
-        team = {
-            "description": "team: lead orchestrator -- plans and delegates to the agent-* "
-                           "workers, validates; has NO tools of its own (delegation only)",
-            "mode": "primary",
-            "model": model_ref,
-            "color": TEAM_COLOR,
-            "prompt": f"{{file:./prompts/{ROLE_PROMPT_FILES['team']}}}",
-            "options": _preset_options(rp, control, caps),
-            # Delegation-only: deny EVERY tool category (incl. the read-only ones --
-            # read/grep/glob/list have their own permission keys and default to allow,
-            # so denying edit/bash alone still lets the orchestrator grep/read). It can
-            # spawn workers via `task` and keep its own fix-loop ledger via `todowrite`
-            # -- allowed EXPLICITLY because the agent-team Fix Loop depends on it, so a
-            # future blanket deny can't silently take the one-finding-at-a-time tracking.
-            "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
-                           "edit": "deny", "bash": "deny",
-                           "webfetch": "deny", "websearch": "deny",
-                           "todowrite": "allow",
-                           "task": task_map,
-                           "skill": _role_skill_permissions(ROLE_SKILL_NAMES["team"], exclusive=True)},
-        }
-        if "temperature" in rs: team["temperature"] = rs["temperature"]
-        if "top_p" in rs: team["top_p"] = rs["top_p"]
-        team["tools"] = {"loom": False}
-        agents["team"] = team
-        agent_sampling["team"] = _preset_vec(rp, repetition_detection)
-
-        # --- `loom`: the v2 orchestrator, built ALONGSIDE team for A/B. Same reason
-        # preset, but instead of the task tool it holds exactly ONE tool -- the `loom`
-        # custom tool from plugins/otools-loom.js -- whose Python conductor runs the
-        # plan/code/test/review pipeline deterministically over the same workers. ---
         looma = {
-            "description": "loom: v2 pipeline lead -- one loom-tool call runs "
+            "description": "loom: pipeline lead -- one loom-tool call runs "
                            "plan/code/test/review deterministically over the agent-* workers",
             "mode": "primary",
             "model": model_ref,
@@ -1967,9 +1697,7 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
                            "edit": "deny", "bash": "deny",
                            "webfetch": "deny", "websearch": "deny",
-                           "task": "deny",
-                           "skill": _role_skill_permissions(ROLE_SKILL_NAMES["loom"],
-                                                            exclusive=True)},
+                           "task": "deny"},
             "tools": {"loom": True},
         }
         if "temperature" in rs: looma["temperature"] = rs["temperature"]
@@ -2080,27 +1808,44 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
           note: tool.schema.string().optional().describe("resume: operator guidance to fold in"),
         }},
         async execute(args, ctx) {{
+          // Resolve the CALLER's project directory per call. The plugin-level
+          // `directory` is the instance cwd -- a dedicated `opencode serve` may run
+          // from anywhere -- but jobs must anchor to the calling session's repo
+          // (job.dir drives .loom/skills overlay lookup and worker cwd).
+          const base0 = String(serverUrl).replace(/\\/$/, "")
+          const auth0 = process.env.OPENCODE_SERVER_PASSWORD
+            ? {{ Authorization: "Basic " +
+                 btoa("opencode:" + process.env.OPENCODE_SERVER_PASSWORD) }}
+            : {{}}
+          let dir = directory
+          try {{
+            const sr = await fetch(`${{base0}}/session/${{ctx.sessionID}}`, {{ headers: auth0 }})
+            if (sr.ok) {{
+              const sj = await sr.json()
+              if (sj && sj.directory) dir = sj.directory
+            }}
+          }} catch {{}}
           const argv = [PYTHON, SCRIPT, "loom"]
           if (args.action === "run") {{
             if (!args.packet) return "loom: 'run' needs a packet (goal + criteria + scope)."
             argv.push("run", "--attach", String(serverUrl), "--parent", ctx.sessionID,
-                      "--risk", args.risk || "medium", "--dir", directory,
+                      "--risk", args.risk || "medium", "--dir", dir,
                       "--json-events", "--packet", args.packet)
           }} else if (args.action === "ask") {{
             if (!args.packet) return "loom: 'ask' needs the question in packet."
             argv.push("ask", "--attach", String(serverUrl), "--parent", ctx.sessionID,
-                      "--dir", directory, "--json-events", "--question", args.packet)
+                      "--dir", dir, "--json-events", "--question", args.packet)
           }} else if (args.action === "status") {{
             argv.push("status")
             if (args.job != null) argv.push("--job", String(args.job))
-            const st = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
+            const st = Bun.spawn(argv, {{ cwd: dir, stdout: "pipe", stderr: "pipe" }})
             const sout = await new Response(st.stdout).text()
             const serr = await new Response(st.stderr).text()
             await st.exited
             let extra = ""
             if (args.job != null) {{
               const lg = Bun.spawn([PYTHON, SCRIPT, "loom", "log", "--job", String(args.job)],
-                                   {{ cwd: directory, stdout: "pipe" }})
+                                   {{ cwd: dir, stdout: "pipe" }})
               const logText = await new Response(lg.stdout).text()
               await lg.exited
               const tail = logText.trim().split("\\n").slice(-30).join("\\n")
@@ -2183,11 +1928,14 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             if (origInput !== undefined) p.state.input = origInput
           }})
 
-          const proc = Bun.spawn(argv, {{ cwd: directory, stdout: "pipe", stderr: "pipe" }})
+          const proc = Bun.spawn(argv, {{ cwd: dir, stdout: "pipe", stderr: "pipe" }})
           const onAbort = () => {{ try {{ proc.kill("SIGTERM") }} catch {{}} }}
           ctx.abort.addEventListener("abort", onAbort, {{ once: true }})
           let report = ""
           const lines = []
+          // Milestones only: worker sessions are directly clickable in the TUI now,
+          // so the status/dispatch/session/skills/compose chatter adds nothing.
+          const KEEP = new Set(["start", "phase", "done", "error", "paused", "malformed"])
           const dec = new TextDecoder()
           let buf = ""
           for await (const chunk of proc.stdout) {{
@@ -2200,7 +1948,7 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
               let ev
               try {{ ev = JSON.parse(line) }} catch {{ lines.push(line); continue }}
               if (ev.type === "report") {{ report = ev.report; continue }}
-              lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
+              if (KEEP.has(ev.type)) lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
               const title = ev.title || ev.detail || ev.type
               try {{ ctx.metadata({{ title }}) }} catch {{}}   // no-op today; upstream fix welcome
               if (ev.session) await followWorker(ev.session, title)
@@ -2210,12 +1958,13 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
           const err = await new Response(proc.stderr).text()
           const code = await proc.exited
           await restoreCard()
-          const log = lines.join("\\n")
           if (report)
             return {{ title: "loom report", output: report, metadata: {{ exitCode: code }} }}
-          if (code !== 0)
-            return {{ title: "loom failed", output: (log + "\\n" + err).trim() || `exit ${{code}}` }}
-          return {{ title: "loom", output: log || "(no output)" }}
+          if (code !== 0) {{
+            const tail = lines.slice(-10).join("\\n")
+            return {{ title: "loom failed", output: (tail + "\\n" + err).trim() || `exit ${{code}}` }}
+          }}
+          return {{ title: "loom", output: lines.join("\\n") || "(no output)" }}
         }},
       }}),
     }},
@@ -2573,9 +2322,8 @@ def _print_roster(agents):
     print(f"  Tab cycle (visible): {', '.join(primary)}")
     if hidden:
         print(f"  hidden workers (delegation-only, not in Tab): {', '.join(hidden)}")
-    if "team" in agents:
-        print("  team flow: simple -> agent-code; medium/high -> agent-architect -> "
-              "agent-code; completed -> agent-test -> agent-review")
+    if "loom" in agents:
+        print("  loom pipeline: agent-architect -> agent-code -> agent-test -> agent-review")
 
 
 def oc_verify(args):
@@ -2781,7 +2529,7 @@ def oc_audit(args):
             continue
         exp_agents, exp_sampling = oc_build_recipe_agents(model_ref, rec, caps)
         for name in sorted(exp_sampling):
-            if name in ("team", "loom"):  # orchestrators; audited on their own model, not here
+            if name == "loom":  # orchestrator; audited on its own model, not here
                 continue
             act = _audit_vec(agents.get(name, {}), pm.get(name))
             exp = _audit_vec(exp_agents.get(name, {}), exp_sampling.get(name))
@@ -2913,16 +2661,15 @@ def oc_sync(args, sampling, detected_installed):
             else:
                 cfg.pop("model", None)
 
-    # ---- PROFILES: build role-agents (alongside built-in plan/build) ----------
-    # Emits: code (primary), agent (all), instruct (subagent, hidden), architect
-    # (orchestrator). Tab cycle = plan, build, code, agent, architect.
+    # ---- PROFILES: build role-agents (replacing built-in plan/build) ----------
+    # Emits the visible research/code/agent primaries, the loom pipeline lead, and
+    # the hidden agent-* workers the conductor dispatches.
     # Curated recipe supplies per-model sampling; else generic Qwen numbers.
     agents = {}
     agent_model_ref = None
     per_model_sampling = None
     matched_recipe = None
     env_notes = []
-    team_budget = None
     # Use all_available_models (merged pool) for the condition check so we can build
     # the roster even when only remote models are available (via runtime discovery).
     # Fall back to available_models (local-only) if all_available_models is empty.
@@ -2935,35 +2682,35 @@ def oc_sync(args, sampling, detected_installed):
         cur = cfg.get("model")
         # Use all_available_models (merged pool of local probes + existing config providers)
         # instead of available_models (local-only) so remote refs like openai/gpt-5.5
-        # from existing config are considered for team selection.
+        # from existing config are considered for orchestrator selection.
         pool = reasoning_caps if reasoning_caps else all_available_models
-        
+
         # Build available_model_ids for remote model detection
         available_model_ids = []
         for model_ref in all_available_models.keys():
             model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
             available_model_ids.append(model_id)
-        
-        # Check if user prefers a remote model (e.g., openai/gpt-5.5) for team
+
+        # Check if user prefers a remote model (e.g., openai/gpt-5.5) for loom
         default_models = (_load_default_models(create=False) if args.dry_run
                           else load_default_models())
-        team_prefs = (default_models.get("agents") or {}).get("team", [])
-        
-        # Prefer a reasoning model first, then check team preferences
+        loom_prefs = (default_models.get("agents") or {}).get("loom", [])
+
+        # Prefer a reasoning model first, then check loom preferences
         agent_model_ref = None
         if reasoning_caps:
             agent_model_ref = cur if cur in reasoning_caps else sorted(reasoning_caps)[0]
         else:
-            # No reasoning models - validate team preferences against all_available_models
+            # No reasoning models - validate loom preferences against all_available_models
             # Use the same resolver logic as _apply_default_models so unavailable
             # cloud refs like anthropic/claude-opus-4-8 and unavailable local served IDs
             # are not selected.
-            for pref in team_prefs:
+            for pref in loom_prefs:
                 resolved = _resolve_model_ref_from_prefs(pref, all_available_models)
                 if resolved is not None:
                     agent_model_ref = resolved
                     break
-            
+
             if not agent_model_ref:
                 agent_model_ref = cur if cur in pool else sorted(pool)[0]
         model_id = agent_model_ref.split("/", 1)[1] if "/" in agent_model_ref else agent_model_ref
@@ -3054,19 +2801,14 @@ def oc_sync(args, sampling, detected_installed):
         except (KeyError, ValueError, TypeError):
             pass
         existing_agents = cfg.get("agent", {}) or {}
-        # Capture a previously-set team task_budget BEFORE we overwrite, so a re-sync
-        # without the flag doesn't reset it. (The team MODEL is no longer special-cased:
-        # it comes from default_models.json like any other agent and is configured for its
-        # model by the reconfigure loop above -- including cloud stripping.)
-        prev_team = existing_agents.get("team") or {}
-        prev_team_budget = prev_team.get("task_budget")
         # Rebuild the agent map so OUR agents are written in a FIXED canonical
-        # order every sync (plan, build, agent, ...workers..., team). OpenCode's
+        # order every sync (research, code, agent, loom, ...workers...). OpenCode's
         # Tab cycle follows the config object order in practice, and dict.update()
-        # would otherwise preserve a STALE order from a prior sync (e.g. team
-        # landing before build). User-created agents are kept (in their order).
+        # would otherwise preserve a STALE order from a prior sync. User-created
+        # agents are kept (in their order). Retired managed agents (team,
+        # agent-instruct) drop out here: they are MANAGED but no longer built.
         user_agents = {k: v for k, v in existing_agents.items() if k not in MANAGED_AGENTS}
-        # Write VISIBLE primaries first (research, code, agent, team) as a contiguous
+        # Write VISIBLE primaries first (research, code, agent, loom) as a contiguous
         # block, THEN the hidden agent-* workers, then disabled built-ins, then the
         # user's own agents.
         prim = {k: v for k, v in agents.items() if v.get("mode") != "subagent"}
@@ -3081,40 +2823,25 @@ def oc_sync(args, sampling, detected_installed):
         if not args.keep_builtins and args.default_agent in cfg["agent"]:
             cfg["default_agent"] = args.default_agent
 
-        # Cap how many sub-agents the team spawns (task_budget). Precedence:
-        # flag > previously-set budget > the worker model's declared `concurrency`
-        # (its max-num-seqs -- you can't usefully run more parallel workers than the
-        # server has sequence slots). The effective value is injected into the team
-        # prompt so the model can self-limit.
-        team_budget = args.team_task_budget if args.team_task_budget is not None else prev_team_budget
-        budget_src = "flag" if args.team_task_budget is not None else ("preserved" if prev_team_budget is not None else None)
-        if team_budget is None and matched_recipe:
-            conc = (matched_recipe.get("capabilities") or {}).get("concurrency")
-            if isinstance(conc, int) and conc > 0:
-                team_budget, budget_src = conc, "concurrency"
-        if team_budget is not None and "team" in agents:
-            cfg["agent"]["team"]["task_budget"] = team_budget
-            if budget_src == "flag":
-                print(f"  team task_budget -> {team_budget} delegations/session")
-            elif budget_src == "concurrency":
-                print(f"  team task_budget defaulted from model concurrency "
-                      f"(max-num-seqs): {team_budget}")
-            else:
-                print(f"  team task_budget preserved: {team_budget}")
+    # Retired per-role skill permission blocks: role guidance no longer ships as
+    # skills, so a stale `permission.skill` map on a managed agent (from an earlier
+    # sync) would only hide genuinely optional skills. Scrub it even when no roster
+    # was rebuilt this run.
+    for _name, _a in (cfg.get("agent") or {}).items():
+        if _name in MANAGED_AGENTS and isinstance(_a, dict):
+            _perm = _a.get("permission")
+            if isinstance(_perm, dict):
+                _perm.pop("skill", None)
 
-    # ---- Minimal role prompts + visible global role skills -------------------
+    # ---- Minimal role prompts + global skills + loom instruction files -------
     role_prompt_paths, role_skill_paths = {}, {}
     if args.profiles:
-        for agent_name, skill_name in ROLE_SKILL_NAMES.items():
+        for agent_name in ROLE_SKILL_NAMES:
             if agent_name not in agents:
                 continue
             role_prompt_paths[agent_name] = _role_prompt_path(config_path, agent_name)
+        for skill_name in GLOBAL_SKILLS:
             role_skill_paths[skill_name] = _role_skill_path(config_path, skill_name)
-    # The runbook-review skill is a user-kicked maintenance pass; write it globally
-    # whenever we build a roster so "perform an agent runbook review" works in any repo.
-    runbook_skill_path = None
-    if args.profiles and agents:
-        runbook_skill_path = _agent_runbook_skill_path(config_path)
 
     # ---- Web search / tool exposure -----------------------------------------
     web_notes = oc_apply_web_search(cfg, args)
@@ -3186,14 +2913,13 @@ def oc_sync(args, sampling, detected_installed):
             print(loom_plugin_js)
         for agent_name, prompt_path in role_prompt_paths.items():
             print(f"\n--- DRY RUN: would write {prompt_path} ---")
-            print(team_prompt_text(team_budget) if agent_name == "team"
-                  else ROLE_PROMPTS[agent_name])
+            print(ROLE_PROMPTS[agent_name])
         for skill_name, skill_path in role_skill_paths.items():
             print(f"\n--- DRY RUN: would write {skill_path} ---")
-            print(ROLE_SKILLS[skill_name])
-        if runbook_skill_path:
-            print(f"\n--- DRY RUN: would write {runbook_skill_path} ---")
-            print(AGENT_RUNBOOK_REVIEW_SKILL)
+            print(GLOBAL_SKILLS[skill_name])
+        if args.profiles:
+            print(f"\n--- DRY RUN: would regenerate loom instruction/contract files "
+                  f"under {LOOM_SKILLS_DIR} for: {', '.join(LOOM_ROLES)} ---")
         return 0
 
     # Write config (+ one-shot backup)
@@ -3262,21 +2988,22 @@ def oc_sync(args, sampling, detected_installed):
     for agent_name, prompt_path in role_prompt_paths.items():
         os.makedirs(os.path.dirname(prompt_path), exist_ok=True)
         with open(prompt_path, "w") as f:
-            f.write(team_prompt_text(team_budget) if agent_name == "team"
-                    else ROLE_PROMPTS[agent_name])
+            f.write(ROLE_PROMPTS[agent_name])
         print(f"Wrote {prompt_path}")
 
     for skill_name, skill_path in role_skill_paths.items():
         os.makedirs(os.path.dirname(skill_path), exist_ok=True)
         with open(skill_path, "w") as f:
-            f.write(ROLE_SKILLS[skill_name])
+            f.write(GLOBAL_SKILLS[skill_name])
         print(f"Wrote {skill_path}")
 
-    if runbook_skill_path:
-        os.makedirs(os.path.dirname(runbook_skill_path), exist_ok=True)
-        with open(runbook_skill_path, "w") as f:
-            f.write(AGENT_RUNBOOK_REVIEW_SKILL)
-        print(f"Wrote {runbook_skill_path}")
+    # loom-managed instruction/contract files: regenerated on EVERY sync so the
+    # python constants stay the single source of truth. Repo-local overlays
+    # (.loom/skills/*-local.md) are hand-authored and never touched.
+    if args.profiles:
+        loom_files = write_loom_role_files()
+        print(f"Wrote {len(loom_files)} loom instruction/contract file(s) "
+              f"under {LOOM_SKILLS_DIR}")
 
     # --allow-empty with zero models builds no roster, which used to skip these
     # writes entirely -- refresh the generated artifacts from current code anyway.
@@ -3284,24 +3011,14 @@ def oc_sync(args, sampling, detected_installed):
         refreshed = oc_refresh_role_artifacts(config_path)
         if refreshed:
             print(f"Refreshed {len(refreshed)} generated artifact(s) "
-                  "(role skills/prompts/loom plugin; no roster this sync)")
+                  "(global skills/prompts/loom files/plugin; no roster this sync)")
 
-    # Remove only artifacts generated by the retired prompt/skill layout. Project
-    # overlays are never touched.
-    root = os.path.dirname(config_path)
-    for relpath in LEGACY_ROLE_ARTIFACTS if args.profiles else ():
-        stale = os.path.join(root, relpath)
-        if not os.path.exists(stale):
-            continue
-        try:
-            os.remove(stale)
+    # Remove artifacts of the retired layout: the per-role/team/instruct/runbook
+    # skill directories and the retired prompt files. Project overlays are never
+    # touched; agent-loom and session-review are kept.
+    if args.profiles:
+        for stale in oc_cleanup_stale_role_artifacts(config_path):
             print(f"Removed stale {stale}")
-            try:
-                os.rmdir(os.path.dirname(stale))
-            except OSError:
-                pass
-        except OSError:
-            pass
 
     _warn_missing_gh_tokens()
     print("Restart / reload OpenCode to pick up the changes.")
@@ -3377,13 +3094,14 @@ SETTINGS_KEYS = {
     "configs_dir":     ("omodel-manager configs/ dir", None),
     "hosts":           ("comma-separated host IPs to probe", None),
     "ports":           ("comma-separated ports", ",".join(map(str, DEFAULT_PORTS))),
-    "default_agent":   ("startup agent (research/code/agent/team)", "code"),
+    "default_agent":   ("startup agent (research/code/agent/loom)", "code"),
     "web_search":      ("none|exa|mcp", "none"),
     "proxy_port":      ("proxy listen port (default: 9099)", 9099),
     "proxy_active":    ("is proxy currently active?", False),
 }
-# Retired settings -- silently dropped from wire.json on load so a stale value can't linger
-# and mislead (the team model now lives in default_models.json / `omw agents team --set-model`).
+# Retired settings -- silently dropped from wire.json on load so a stale value can't
+# linger and mislead (these belonged to the removed team orchestrator; per-agent model
+# routing lives in default_models.json).
 RETIRED_SETTINGS = ("team_model", "team_reasoning")
 
 
@@ -3467,7 +3185,7 @@ def cmd_home(args):
     cdir = _configs_dir(_setting(args, "configs_dir"))
     ntoml = len([f for f in os.listdir(cdir) if f.endswith(".toml")]) if os.path.isdir(cdir) else 0
     hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
-    team = (agents.get("team") or {}).get("model") or "(from default_models.json)"
+    loom = (agents.get("loom") or {}).get("model") or "(from default_models.json)"
 
     print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
     print("Status:")
@@ -3476,7 +3194,7 @@ def cmd_home(args):
     print(f"  hosts   : {hosts}")
     dfl = f", default @{cfg.get('default_agent')}" if cfg.get("default_agent") else ""
     print(f"  opencode: {cfg_path}  ({len(managed)} managed agent(s){dfl})")
-    print(f"  team    : {team}")
+    print(f"  loom    : {loom}")
     print(f"  settings: {WIRE_SETTINGS_FILE}{'' if os.path.exists(WIRE_SETTINGS_FILE) else '  (none yet)'}")
 
     if not managed:
@@ -3712,9 +3430,6 @@ COPILOT_BODIES = {
         "You run broad verification after implementation: full suites, lint, typecheck, build commands, "
         "and scripted workflows. Never edit source or weaken tests. Report each command, PASS/FAIL, "
         "failing names, and useful output."),
-    "agent-instruct": (
-        "You are a fast worker for simple, well-specified, mechanical tasks (one obvious edit, rename, "
-        "format, boilerplate). Do exactly what's asked and report the concrete result."),
     "agent-architect": (
         "You are read-only and do two things: produce an implementation plan, or request the research you "
         "need before planning. Return a bounded numbered plan, research requests, acceptance criteria, scope "
@@ -3726,14 +3441,6 @@ COPILOT_BODIES = {
         "as blocker, regression, pre-existing, future work, or out of scope; only blocker/regression require "
         "immediate fixes. Never edit. Approve or merge only when explicitly authorized and no blocking "
         "finding remains."),
-    "team": (
-        "You are the Team Lead. Send simple low-risk work to agent-code; send medium/high-risk work to "
-        "agent-architect for research, plan, criteria, and scope before coding. Courier research and "
-        "blocked reports while reusing each agent's session. agent-code is ALWAYS followed by agent-test: "
-        "send it the complete goal, criteria, scope, changes, and focused checks, then send agent-test "
-        "evidence to agent-review. Fix blockers/regressions ONE AT A TIME -- a new agent-code session per "
-        "finding, back through agent-test, then to the same agent-review session; keep other findings "
-        "separate. When verified, ask whether to open a PR and perform PR review."),
 }
 
 
@@ -3746,19 +3453,17 @@ COPILOT_DESCRIPTIONS = {
     "agent-research": "Read-only research/data-gathering worker: fetch docs/web, gather information, return a concrete summary with sources; no edits.",
     "agent-code": "Full-access implementation worker: complete a change and run focused checks for fast feedback.",
     "agent-test": "Broad verification worker: runs full suites/scripts and reports exact pass/fail evidence; never edits source or tests.",
-    "agent-instruct": "Fast worker for simple, well-specified mechanical edits (rename, format, boilerplate).",
     "agent-architect": "Read-only planner and escalation target: plans hard changes or requests the research needed to plan, and diagnoses a blocked agent-code; no edits, never reviews completed work.",
     "agent-review": "Reviews tested implementations and PRs against supplied criteria; classifies findings and never edits.",
-    "team": "Lead orchestrator: routes by risk, coordinates planning/research/coding/testing, and verifies tested implementations through review.",
 }
 
 
 def copilot_build_agents():
     """{filename: agent-md content} for the full roster in Copilot's .agent.md format.
 
-    Primaries (research/code/agent) + team are top-level agents; the agent-* workers are
-    subagents. agent-review is `disable-model-invocation: true` (explicit-invoke-only) so it
-    isn't auto-dispatched -- the closest Copilot has to "only the team delegates to review"."""
+    Primaries (research/code/agent) are top-level agents; the agent-* workers are
+    subagents. agent-review is `disable-model-invocation: true` (explicit-invoke-only) so
+    it isn't auto-dispatched -- the closest Copilot has to a gated review step."""
     out = {}
     for key, prole, mode, is_worker, perm, color, sdesc in AGENT_SPECS:
         body = COPILOT_BODIES.get(key, sdesc)
@@ -3766,9 +3471,6 @@ def copilot_build_agents():
         out[f"{key}.agent.md"] = _copilot_agent_md(
             name=key, description=COPILOT_DESCRIPTIONS.get(key, sdesc.replace("[worker] ", "")),
             body=body, tools=_copilot_tools_for(perm), disable_model_invocation=dmi)
-    out["team.agent.md"] = _copilot_agent_md(
-        name="team", description=COPILOT_DESCRIPTIONS["team"],
-        body=COPILOT_BODIES["team"], tools=_copilot_tools_for("full"))
     return out
 
 
@@ -3869,7 +3571,7 @@ def _copilot_print_env_instructions(home, sh_path, ps1_path):
         print(f"  bash/zsh (Linux/macOS):  source {sh_path}")
         print(f"  PowerShell (Windows):    . {ps1_path}")
     print("  Add that line to your shell rc / $PROFILE to persist it, then run")
-    print("  `copilot --agent code` (or `--agent team`).")
+    print("  `copilot --agent code`.")
 
 
 def copilot_sync(args, sampling, detected_installed):
@@ -4036,16 +3738,13 @@ def _add_sync_args(p):
     p.add_argument("--mcp-env", action="append", metavar="KEY=VAL")
     p.add_argument("--mcp-header", action="append", metavar="KEY=VAL")
 
-    # Roster / team
+    # Roster
     p.add_argument("--no-reasoning-probe", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--keep-builtins", action="store_true",
                    help="keep OpenCode's native build/plan agents (normally disabled)")
     p.add_argument("--default-agent", default=None,
                    help="startup agent when build/plan are disabled "
                         "(default: wire.json default_agent, else code)")
-    p.add_argument("--team-task-budget", "--architect-task-budget", type=int, metavar="N",
-                   dest="team_task_budget", default=None,
-                   help="cap how many sub-agents the team may spawn per session")
     p.add_argument("--no-recipes", action="store_true",
                    help="ignore the omodel-manager configs; yields generic behavior")
     p.add_argument("--dry-run", action="store_true", help="print result, do not write")
@@ -4138,8 +3837,8 @@ def _roster_view(args, want_subagent):
     rows = []
     for name, a in picked.items():
         vec = _agent_vec(name, a, plugin)
-        # Show task_budget for team and agents that can delegate (code, agent)
-        budget = a.get("task_budget", "-") if name in ("team", "code", "agent") else "-"
+        # Show task_budget for agents that can delegate (code, agent)
+        budget = a.get("task_budget", "-") if name in ("code", "agent") else "-"
         rows.append((name, _short_model(a.get("model")), _fmt(vec["temperature"]),
                      _fmt(vec["enable_thinking"]), _perm_label(a.get("permission")), budget))
     print(f"{'Sub-agents (delegation workers)' if want_subagent else 'Primary agents (Tab cycle)'} "
@@ -4156,8 +3855,6 @@ def _show_agent_detail(name, a, plugin):
     print(f"  model      : {a.get('model', '-')}")
     print(f"  mode       : {a.get('mode', '-')}")
     print(f"  permission : {_perm_label(a.get('permission'))}  ({a.get('permission')})")
-    if name == "team":
-        print(f"  work-budget: {a.get('task_budget', '(unset)')}")
     print("  effective sampling (opencode.json + plugin):")
     for k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty",
               "max_output", "enable_thinking", "preserve_thinking"):
@@ -4211,7 +3908,7 @@ def cmd_models(args):
         cap = r.get("capabilities", {}) or {}
         print(f"model: {title}   (config: {r.get('_file', '?')})")
         conc = cap.get("concurrency")
-        conc_s = f", concurrency={conc} (team work-budget default)" if conc else ""
+        conc_s = f", concurrency={conc}" if conc else ""
         print(f"  capabilities: reasoning={_fmt(bool(cap.get('reasoning')))}, "
               f"vision={_fmt(bool(cap.get('vision')))}, tool_call={_fmt(bool(cap.get('tool_call')))}, "
               f"thinking_control={cap.get('thinking_control', r.get('thinking_control', '-'))}{conc_s}\n")
@@ -4312,9 +4009,9 @@ def _find_model_config_live(recipe, live_ids):
 # ============================================================================
 # Live tweaks (--set-*): edit ONLY ~/.config/opencode/. `omw sync` resets.
 # ============================================================================
-# agent name -> preset role it runs (research=reason, code=code, ... team=reason)
+# agent name -> preset role it runs (research=reason, code=code, ... loom=reason)
 AGENT_ROLE = {spec[0]: spec[1] for spec in AGENT_SPECS}
-AGENT_ROLE.setdefault("team", "reason")
+AGENT_ROLE.setdefault("loom", "reason")
 
 RESET_NOTE = "  (live edit only; run `omw sync` to reset to the known-good configs)"
 
@@ -4329,7 +4026,7 @@ def _boolish(s):
 
 
 def _has_roster_mutation(args):
-    return bool(getattr(args, "set_model", None)) or getattr(args, "set_work_budget", None) is not None
+    return bool(getattr(args, "set_model", None))
 
 
 # Two GitHub tokens (chmod 600), read by the identity plugin and checked by `omw sync`.
@@ -4346,7 +4043,7 @@ GIT_IDENTITY_PLUGIN_JS = r'''// otools-git-identity -- auto-generated by `omw sy
 // Gives OpenCode agents a GitHub identity via the shell.env hook, so there's no per-user
 // git config to juggle:
 //   * every agent shell gets GH_TOKEN = the CODER token -> commits & PRs are the coder
-//     (bot) account. All coding agents (research/team/code/agent/agent-*) use this.
+//     (bot) account. All coding agents (research/code/agent/agent-*) use this.
 //   * GH_TOKEN_REVIEWER is also exposed; the `agent-review` subagent overrides GH_TOKEN
 //     with it to review + MERGE as your own account -> real two-party review (GitHub lets
 //     you approve a bot's PR).
@@ -4632,8 +4329,6 @@ def _mutate_roster(args, want_subagent):
     if not agents:
         print("No agents to edit. Run `omw sync` first.", file=sys.stderr)
         sys.exit(1)
-    if getattr(args, "set_work_budget", None) is not None:
-        return _set_work_budget(cfg_path, cfg, agents, args.set_work_budget)
 
     ref = args.set_model
     if getattr(args, "name", None):
@@ -4681,22 +4376,6 @@ def _mutate_roster(args, want_subagent):
     print(RESET_NOTE)
     _suggest([("See the change", "omw subagents" if want_subagent else "omw agents"),
               ("Reset to known-good", "omw sync")])
-
-
-def _set_work_budget(cfg_path, cfg, agents, n):
-    team = agents.get("team")
-    if not isinstance(team, dict) or team.get("disable"):
-        print("no `team` agent in this config (nothing delegates).", file=sys.stderr)
-        sys.exit(1)
-    team["task_budget"] = n
-    tp = _role_prompt_path(cfg_path, "team")
-    os.makedirs(os.path.dirname(tp), exist_ok=True)
-    with open(tp, "w", encoding="utf-8") as f:
-        f.write(team_prompt_text(n))
-    _write_cfg(cfg_path, cfg)
-    print(f"team work-budget -> {n} delegations/session")
-    print(RESET_NOTE)
-    _suggest([("Review", "omw agents team"), ("Reset to known-good", "omw sync")])
 
 
 def _mutate_model(args, cfg_path, cfg, agents, plugin):
@@ -4929,11 +4608,9 @@ def _build_parser():
     pc.set_defaults(func=cmd_config)
 
     pag = sub.add_parser("agents", parents=[io_parent],
-                         help="list primary agents; show/tweak one (`omw agents team`)")
+                         help="list primary agents; show/tweak one (`omw agents code`)")
     pag.add_argument("name", nargs="?", help="agent name to show or edit")
     pag.add_argument("--set-model", metavar="REF", help="live-set this agent's model")
-    pag.add_argument("--set-work-budget", type=int, metavar="N",
-                     help="live-set the team's delegation budget (task_budget)")
     pag.set_defaults(func=cmd_agents)
 
     psa = sub.add_parser("subagents", parents=[io_parent],
@@ -4941,8 +4618,6 @@ def _build_parser():
     psa.add_argument("name", nargs="?", help="worker name to show or edit")
     psa.add_argument("--set-model", metavar="REF",
                      help="live-set model (no name -> all workers)")
-    psa.add_argument("--set-work-budget", type=int, metavar="N",
-                     help="live-set the team's delegation budget (forwards to team)")
     psa.set_defaults(func=cmd_subagents)
 
     pm = sub.add_parser("models", parents=[io_parent],
@@ -5060,13 +4735,39 @@ def _providers_for_target(cfg, target):
     return [k for k in managed if mid in ((providers[k].get("models") or {}))]
 
 
+def _loom_role_models(wire_settings):
+    """{worker: 'provider/model'} for the pipeline roles, read from the CURRENT
+    opencode.json agent entries (same config resolution as sync: wire.json override,
+    else the built-in default path). {} when the config is missing or unreadable --
+    the conductor then falls back to its own defaults."""
+    path = os.path.expanduser(wire_settings.get("opencode_config")
+                              or SETTINGS_KEYS["opencode_config"][1])
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    out = {}
+    for role in LOOM_ROLES:
+        entry = (cfg.get("agent") or {}).get(role)
+        if isinstance(entry, dict) and entry.get("model"):
+            out[role] = entry["model"]
+    return out
+
+
 def cmd_loom(args):
     """Dispatch `omw loom ...` into the conductor module (utils/omw_loom.py)."""
     if loom_mod is None:
         print("loom: utils/omw_loom.py is missing or unloadable", file=sys.stderr)
         return 2
-    return loom_mod.dispatch(args, wire_settings=load_settings(),
-                             default_models_path=DEFAULT_MODELS_FILE)
+    wire_settings = load_settings()
+    return loom_mod.dispatch(args, wire_settings=wire_settings,
+                             default_models_path=DEFAULT_MODELS_FILE,
+                             role_models=_loom_role_models(wire_settings),
+                             loom_dir=LOOM_SKILLS_DIR,
+                             status_contract=WORKER_STATUS_CONTRACT)
 
 
 def cmd_proxy(args):
