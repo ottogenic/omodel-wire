@@ -1,0 +1,18 @@
+{
+  "request_id": "sy9frg0",
+  "timestamp": 1784944188.7779412,
+  "status": 200,
+  "headers": {
+    "date": "Sat, 25 Jul 2026 01:49:48 GMT",
+    "server": "uvicorn",
+    "content-length": "481",
+    "content-type": "application/json"
+  },
+  "body": "{\"object\":\"list\",\"data\":[{\"id\":\"qwen3-coder-next-fp8\",\"object\":\"model\",\"created\":1784944188,\"owned_by\":\"vllm\",\"root\":\"Qwen/Qwen3-Coder-Next-FP8\",\"parent\":null,\"max_model_len\":262144,\"permission\":[{\"id\":\"modelperm-b49036e9d2c88b74\",\"object\":\"model_permission\",\"created\":1784944188,\"allow_create_engine\":false,\"allow_sampling\":true,\"allow_logprobs\":true,\"allow_search_indices\":false,\"allow_view\":true,\"allow_fine_tuning\":false,\"organization\":\"*\",\"group\":null,\"is_blocking\":false}]}]}",
+  "body_metadata": {
+    "truncated": false,
+    "length": 481
+  },
+  "elapsed_ms": 1,
+  "streamed": false
+}

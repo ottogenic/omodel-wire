@@ -1,0 +1,4 @@
+{"id": "sy9frg0", "ts": 1784944188.7780066, "model": "", "method": "GET", "url": "http://localhost:8000/v1/models", "status": 200, "ms": 1}
+{"id": "l64hx7r", "ts": 1784944190.8224814, "model": "qwen3-coder-next-fp8", "method": "POST", "url": "http://localhost:8000/v1/chat/completions", "status": 200, "ms": 508}
+{"id": "4xyxzaq", "ts": 1784944193.4499624, "model": "qwen3-coder-next-fp8", "method": "POST", "url": "http://localhost:8000/v1/chat/completions", "status": 200, "ms": 2520}
+{"id": "kg8bbex", "ts": 1784944262.1569104, "model": "qwen3-coder-next-fp8", "method": "POST", "url": "http://localhost:8000/v1/chat/completions", "status": 200, "ms": 48418}
