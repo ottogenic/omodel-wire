@@ -9,8 +9,8 @@ Run from the PR/change checkout:
     python3 -m py_compile omodel-wire.py
     python3 -m unittest
 
-Use `python3`, not `python`. The known `test_main_dispatch_models_list` failure is `pre-existing`
-only when a live localhost model is the sole cause and the same test fails on `main`; verify both.
+Use `python3`, not `python`. Label a failure `pre-existing` only when the same test fails
+on `main` for the same cause; verify both sides before classifying.
 
 ## Repo Invariants
 
