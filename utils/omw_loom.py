@@ -2,13 +2,13 @@
 
 The loom replaces the v1 `team` LLM-orchestrator's CONTROL FLOW with code, while
 keeping every worker (agent-research/-code/-test/-instruct/-architect/-review)
-exactly as `omw sync` configures them. Workers keep their skills and the Return
-Contract; the loom is simply a new consumer of that contract:
+exactly as `omw sync` configures them. Loom composes each worker's packet
+deterministically (role instructions + repo overlay + Return Contract, all from
+loom-managed files) and parses the contract out of every reply:
 
-    RESULT: ...            <- opaque text, couriered between sessions
+    RESULT: ...            <- summary, couriered between sessions
     EVIDENCE: ...          <- opaque text + the anti-spin comparison key
     STATUS: DONE | CONTINUE | NEEDS_RESEARCH | BLOCKED     <- parsed, routed on
-    NEXT STEPS FOR team: ...                               <- advisory, logged
 
 Workers run as REAL OpenCode sessions created over the server HTTP API as
 CHILDREN of the loom agent's session (parentID), so the TUI renders them with
@@ -75,6 +75,18 @@ def db_path():
     return os.environ.get("OMW_LOOM_DB") or os.path.join(data_dir(), "loom.db")
 
 
+# Injected by omodel-wire at dispatch() time (see dispatch(...) kwargs):
+#   _STATUS_CONTRACT -- fallback Return Contract text when no per-role contract file exists.
+#   _ROLE_MODELS     -- {role: "provider/model"} so every dispatch names its model explicitly
+#                       (the opencode server has been observed silently falling back to the
+#                       default model for custom-provider subagents; never trust resolution).
+#   _LOOM_DIR        -- the loom-managed instruction/contract files dir (omw sync writes it).
+# All None/empty when omw_loom runs standalone; behavior degrades gracefully.
+_STATUS_CONTRACT = None
+_ROLE_MODELS = None
+_LOOM_DIR = None
+
+
 def loom_config(wire_settings=None):
     """DEFAULTS overlaid with wire.json's {"loom": {...}} section, if present."""
     cfg = dict(DEFAULTS)
@@ -82,6 +94,9 @@ def loom_config(wire_settings=None):
         for k, v in (wire_settings.get("loom") or {}).items():
             if k in cfg:
                 cfg[k] = v
+    cfg["status_contract"] = _STATUS_CONTRACT
+    cfg["role_models"] = _ROLE_MODELS or {}
+    cfg["loom_dir"] = _LOOM_DIR
     return cfg
 
 
@@ -91,8 +106,8 @@ def loom_config(wire_settings=None):
 # ---------------------------------------------------------------------------
 _STATUS_RE = re.compile(r"^\s*`?STATUS`?\s*:\s*`?(DONE|CONTINUE|NEEDS_RESEARCH|BLOCKED)`?\s*$",
                         re.MULTILINE | re.IGNORECASE)
-_NEXT_RE = re.compile(r"^\s*`?NEXT STEPS FOR team`?\s*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 _SECTION_RE = re.compile(r"^\s*(RESULT|EVIDENCE)\s*:\s*", re.MULTILINE)
+_RESULT_LINE_RE = re.compile(r"^\s*`?RESULT`?\s*:", re.MULTILINE)
 _RESEARCH_RE = re.compile(r"RESEARCH REQUEST\s*:?\s*(.*)", re.IGNORECASE)
 _FINDING_RE = re.compile(r"^\s*FINDING\s+(\d+)\s*:\s*(.+?)(?=^\s*FINDING\s+\d+\s*:|\Z)",
                          re.MULTILINE | re.DOTALL)
@@ -101,21 +116,19 @@ _CLEAN_RE = re.compile(r"No blocking findings|Review passed", re.IGNORECASE)
 # (seen live: RESULT "what you did or found, with files as path:line"). A reply whose
 # sections are template echoes is malformed -- it must trigger the nudge, not ship.
 _TEMPLATE_ECHO_RE = re.compile(
-    r"^<?\s*(what you did or found|what you did, with changed files"
-    r"|each command or check you ran|the route from Next Steps)", re.IGNORECASE)
+    r"^<?\s*(what you did or found|one-paragraph summary of what you did"
+    r"|each command or check you ran)", re.IGNORECASE)
 
 
 def parse_contract(text):
-    """-> dict(status, next_steps, result, evidence, research, findings, clean).
+    """-> dict(status, result, evidence, research, findings, clean).
     status is None when the reply is malformed (no STATUS line)."""
     text = text or ""
     m = _STATUS_RE.search(text)
     status = m.group(1).upper() if m else None
-    nm = _NEXT_RE.search(text)
-    next_steps = nm.group(1).strip() if nm else ""
 
     def section(name):
-        sm = re.search(r"^\s*%s\s*:\s*(.*?)(?=^\s*(?:RESULT|EVIDENCE|STATUS|NEXT STEPS FOR team)\s*:|\Z)"
+        sm = re.search(r"^\s*%s\s*:\s*(.*?)(?=^\s*(?:RESULT|EVIDENCE|STATUS)\s*:|\Z)"
                        % name, text, re.MULTILINE | re.DOTALL | re.IGNORECASE)
         return sm.group(1).strip() if sm else ""
 
@@ -139,13 +152,23 @@ def parse_contract(text):
         status = None  # template echo -> malformed -> the dispatcher nudges
     return {
         "status": status,
-        "next_steps": next_steps,
         "result": result,
         "evidence": evidence,
         "research": research,
         "findings": findings,
         "clean": bool(_CLEAN_RE.search(text)),
     }
+
+
+def strip_contract_tail(text):
+    """The worker's full deliverable: everything ABOVE the final contract block.
+    Falls back to the whole text when the reply is contract-only (no body)."""
+    text = (text or "").strip()
+    ms = list(_RESULT_LINE_RE.finditer(text))
+    if not ms:
+        return text
+    body = text[:ms[-1].start()].strip()
+    return body or text
 
 
 def evidence_key(parsed):
@@ -519,14 +542,16 @@ class Loom:
 
     # ---- worker dispatch ----------------------------------------------------------
     def _model_for(self, role, bump=0):
-        """Job-wide override wins; else ranking[role][bump]; else agent default (None)."""
+        """Job-wide override wins; else ranking[role][bump]; else the role's configured
+        model, passed EXPLICITLY. Server-side resolution has been observed silently
+        substituting the default model for custom-provider subagents -- never rely on it."""
         job = self.led.job(self.job_id)
         if job["worker_model"]:
             return job["worker_model"]
         ranked = self.ranking.get(role) or []
         if bump > 0 and len(ranked) > bump:
             return ranked[bump]
-        return None  # let the server use the agent's configured model
+        return (self.cfg.get("role_models") or {}).get(role)
 
     def _notes_suffix(self):
         notes = self.led.drain_notes(self.job_id)
@@ -534,6 +559,64 @@ class Loom:
             return ""
         return "\n\nOPERATOR NOTES (from the human, incorporate them):\n" + \
                "\n".join(f"- {n}" for n in notes)
+
+    # ---- packet composition ---------------------------------------------------------
+    # Role guidance is injected HERE, deterministically, on every fresh session --
+    # not loaded by the model from opencode skills (models skip those) and not
+    # carried by the opencode agent system prompt (the run-spawned server has been
+    # observed dropping it for custom-provider subagents). The packet is the one
+    # channel loom fully controls, and it lands in opencode.db, so every worker's
+    # actual instructions are auditable after the fact.
+
+    @staticmethod
+    def _read_text(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                t = f.read().strip()
+            return t or None
+        except OSError:
+            return None
+
+    def _contract_for(self, role):
+        """Per-role contract file, else the injected fallback text, else None."""
+        d = self.cfg.get("loom_dir")
+        if d:
+            t = self._read_text(os.path.join(d, f"{role}-contract.md"))
+            if t:
+                return t
+        return self.cfg.get("status_contract")
+
+    def _compose_packet(self, role, prompt):
+        """[task] + [role instructions: override XOR (default + local)] + [contract last].
+        The contract sits at the tail on purpose -- it is the most-recent instruction
+        when the worker starts. Returns (packet, files_loaded_for_ledger)."""
+        job = self.led.job(self.job_id)
+        rdir = os.path.join(job["dir"] or "", ".loom", "skills")
+        gdir = self.cfg.get("loom_dir")
+        parts, files = [prompt], []
+
+        def take(path, label):
+            t = self._read_text(path)
+            if t is not None:
+                files.append(f"{label}:{os.path.basename(path)}({len(t)}b)")
+            return t
+
+        override = take(os.path.join(rdir, f"{role}-instructions-override.md"), "override")
+        if override is not None:
+            parts.append(f"## Role instructions ({role} -- repo override)\n\n{override}")
+        else:
+            default = take(os.path.join(gdir, f"{role}-instructions-default.md"),
+                           "default") if gdir else None
+            if default:
+                parts.append(f"## Role instructions ({role})\n\n{default}")
+            local = take(os.path.join(rdir, f"{role}-instructions-local.md"), "local")
+            if local:
+                parts.append(f"## Repo-specific instructions ({role})\n\n{local}")
+        contract = self._contract_for(role)
+        if contract:
+            files.append("contract")
+            parts.append(contract)
+        return "\n\n".join(parts), files
 
     def _dispatch(self, role, purpose, prompt, resume=False, fresh=False, bump=0):
         """Send one prompt to a worker session; create/resume per flags.
@@ -545,6 +628,7 @@ class Loom:
 
         if task and task["session_id"] and resume and not fresh:
             sid = task["session_id"]
+            fresh_session = False
         else:
             title = f"{purpose} (@{role} subagent)"
             sess = self.tp.create_session(job["parent_session"], title, job["dir"])
@@ -552,7 +636,14 @@ class Loom:
             self.led.upsert_task(self.job_id, role, purpose, session_id=sid, model=model)
             self.emit("session", f"{role} [{purpose}] -> {sid}" + (f" on {model}" if model else ""),
                       session=sid)
+            fresh_session = True
 
+        if fresh_session:
+            # Fresh session: the packet carries the role instructions + contract.
+            # Resumed sessions already have them in-context; re-sending burns tokens.
+            prompt, files = self._compose_packet(role, prompt)
+            self.emit("compose", f"{role}: " + (", ".join(files) or "no instruction files"),
+                      session=sid)
         prompt = prompt + self._notes_suffix()
         self.emit("dispatch", f"{role} [{purpose}]" + (" (resume)" if resume and not fresh else ""),
                   title=f"{purpose}: {role} working...", session=sid)
@@ -560,21 +651,36 @@ class Loom:
         parsed = parse_contract(text)
 
         if parsed["status"] is None and self.cfg.get("nudge_malformed", True):
-            self.emit("malformed", f"{role} reply missing STATUS; nudging once")
-            text = self._timed_prompt(
-                sid, "Your reply was missing a filled-in Return Contract. Repeat your ACTUAL "
-                     "findings and end with the RESULT / EVIDENCE / STATUS / NEXT STEPS FOR "
-                     "team lines exactly as your role skill specifies -- with your real "
-                     "content, never the placeholder text.", role, model, purpose)
+            self.emit("malformed", f"{role} reply missing STATUS; nudging for the contract block")
+            contract = self._contract_for(role)
+            if contract:
+                # Ask ONLY for the contract block. The original body is preserved and
+                # merged below -- asking for a full re-send invites the model to
+                # regenerate (and silently alter) work it already delivered.
+                nudge = ("Your last reply had no valid `STATUS:` line. Your work above is "
+                         "preserved -- do NOT repeat or rewrite it. Reply now with ONLY the "
+                         "filled-in contract block for the work you just did, exactly this "
+                         "structure (your real content, never the placeholder text):\n"
+                         + contract.strip())
+            else:
+                nudge = ("Your reply was missing a filled-in Return Contract. Reply with "
+                         "ONLY the RESULT / EVIDENCE / STATUS lines for the work you just "
+                         "did, with your real content, never the placeholder text.")
+            first_text = text
+            text = self._timed_prompt(sid, nudge, role, model, purpose)
             parsed = parse_contract(text)
+            if first_text.strip():
+                # Merge: original deliverable + the nudged contract block. Downstream
+                # consumers (plan handoff, report) see the full artifact, and the parsed
+                # fields come from the block the worker just certified.
+                text = first_text.rstrip() + "\n\n" + text.strip()
         if parsed["status"] is None:
             parsed["status"] = "BLOCKED"
             parsed["evidence"] = parsed["evidence"] or "worker returned malformed output twice"
             self.emit("blocked", f"{role} [{purpose}]: malformed output twice -> BLOCKED")
 
         self.led.upsert_task(self.job_id, role, purpose, last_status=parsed["status"])
-        self.emit("status", f"{role} [{purpose}] -> {parsed['status']}"
-                            + (f" | next: {parsed['next_steps']}" if parsed["next_steps"] else ""),
+        self.emit("status", f"{role} [{purpose}] -> {parsed['status']}",
                   title=f"{purpose}: {role} -> {parsed['status']}")
         return parsed, text
 
@@ -718,8 +824,36 @@ class Loom:
         self.led.update_job(self.job_id, status="paused", report=msg)
         self.emit("paused", msg)
 
+    def _check_server_freshness(self):
+        """Tripwire: diff the attach target's live agent registry against the on-disk
+        config (cfg[role_models]). A long-lived opencode server never re-reads agent
+        config, and the plugin's serverUrl fallback can hand us ANY instance on the
+        default port -- a silent mismatch once burned two days of test conclusions."""
+        want = self.cfg.get("role_models") or {}
+        if not want:
+            return
+        try:
+            live = {a.get("name"): a.get("model") or {}
+                    for a in (self.tp._call("GET", "/agent") or [])}
+        except Exception:
+            return  # diagnostic only -- never block the run on it
+        stale = []
+        for role, ref in want.items():
+            got = live.get(role)
+            if got is None:
+                continue
+            prov, _, mid = (ref or "").partition("/")
+            if got.get("providerID") != prov or got.get("modelID") != mid:
+                stale.append(f"{role}: server has {got.get('providerID')}/{got.get('modelID')}, "
+                             f"config says {ref}")
+        if stale:
+            self.emit("stale-server",
+                      "attach target's agent registry disagrees with on-disk config -- "
+                      "RESTART the opencode server. " + "; ".join(stale))
+
     def run(self):
         self.start_activity_watcher()
+        self._check_server_freshness()
         try:
             self._run()
         except LoomPaused:
@@ -776,7 +910,7 @@ class Loom:
         while parsed["status"] == "NEEDS_RESEARCH" and rounds < 3:
             self._check_stop()
             rounds += 1
-            qs = parsed["research"] or [parsed["next_steps"] or "the facts you listed"]
+            qs = parsed["research"] or ["the facts you listed as missing"]
             self.emit("research", f"fan-out: {len(qs)} question(s)")
             answers = self._research(qs)
             parsed, raw = self._dispatch(
@@ -789,7 +923,9 @@ class Loom:
             if parsed["status"] != "DONE":
                 self._escalate("agent-architect", "plan", self._packet(),
                                f"architect returned {parsed['status']} again")
-        self.led.update_job(self.job_id, plan=parsed["result"] or raw)
+        # Hand off the FULL deliverable (the body above the contract block), not the
+        # RESULT summary -- job 60 lost a 3.5k-char plan to a 624-char synopsis here.
+        self.led.update_job(self.job_id, plan=strip_contract_tail(raw) or parsed["result"])
         self.emit("plan", "plan captured")
 
     def _code_step(self, purpose, prompt, resume=False):
@@ -813,7 +949,7 @@ class Loom:
                 parsed, raw = self._dispatch("agent-code", purpose,
                                              "Continue with your plan.", resume=True)
             elif parsed["status"] == "NEEDS_RESEARCH":
-                qs = parsed["research"] or [parsed["next_steps"] or "your stated question"]
+                qs = parsed["research"] or ["your stated question"]
                 answers = self._research(qs)
                 parsed, raw = self._dispatch("agent-code", purpose,
                                              f"Research results:\n\n{answers}\n\nContinue.",
@@ -886,12 +1022,6 @@ class Loom:
 
     @staticmethod
     def _test_passed(parsed):
-        nxt = (parsed["next_steps"] or "").lower()
-        if "agent-review" in nxt:
-            return True
-        if "agent-code" in nxt:
-            return False
-        # fall back to evidence text
         blob = f"{parsed['result']} {parsed['evidence']}".upper()
         return "FAIL" not in blob and parsed["status"] == "DONE"
 
@@ -899,7 +1029,7 @@ class Loom:
         self.emit("phase", "review: agent-review", title="reviewing...")
         job = self.led.job(self.job_id)
         packet = (f"Review this completed implementation.\n\n{self._packet()}\n\n"
-                  f"TEST EVIDENCE (from agent-test):\n"
+                  f"TEST EVIDENCE:\n"
                   f"{getattr(self, '_last_test_evidence', '(see agent-test session)')}\n\n"
                   "List every blocker/regression as a numbered line in the exact form "
                   "'FINDING <n>: <path:line> <description> | PASS CONDITION: <condition>'. "
@@ -992,6 +1122,26 @@ def cmd_run(args, wire_settings=None, default_models_path=None):
         led.close()
 
 
+def _user_spoke_since(session_id, ts):
+    """True when the session has a USER message newer than ts (epoch seconds).
+    An ask fired right after a build, with no new user message, is orchestrator
+    self-verification; a genuine question arrives as a fresh user message first.
+    Read-only, best-effort: unreadable store -> False (guard stays closed)."""
+    try:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "share")
+        con = sqlite3.connect(
+            "file:" + os.path.join(base, "opencode", "opencode.db") + "?mode=ro", uri=True)
+        row = con.execute(
+            "SELECT COUNT(*) FROM message WHERE session_id=? AND time_created>? "
+            "AND data LIKE ?",
+            (session_id, int(ts * 1000), '%"role":"user"%')).fetchone()
+        con.close()
+        return bool(row and row[0])
+    except Exception:
+        return False
+
+
 def cmd_ask(args, wire_settings=None, default_models_path=None):
     led = Ledger(getattr(args, "db", None))
     try:
@@ -999,6 +1149,27 @@ def cmd_ask(args, wire_settings=None, default_models_path=None):
         if not question.strip():
             print("loom: empty question", file=sys.stderr)
             return 2
+        # Structural guard: an `ask` must be the FIRST loom call since the user last
+        # spoke. Kills both observed misuses -- post-build self-verification loops and
+        # pre-build research sprees -- while leaving every user-prompted ask alone.
+        if getattr(args, "parent", None):
+            prior = led.db.execute(
+                "SELECT id, updated, risk FROM jobs WHERE parent_session=? "
+                "ORDER BY id DESC LIMIT 1", (args.parent,)).fetchone()
+            if prior and not _user_spoke_since(args.parent, prior["updated"] or 0):
+                if prior["risk"] == "ask":
+                    # Pre-build research spree: the next correct move is the build.
+                    print(f"ask refused: you already used your one research call "
+                          f"(job {prior['id']}) for this request. You have enough "
+                          "context. Call the `loom` tool with action 'run' NOW to "
+                          "execute the feature. Do not ask again.")
+                else:
+                    # Post-build self-verification: the report already has evidence.
+                    print(f"ask refused: this conversation already ran the pipeline "
+                          f"(job {prior['id']}), whose report contains tested, "
+                          "reviewed evidence -- relay that report. `ask` becomes "
+                          "available again after the user's next message.")
+                return 0
         tp = Transport(args.attach)
         job_id = led.create_job(dir=args.dir or os.getcwd(), server_url=args.attach,
                                 parent_session=args.parent, goal=question.strip(),
@@ -1174,8 +1345,10 @@ def cmd_clean(args):
 
 
 def cmd_pr(args, wire_settings=None, default_models_path=None):
-    """Resume the job's implement session to branch/commit/push/open the PR,
-    then its review session for PR review. Explicitly human-triggered."""
+    """Resume the job's verify session (agent-test) to branch/commit/push/open the PR
+    -- the tester owns creation so the PR body carries real verification evidence --
+    then its review session for PR review (and merge, where repo policy authorizes it).
+    Explicitly human-triggered."""
     led = Ledger(getattr(args, "db", None))
     try:
         job = led.job(args.job)
@@ -1187,14 +1360,15 @@ def cmd_pr(args, wire_settings=None, default_models_path=None):
                     model_ranking=_load_ranking(default_models_path) if default_models_path else {})
         _install_signals(loom)
         parsed, raw = loom._dispatch(
-            "agent-code", "implement",
-            "The user approved a PR for this work. Create a branch, commit the change with "
-            "explicit paths, push, and open the PR. Report the PR URL.", resume=True)
+            "agent-test", "verify",
+            "The user approved a PR for this work. PR creation is delegated to you: create "
+            "a branch, commit the change with explicit paths, push, and open the PR with "
+            "your verification evidence in the body. Report the PR URL.", resume=True)
         print(parsed["result"] or raw)
         rparsed, rraw = loom._dispatch(
             "agent-review", "review",
-            "A PR was opened for the reviewed work above. Perform PR review per your role "
-            "skill.", resume=True)
+            "A PR was opened for the reviewed work above. Perform PR review per your "
+            "role instructions.", resume=True)
         print(rparsed["result"] or rraw)
         return 0
     finally:
@@ -1273,7 +1447,18 @@ def argparse_suppress():
     return argparse.SUPPRESS
 
 
-def dispatch(args, wire_settings=None, default_models_path=None):
+def dispatch(args, wire_settings=None, default_models_path=None, status_contract=None,
+             role_models=None, loom_dir=None):
+    # Stash the wire-provided plumbing so loom_config() folds it into every job's cfg:
+    # the fallback contract, the explicit per-role models, and the instruction-file dir
+    # (one loom process == one job).
+    global _STATUS_CONTRACT, _ROLE_MODELS, _LOOM_DIR
+    if status_contract:
+        _STATUS_CONTRACT = status_contract
+    if role_models:
+        _ROLE_MODELS = dict(role_models)
+    if loom_dir:
+        _LOOM_DIR = loom_dir
     cmd = args.loom_cmd
     if cmd == "run":
         return cmd_run(args, wire_settings, default_models_path)
