@@ -4838,10 +4838,18 @@ def _providers_for_target(cfg, target):
 def _loom_role_models(wire_settings):
     """{worker: 'provider/model'} for the pipeline roles, read from the CURRENT
     opencode.json agent entries (same config resolution as sync: wire.json override,
-    else the built-in default path). {} when the config is missing or unreadable --
-    the conductor then falls back to its own defaults."""
-    path = os.path.expanduser(wire_settings.get("opencode_config")
-                              or SETTINGS_KEYS["opencode_config"][1])
+    else XDG_CONFIG_HOME, else the built-in default path). {} when the config is
+    missing or unreadable -- the conductor then falls back to its own defaults.
+
+    XDG_CONFIG_HOME matters for isolated harness instances: a serve launched with
+    a cloned config dir spawns this conductor with that env, and worker dispatches
+    must route by the CLONE's agent models, not the machine-global config.
+    (Observed 2026-07-26: parallel benchmark runs all dispatched workers on the
+    global config's model despite per-instance clones.)"""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    default = (os.path.join(xdg, "opencode", "opencode.json") if xdg
+               else SETTINGS_KEYS["opencode_config"][1])
+    path = os.path.expanduser(wire_settings.get("opencode_config") or default)
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
