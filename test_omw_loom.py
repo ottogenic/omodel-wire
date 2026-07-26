@@ -152,6 +152,29 @@ class FakeOpenCode:
         return list(self.sessions)
 
 
+class TestTestPassedPhrasing(unittest.TestCase):
+    """Job 161 regression: '0 failed' is success phrasing, not failure."""
+
+    def _p(self, result="ok", evidence="", status="DONE"):
+        return {"result": result, "evidence": evidence, "status": status}
+
+    def test_zero_failed_passes(self):
+        p = self._p(evidence="7 tests, 7 passed, 0 failed. RESULT: PASS")
+        self.assertTrue(loom.Loom._test_passed(p))
+
+    def test_zero_failures_passes(self):
+        p = self._p(evidence="luacheck: 0 warnings; suite: 0 failures")
+        self.assertTrue(loom.Loom._test_passed(p))
+
+    def test_real_failures_fail(self):
+        self.assertFalse(loom.Loom._test_passed(self._p(evidence="2 tests failed")))
+        self.assertFalse(loom.Loom._test_passed(self._p(evidence="RESULT: FAIL")))
+
+    def test_non_done_fails(self):
+        p = self._p(evidence="all green", status="BLOCKED")
+        self.assertFalse(loom.Loom._test_passed(p))
+
+
 class TestMarkdownWrappedContract(unittest.TestCase):
     """Workers write correct contracts but style them as markdown. Real regression:
     job 100's coder was nudged solely because it wrote `**STATUS: DONE**`."""
