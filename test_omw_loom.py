@@ -152,6 +152,54 @@ class FakeOpenCode:
         return list(self.sessions)
 
 
+class TestMarkdownWrappedContract(unittest.TestCase):
+    """Workers write correct contracts but style them as markdown. Real regression:
+    job 100's coder was nudged solely because it wrote `**STATUS: DONE**`."""
+
+    VARIANTS = {
+        "bold_whole_line": (
+            "**RESULT:** did it\n\n**EVIDENCE:**\n- ran luacheck\n\n**STATUS: DONE**"),
+        "bold_label": (
+            "**RESULT:** did it\n**EVIDENCE:** ran luacheck\n**STATUS:** DONE"),
+        "heading": (
+            "## RESULT: did it\n## EVIDENCE: ran luacheck\n## STATUS: DONE"),
+        "backticks": (
+            "`RESULT`: did it\n`EVIDENCE`: ran luacheck\n`STATUS`: `DONE`"),
+        "underscore": (
+            "_RESULT:_ did it\n_EVIDENCE:_ ran luacheck\n_STATUS: DONE_"),
+        "bullet": (
+            "- RESULT: did it\n- EVIDENCE: ran luacheck\n- STATUS: DONE"),
+    }
+
+    def test_all_markdown_variants_parse(self):
+        for name, text in self.VARIANTS.items():
+            with self.subTest(variant=name):
+                p = loom.parse_contract(text)
+                self.assertEqual(p["status"], "DONE", name + ": status not parsed")
+                self.assertTrue(p["result"], name + ": RESULT empty")
+                self.assertTrue(p["evidence"], name + ": EVIDENCE empty")
+
+    def test_emphasis_stripped_from_section_text(self):
+        p = loom.parse_contract(self.VARIANTS["bold_whole_line"])
+        self.assertNotIn("**", p["result"])
+
+    def test_missing_status_still_malformed(self):
+        p = loom.parse_contract("**RESULT:** did it\n**EVIDENCE:** ran luacheck")
+        self.assertIsNone(p["status"])
+
+    def test_strip_tail_handles_bold_result(self):
+        body = loom.strip_contract_tail(
+            "Here is my work.\n\n**RESULT:** x\n**STATUS: DONE**")
+        self.assertEqual(body, "Here is my work.")
+
+    def test_bold_findings_parse(self):
+        p = loom.parse_contract(
+            "**FINDING 1:** foo.lua:10 bad thing | PASS CONDITION: fix it\n"
+            "**FINDING 2:** bar.lua:20 other thing | PASS CONDITION: fix that\n"
+            "STATUS: DONE")
+        self.assertEqual(len(p["findings"]), 2)
+
+
 class LoomCase(unittest.TestCase):
     maxDiff = None
 
