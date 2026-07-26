@@ -104,13 +104,24 @@ def loom_config(wire_settings=None):
 # Return Contract parsing. Tolerant: workers are cheap models; the parser is
 # the reliable half of the conversation.
 # ---------------------------------------------------------------------------
-_STATUS_RE = re.compile(r"^\s*`?STATUS`?\s*:\s*`?(DONE|CONTINUE|NEEDS_RESEARCH|BLOCKED)`?\s*$",
-                        re.MULTILINE | re.IGNORECASE)
-_SECTION_RE = re.compile(r"^\s*(RESULT|EVIDENCE)\s*:\s*", re.MULTILINE)
-_RESULT_LINE_RE = re.compile(r"^\s*`?RESULT`?\s*:", re.MULTILINE)
+# Models write the contract correctly but style it as markdown: `**STATUS: DONE**`,
+# `**RESULT:**`, `## EVIDENCE:`. Rejecting those cost a full nudge round-trip per
+# reply and inflated every malformed count we measured. Tolerate the wrappers.
+_EM = r"[*_`~#]{0,3}"                    # emphasis/heading markers around a label
+_LEAD = r"^[ \t]*[-+>]?[ \t]*" + _EM + r"[ \t]*"   # line start, optional bullet/quote
+_LABEL_END = _EM + r"[ \t]*:[ \t]*" + _EM + r"[ \t]*"  # ':' with emphasis either side
+
+_STATUS_RE = re.compile(
+    _LEAD + r"STATUS[ \t]*" + _LABEL_END +
+    r"(DONE|CONTINUE|NEEDS_RESEARCH|BLOCKED)[ \t]*" + _EM + r"[ \t]*$",
+    re.MULTILINE | re.IGNORECASE)
+_SECTION_RE = re.compile(_LEAD + r"(RESULT|EVIDENCE)[ \t]*" + _LABEL_END, re.MULTILINE)
+_RESULT_LINE_RE = re.compile(_LEAD + r"RESULT[ \t]*" + _EM + r"[ \t]*:", re.MULTILINE)
 _RESEARCH_RE = re.compile(r"RESEARCH REQUEST\s*:?\s*(.*)", re.IGNORECASE)
-_FINDING_RE = re.compile(r"^\s*FINDING\s+(\d+)\s*:\s*(.+?)(?=^\s*FINDING\s+\d+\s*:|\Z)",
-                         re.MULTILINE | re.DOTALL)
+_FINDING_RE = re.compile(
+    _LEAD + r"FINDING[ \t]+(\d+)[ \t]*" + _LABEL_END + r"(.+?)"
+    r"(?=" + _LEAD + r"FINDING[ \t]+\d+[ \t]*" + _EM + r"[ \t]*:|\Z)",
+    re.MULTILINE | re.DOTALL)
 _CLEAN_RE = re.compile(r"No blocking findings|Review passed", re.IGNORECASE)
 # Weak models sometimes echo the contract's placeholder text instead of filling it
 # (seen live: RESULT "what you did or found, with files as path:line"). A reply whose
@@ -128,9 +139,11 @@ def parse_contract(text):
     status = m.group(1).upper() if m else None
 
     def section(name):
-        sm = re.search(r"^\s*%s\s*:\s*(.*?)(?=^\s*(?:RESULT|EVIDENCE|STATUS)\s*:|\Z)"
-                       % name, text, re.MULTILINE | re.DOTALL | re.IGNORECASE)
-        return sm.group(1).strip() if sm else ""
+        sm = re.search(
+            _LEAD + name + r"[ \t]*" + _LABEL_END + r"(.*?)"
+            r"(?=" + _LEAD + r"(?:RESULT|EVIDENCE|STATUS)[ \t]*" + _EM + r"[ \t]*:|\Z)",
+            text, re.MULTILINE | re.DOTALL | re.IGNORECASE)
+        return sm.group(1).strip(" \t\r\n*_`~") if sm else ""
 
     research = []
     rm = _RESEARCH_RE.search(text)
