@@ -1860,16 +1860,19 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
       const fs = await import("node:fs")
       const sys = output.system || []
       if (!sys.some((s) => typeof s === "string" && s.includes("You are `loom`, a ROUTER"))) return
-      output.system = sys.map((s) => {{
-        if (typeof s !== "string" || !s.includes("Instructions from: ")) return s
+      // MUTATE IN PLACE: the caller keeps its own reference to this array and
+      // ignores a reassigned output.system (verified in llm/request.ts prepare()).
+      for (let i = 0; i < sys.length; i++) {{
+        let s = sys[i]
+        if (typeof s !== "string" || !s.includes("Instructions from: ")) continue
         for (const m of s.matchAll(/Instructions from: ([^\\n]+)\\n/g)) {{
           try {{
             const content = fs.readFileSync(m[1], "utf8")
             s = s.replace(m[0] + content, "").replace(m[0] + content.trimEnd(), "")
           }} catch {{}}
         }}
-        return s
-      }})
+        sys[i] = s
+      }}
     }},
     tool: {{
       loom: tool({{
