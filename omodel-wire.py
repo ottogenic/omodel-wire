@@ -4724,6 +4724,17 @@ def _is_loopback(url):
     return host in ("127.0.0.1", "localhost", "::1")
 
 
+def _is_proxied(url, port):
+    """True when `url` points at the debug proxy itself. Loopback alone is NOT
+    proof of proxying -- on a single box the real upstream (vllm/llama.cpp) is
+    loopback too; the distinguishing mark is the proxy's own port."""
+    try:
+        sp = urllib.parse.urlsplit(url or "")
+    except (ValueError, AttributeError):
+        return False
+    return _is_loopback(url) and sp.port == int(port)
+
+
 def _read_json_file(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -4854,7 +4865,7 @@ def cmd_proxy_on(args):
     for key in targets:
         opts = providers[key].get("options") or {}
         cur = opts.get("baseURL")
-        if not cur or _is_loopback(cur):
+        if not cur or _is_proxied(cur, P["port"]):
             continue
         routes[key] = cur                       # remember the real upstream
         opts["baseURL"] = f"http://127.0.0.1:{P['port']}/{key}"
@@ -4942,7 +4953,7 @@ def cmd_proxy_status(args):
           f"on 127.0.0.1:{P['port']}")
     print(f"logs   : {P['logs']}")
     proxied = [k for k, v in providers.items()
-               if _is_loopback((v.get("options") or {}).get("baseURL", ""))]
+               if _is_proxied((v.get("options") or {}).get("baseURL", ""), P["port"])]
     print(f"proxied: {', '.join(proxied) or '(none)'}")
     if not pid and proxied:
         _suggest([("Restart the daemon", "omw proxy on")])
