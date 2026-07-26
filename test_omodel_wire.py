@@ -279,7 +279,9 @@ class TestAgentBuilding(unittest.TestCase):
                      "webfetch", "websearch", "task"):
             self.assertEqual(looma["permission"][tool], "deny",
                              f"loom should not be able to use {tool}")
-        self.assertEqual(looma["tools"], {"loom": True})
+        self.assertEqual(looma["tools"],
+                         {"loom": True, "skill": False, "todowrite": False})
+        self.assertEqual(looma["permission"].get("skill"), "deny")
         for k, a in agents.items():
             if k == "loom":
                 continue
@@ -762,7 +764,9 @@ class TestSyncEndToEnd(unittest.TestCase):
                 cfg = json.load(f)
             loom_agent = cfg["agent"]["loom"]
             self.assertEqual(loom_agent["mode"], "primary")
-            self.assertEqual(loom_agent["tools"], {"loom": True})
+            self.assertEqual(loom_agent["tools"],
+                             {"loom": True, "skill": False, "todowrite": False})
+            self.assertEqual(loom_agent["permission"].get("skill"), "deny")
             self.assertEqual(loom_agent["permission"]["task"], "deny")
             self.assertEqual(loom_agent["permission"]["edit"], "deny")
             self.assertEqual(loom_agent["permission"]["bash"], "deny")

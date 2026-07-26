@@ -1732,8 +1732,15 @@ def oc_build_recipe_agents(model_ref, recipe, caps, repetition_detection=None):
             "permission": {"read": "deny", "grep": "deny", "glob": "deny", "list": "deny",
                            "edit": "deny", "bash": "deny",
                            "webfetch": "deny", "websearch": "deny",
-                           "task": "deny"},
-            "tools": {"loom": True},
+                           "task": "deny",
+                           # "skill" deny does double duty: hides the skill tool AND
+                           # removes the <available_skills> block from the system
+                           # prompt (Skill.available filters on this permission).
+                           # Without it the personality-creator skill advertises
+                           # "use whenever editing dialogue lines" -- a direct
+                           # invitation for intake to wander (observed 2026-07-26).
+                           "skill": "deny"},
+            "tools": {"loom": True, "skill": False, "todowrite": False},
         }
         if "temperature" in rs: looma["temperature"] = rs["temperature"]
         if "top_p" in rs: looma["top_p"] = rs["top_p"]
@@ -1824,6 +1831,17 @@ const SCRIPT = {json.dumps(script)}
 
 export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
   return {{
+    // The loom agent is intake-and-relay: it never touches the workspace, so the
+    // project AGENTS.md (repo layout, Lua gotchas) is pure context waste for it --
+    // and skill advertisements there have derailed intake. Strip instruction-file
+    // blocks from ITS system prompt only; workers keep theirs. The loom agent is
+    // identified by its own prompt marker, so other agents are untouched.
+    "experimental.chat.system.transform": async (_input, output) => {{
+      const sys = output.system || []
+      const isLoom = sys.some((s) => typeof s === "string" && s.includes("You are `loom`, the pipeline lead"))
+      if (!isLoom) return
+      output.system = sys.filter((s) => !(typeof s === "string" && s.startsWith("Instructions from: ")))
+    }},
     tool: {{
       loom: tool({{
         description:
@@ -2863,6 +2881,10 @@ def oc_sync(args, sampling, detected_installed):
     # sync) would only hide genuinely optional skills. Scrub it even when no roster
     # was rebuilt this run.
     for _name, _a in (cfg.get("agent") or {}).items():
+        # "loom" is exempt: its permission.skill = "deny" is deliberate -- it hides
+        # the skill tool AND strips <available_skills> from its system prompt.
+        if _name == "loom":
+            continue
         if _name in MANAGED_AGENTS and isinstance(_a, dict):
             _perm = _a.get("permission")
             if isinstance(_perm, dict):
