@@ -1854,7 +1854,7 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
     // identified by its own prompt marker, so other agents are untouched.
     "experimental.chat.system.transform": async (_input, output) => {{
       const sys = output.system || []
-      const isLoom = sys.some((s) => typeof s === "string" && s.includes("You are `loom`, the pipeline lead"))
+      const isLoom = sys.some((s) => typeof s === "string" && s.includes("You are `loom`, a ROUTER"))
       if (!isLoom) return
       output.system = sys.filter((s) => !(typeof s === "string" && s.startsWith("Instructions from: ")))
     }},
