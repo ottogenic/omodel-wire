@@ -880,7 +880,10 @@ class LoomCase(unittest.TestCase):
         lm.run()
         job = self.led.job(job_id)
         self.assertEqual(job["status"], "paused")
-        self.assertIn("--attach", job["report"])
+        self.assertIn("resumable", job["report"])
+        # Reports are model-facing: they must never contain a runnable command.
+        self.assertNotIn("omw loom", job["report"])
+        self.assertNotIn("--attach", job["report"])
 
     def test_run_returns_nonzero_when_not_done(self):
         blocked = reply("BLOCKED", "stuck", "no")
