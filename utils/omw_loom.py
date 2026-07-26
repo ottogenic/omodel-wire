@@ -740,13 +740,14 @@ class Loom:
         attempts = (task["attempts"] if task else 0) + 1
         self.led.upsert_task(self.job_id, role, purpose, attempts=attempts)
         if attempts >= self.cfg["max_attempts"] + 1:
+            # Reports are model-facing: state facts, never runnable commands.
             self.led.update_job(self.job_id, status="paused",
                                 report=f"paused: {role} [{purpose}] stuck after "
                                        f"{attempts - 1} attempts ({why}). "
-                                       f"Resume with: omw loom resume --job {self.job_id} "
-                                       f"--note '<your guidance>'")
-            self.emit("paused", f"{role} [{purpose}] stuck ({why}). "
-                                f"Resume with: omw loom resume --job {self.job_id}",
+                                       f"A human must review job {self.job_id} and "
+                                       f"decide how to proceed; do not resume it yourself.")
+            self.emit("paused", f"{role} [{purpose}] stuck ({why}); "
+                                f"job {self.job_id} needs a human decision",
                       title=f"paused: {role} needs a human")
             raise LoomPaused(why)
         if attempts <= 1:
@@ -831,9 +832,8 @@ class Loom:
 
     def _pause_unreachable(self, e):
         """Server restart is routine (TUI closed, new port) -- pause, don't error."""
-        msg = (f"paused: the OpenCode server went away ({e}). Restart opencode, then "
-               f"resume with: omw loom resume --job {self.job_id} "
-               f"--attach http://localhost:<port>")
+        msg = (f"paused: the OpenCode server went away ({e}). Job {self.job_id} is "
+               f"resumable once a human restarts the server.")
         self.led.update_job(self.job_id, status="paused", report=msg)
         self.emit("paused", msg)
 
@@ -874,8 +874,8 @@ class Loom:
             if job["status"] == "running":
                 self.led.update_job(self.job_id, status="paused",
                                     report="paused by operator")
-            self.emit("paused", f"job {self.job_id} paused; resume with: "
-                                f"omw loom resume --job {self.job_id}")
+            self.emit("paused", f"job {self.job_id} paused by operator; "
+                                f"resumable when a human decides")
         except LoomUnreachable as e:
             self._pause_unreachable(e)
         except LoomServerError as e:
