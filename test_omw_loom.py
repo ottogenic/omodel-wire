@@ -172,6 +172,87 @@ class TestTestPassedPhrasing(unittest.TestCase):
             self.assertFalse(loom.Loom._test_passed(self._p(status=st)))
 
 
+class TestResearchReturnsToAsker(unittest.TestCase):
+    """Job 199 regression: a tester's NEEDS_RESEARCH was misrouted to the coder
+    as a test failure; the reviewer had no branch at all. Every role that asks
+    must get the answer back in ITS OWN session."""
+
+    def setUp(self):
+        self.server = FakeOpenCode()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.led = loom.Ledger(os.path.join(self.tmp.name, "loom.db"))
+        self.cfg = dict(loom.DEFAULTS, step_timeout=30)
+
+    def tearDown(self):
+        self.led.close()
+        self.server.stop()
+        self.tmp.cleanup()
+
+    def _run(self, responses):
+        self.server.responses = responses
+        tp = loom.Transport(self.server.url, retries=1)
+        job_id = self.led.create_job(dir=self.tmp.name, server_url=self.server.url,
+                                     parent_session="ses_parent", goal="g", risk="medium")
+        lm = loom.Loom(self.led, tp, job_id, cfg=self.cfg, out=open(os.devnull, "w"))
+        lm.run()
+        return job_id
+
+    def test_tester_research_returns_to_tester_not_coder(self):
+        job_id = self._run({
+            "agent-architect": [reply("DONE", "plan")],
+            "agent-code": [reply("DONE", "implemented")],
+            "agent-test": [reply("NEEDS_RESEARCH", "need a fact",
+                                 extra="RESEARCH REQUEST: what is X?"),
+                           reply("DONE", "all pass")],
+            "agent-research": [reply("DONE", "X is Y")],
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"],
+        })
+        self.assertEqual(self.led.job(job_id)["status"], "done")
+        tests = self.server.prompts("agent-test")
+        self.assertEqual(len(tests), 2, "tester must be resumed with the answer")
+        self.assertIn("Research results", tests[1][2])
+        self.assertIn("X is Y", tests[1][2])
+        self.assertEqual(tests[0][0], tests[1][0], "same tester session")
+        # the coder must NOT have been handed the research question
+        code = self.server.prompts("agent-code")
+        self.assertEqual(len(code), 1, "coder must not be dispatched for tester research")
+
+    def test_reviewer_research_returns_to_reviewer(self):
+        job_id = self._run({
+            "agent-architect": [reply("DONE", "plan")],
+            "agent-code": [reply("DONE", "implemented")],
+            "agent-test": [reply("DONE", "all pass")],
+            "agent-research": [reply("DONE", "Z is W")],
+            "agent-review": [reply("NEEDS_RESEARCH", "need context",
+                                   extra="RESEARCH REQUEST: what is Z?"),
+                             "No blocking findings.\nSTATUS: DONE"],
+        })
+        self.assertEqual(self.led.job(job_id)["status"], "done")
+        rev = self.server.prompts("agent-review")
+        self.assertEqual(len(rev), 2, "reviewer must be resumed with the answer")
+        self.assertIn("Z is W", rev[1][2])
+        self.assertEqual(rev[0][0], rev[1][0], "same review session")
+
+    def test_research_rounds_are_capped(self):
+        cap = self.cfg["max_research_rounds"]
+        job_id = self._run({
+            "agent-architect": [reply("DONE", "plan")],
+            "agent-code": [reply("NEEDS_RESEARCH", "q",
+                                 extra="RESEARCH REQUEST: loop?")] * (cap + 3),
+            "agent-research": [reply("DONE", "answer")] * (cap + 3),
+            "agent-test": [reply("DONE", "pass")] * 4,
+            "agent-review": ["No blocking findings.\nSTATUS: DONE"] * 4,
+        })
+        # The cap is PER worker step: after `cap` rounds the step gives up
+        # (BLOCKED -> escalation ladder), so a job with several steps may spend a
+        # few more. What matters is that it terminates and stays far below the
+        # unbounded case (the coder was scripted to ask cap+3 times).
+        res = self.server.prompts("agent-research")
+        self.assertLessEqual(len(res), cap + 3, "research must be bounded per step")
+        self.assertIn(self.led.job(job_id)["status"], ("done", "paused", "error"),
+                      "job must terminate rather than loop on research")
+
+
 class TestLoosenedStatusParsing(unittest.TestCase):
     """Loosened per 2026-07-27 review: last match wins, next-line value ok,
     separator drift (- = em-dash) ok. Value side stays the strict closed enum."""

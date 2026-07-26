@@ -55,6 +55,7 @@ DEFAULTS = {
     "max_test_cycles": 3,       # test-fail -> fix -> retest loops before escalating
     "max_fix_findings": 10,     # review findings fixed before pausing (runaway guard)
     "research_parallel": 4,     # concurrent agent-research sessions in a fan-out
+    "max_research_rounds": 3,   # NEEDS_RESEARCH -> answer -> resume, per worker step
     "nudge_malformed": True,    # one reprompt when a reply is missing STATUS:
 }
 
@@ -947,15 +948,8 @@ class Loom:
                   "exclusions, and verification commands.")
         parsed, raw = self._dispatch("agent-architect", "plan", prompt)
         rounds = 0
-        while parsed["status"] == "NEEDS_RESEARCH" and rounds < 3:
-            self._check_stop()
-            rounds += 1
-            qs = parsed["research"] or ["the facts you listed as missing"]
-            self.emit("research", f"fan-out: {len(qs)} question(s)")
-            answers = self._research(qs)
-            parsed, raw = self._dispatch(
-                "agent-architect", "plan",
-                f"Research results:\n\n{answers}\n\nNow finish the plan.", resume=True)
+        if parsed["status"] == "NEEDS_RESEARCH":
+            parsed, raw = self._serve_research("agent-architect", "plan", parsed, raw)
         if parsed["status"] != "DONE":
             parsed, raw = self._escalate("agent-architect", "plan",
                                          f"Plan this work.\n\n{self._packet()}",
@@ -967,6 +961,32 @@ class Loom:
         # RESULT summary -- job 60 lost a 3.5k-char plan to a 624-char synopsis here.
         self.led.update_job(self.job_id, plan=strip_contract_tail(raw) or parsed["result"])
         self.emit("plan", "plan captured")
+
+    def _serve_research(self, role, purpose, parsed, raw):
+        """Any worker may return NEEDS_RESEARCH (all five contracts offer it).
+        Answer the questions, then resume THAT worker's own session with the
+        answers -- never route them to a different role. Bounded rounds; the
+        caller decides what a still-unresolved status means for its phase.
+
+        Was previously implemented only for agent-architect and agent-code: a
+        tester's question was misread as a test failure and handed to the coder
+        (job 199), and the reviewer had no branch at all.
+        """
+        rounds = 0
+        while parsed["status"] == "NEEDS_RESEARCH" and rounds < self.cfg["max_research_rounds"]:
+            self._check_stop()
+            rounds += 1
+            qs = parsed["research"] or ["the facts you listed as missing"]
+            self.emit("research", f"{role} [{purpose}]: {len(qs)} question(s)")
+            answers = self._research(qs)
+            parsed, raw = self._dispatch(
+                role, purpose,
+                f"Research results:\n\n{answers}\n\nContinue with your task.",
+                resume=True)
+        if parsed["status"] == "NEEDS_RESEARCH":
+            self.emit("research", f"{role} [{purpose}]: research cap reached "
+                                  f"({self.cfg['max_research_rounds']} rounds)")
+        return parsed, raw
 
     def _code_step(self, purpose, prompt, resume=False):
         """agent-code with the CONTINUE / NEEDS_RESEARCH / BLOCKED loop handled."""
@@ -989,11 +1009,9 @@ class Loom:
                 parsed, raw = self._dispatch("agent-code", purpose,
                                              "Continue with your plan.", resume=True)
             elif parsed["status"] == "NEEDS_RESEARCH":
-                qs = parsed["research"] or ["your stated question"]
-                answers = self._research(qs)
-                parsed, raw = self._dispatch("agent-code", purpose,
-                                             f"Research results:\n\n{answers}\n\nContinue.",
-                                             resume=True)
+                parsed, raw = self._serve_research("agent-code", purpose, parsed, raw)
+                if parsed["status"] == "NEEDS_RESEARCH":
+                    parsed = dict(parsed, status="BLOCKED")
             elif parsed["status"] == "BLOCKED":
                 diag_prompt = (f"agent-code is BLOCKED on this feature.\n\n{self._packet()}\n\n"
                                f"BLOCKED REPORT:\nRESULT: {parsed['result']}\n"
@@ -1032,6 +1050,7 @@ class Loom:
                 f"IMPLEMENTATION SUMMARY (from agent-code):\n{result}\n\n"
                 "Run the broad checks and report exact PASS/FAIL evidence.")
         parsed, raw = self._dispatch("agent-test", "verify", base)
+        parsed, raw = self._serve_research("agent-test", "verify", parsed, raw)
         cycles = 0
         while cycles < self.cfg["max_test_cycles"]:
             self._check_stop()
@@ -1048,6 +1067,7 @@ class Loom:
             parsed, raw = self._dispatch("agent-test", "verify",
                                          "The fix is in. Re-run the failing checks and report.",
                                          resume=True)
+            parsed, raw = self._serve_research("agent-test", "verify", parsed, raw)
         self._escalate("agent-code", "implement", self._packet(),
                        f"{cycles} test cycles without a pass")
         # escalation replaced the coder; give test one final round before pausing next loop
@@ -1081,6 +1101,7 @@ class Loom:
                   "'FINDING <n>: <path:line> <description> | PASS CONDITION: <condition>'. "
                   "If there are none, say 'No blocking findings.'")
         parsed, raw = self._dispatch("agent-review", "review", packet)
+        parsed, raw = self._serve_research("agent-review", "review", parsed, raw)
         fixed = 0
         # STRICTLY one finding at a time: fix the first pending finding, re-test,
         # re-review (same review session), and only then look at what remains --
