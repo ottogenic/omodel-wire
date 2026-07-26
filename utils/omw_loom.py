@@ -1089,8 +1089,12 @@ class Loom:
                   f"GOAL: {self.led.job(self.job_id)['goal']}\n\n"
                   f"REVIEW: {getattr(self, '_final_review', 'clean')}\n\n"
                   "WORKERS:\n" + "\n".join(lines) +
-                  "\n\nPR: not created (run `omw loom pr --job %d` after approval)."
-                  % self.job_id)
+                  # Do NOT hand the orchestrator a runnable command here: local models
+                  # read it as a next step, start an unapproved PR flow, and its git
+                  # operations can reset the working tree (observed job 101 -> 103).
+                  "\n\nPR: not created. That is a SEPARATE, user-approved step -- do not "
+                  "start it now. Relay this report and stop; if the user later asks for a "
+                  "PR, this is job %d." % self.job_id)
         self.led.update_job(self.job_id, status="done", phase="done", report=report)
         self.emit("done", "job complete", title="done")
         if self.json_events:
