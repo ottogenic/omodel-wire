@@ -109,10 +109,15 @@ def loom_config(wire_settings=None):
 # reply and inflated every malformed count we measured. Tolerate the wrappers.
 _EM = r"[*_`~#]{0,3}"                    # emphasis/heading markers around a label
 _LEAD = r"^[ \t]*[-+>]?[ \t]*" + _EM + r"[ \t]*"   # line start, optional bullet/quote
-_LABEL_END = _EM + r"[ \t]*:[ \t]*" + _EM + r"[ \t]*"  # ':' with emphasis either side
+# ':' is canonical, but models drift to '-' / '=' / em-dash under pressure; the
+# value side stays a closed enum, so the separator carries no ambiguity.
+_SEP = r"[ \t]*(?::|-|=|—)[ \t]*"
+_LABEL_END = _EM + _SEP + _EM + r"[ \t]*"
 
 _STATUS_RE = re.compile(
-    _LEAD + r"STATUS[ \t]*" + _LABEL_END +
+    # \s*? after the label separator: the enum token may sit on the NEXT line
+    # ("STATUS:\nDONE"). Still anchored: only whitespace may intervene.
+    _LEAD + r"STATUS" + _LABEL_END + r"\s{0,8}" +
     r"(DONE|CONTINUE|NEEDS_RESEARCH|BLOCKED)[ \t]*" + _EM + r"[ \t]*$",
     re.MULTILINE | re.IGNORECASE)
 _SECTION_RE = re.compile(_LEAD + r"(RESULT|EVIDENCE)[ \t]*" + _LABEL_END, re.MULTILINE)
@@ -139,7 +144,15 @@ def parse_contract(text):
     """-> dict(status, result, evidence, research, findings, clean).
     status is None when the reply is malformed (no STATUS line)."""
     text = text or ""
-    m = _STATUS_RE.search(text)
+
+    def last_status(t):
+        # LAST match wins: the contract says the block ENDS the reply, and a model
+        # quoting the contract earlier ("the format is `STATUS: DONE`") must not
+        # have that quote read as its verdict.
+        ms = list(_STATUS_RE.finditer(t))
+        return ms[-1] if ms else None
+
+    m = last_status(text)
     if m is None and _INLINE_LABEL_RE.search(text):
         # Workers sometimes emit the whole contract as ONE paragraph (observed:
         # job 106's fix reply, 909 chars, zero newlines, ending "... STATUS: DONE").
@@ -147,9 +160,9 @@ def parse_contract(text):
         # each label and retry; only runs when the strict parse already failed, so
         # it can never downgrade a well-formed reply.
         normalized = _INLINE_LABEL_RE.sub(lambda mo: "\n" + mo.group(1), text)
-        if _STATUS_RE.search(normalized):
+        if last_status(normalized):
             text = normalized
-            m = _STATUS_RE.search(text)
+            m = last_status(text)
     status = m.group(1).upper() if m else None
 
     def section(name):

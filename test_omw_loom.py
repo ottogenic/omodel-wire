@@ -172,6 +172,32 @@ class TestTestPassedPhrasing(unittest.TestCase):
             self.assertFalse(loom.Loom._test_passed(self._p(status=st)))
 
 
+class TestLoosenedStatusParsing(unittest.TestCase):
+    """Loosened per 2026-07-27 review: last match wins, next-line value ok,
+    separator drift (- = em-dash) ok. Value side stays the strict closed enum."""
+
+    def test_last_match_wins_over_contract_quote(self):
+        p = loom.parse_contract(
+            "The contract asks me to end with STATUS: DONE as a line.\n"
+            "I could not finish.\n\nRESULT: partial\nEVIDENCE: tried x\n"
+            "STATUS: BLOCKED")
+        self.assertEqual(p["status"], "BLOCKED")
+
+    def test_value_on_next_line(self):
+        p = loom.parse_contract("RESULT: did it\nEVIDENCE: ran checks\nSTATUS:\nDONE")
+        self.assertEqual(p["status"], "DONE")
+
+    def test_separator_variants(self):
+        for sep in (" - ", " = ", " \u2014 "):
+            p = loom.parse_contract(
+                f"RESULT{sep}did it\nEVIDENCE{sep}ran checks\nSTATUS{sep}DONE")
+            self.assertEqual(p["status"], "DONE", f"separator {sep!r}")
+
+    def test_prose_status_still_malformed(self):
+        for t in ("my status is done", "STATUS DONE", "the status: finished"):
+            self.assertIsNone(loom.parse_contract(t)["status"], t)
+
+
 class TestMarkdownWrappedContract(unittest.TestCase):
     """Workers write correct contracts but style them as markdown. Real regression:
     job 100's coder was nudged solely because it wrote `**STATUS: DONE**`."""
