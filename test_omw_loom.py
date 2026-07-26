@@ -192,6 +192,16 @@ class TestMarkdownWrappedContract(unittest.TestCase):
             "Here is my work.\n\n**RESULT:** x\n**STATUS: DONE**")
         self.assertEqual(body, "Here is my work.")
 
+    def test_single_paragraph_contract_parses(self):
+        # Job 106 regression: 909 chars, zero newlines, valid contract inline.
+        text = ("RESULT: Fixed the personality file with 4 lines per zone. "
+                "EVIDENCE: git diff --check PASS, luacheck PASS (0 warnings), "
+                "structural validation PASS. STATUS: DONE")
+        p = loom.parse_contract(text)
+        self.assertEqual(p["status"], "DONE")
+        self.assertIn("Fixed the personality", p["result"])
+        self.assertIn("luacheck PASS", p["evidence"])
+
     def test_bold_findings_parse(self):
         p = loom.parse_contract(
             "**FINDING 1:** foo.lua:10 bad thing | PASS CONDITION: fix it\n"

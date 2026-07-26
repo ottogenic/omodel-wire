@@ -118,6 +118,10 @@ _STATUS_RE = re.compile(
 _SECTION_RE = re.compile(_LEAD + r"(RESULT|EVIDENCE)[ \t]*" + _LABEL_END, re.MULTILINE)
 _RESULT_LINE_RE = re.compile(_LEAD + r"RESULT[ \t]*" + _EM + r"[ \t]*:", re.MULTILINE)
 _RESEARCH_RE = re.compile(r"RESEARCH REQUEST\s*:?\s*(.*)", re.IGNORECASE)
+# Contract labels appearing mid-line (single-paragraph replies). Only used as a
+# fallback normalizer in parse_contract when the strict line-anchored parse fails.
+_INLINE_LABEL_RE = re.compile(
+    r"[ \t]+((?:RESULT|EVIDENCE|STATUS|FINDING[ \t]+\d+)[ \t]*:)")
 _FINDING_RE = re.compile(
     _LEAD + r"FINDING[ \t]+(\d+)[ \t]*" + _LABEL_END + r"(.+?)"
     r"(?=" + _LEAD + r"FINDING[ \t]+\d+[ \t]*" + _EM + r"[ \t]*:|\Z)",
@@ -136,6 +140,16 @@ def parse_contract(text):
     status is None when the reply is malformed (no STATUS line)."""
     text = text or ""
     m = _STATUS_RE.search(text)
+    if m is None and _INLINE_LABEL_RE.search(text):
+        # Workers sometimes emit the whole contract as ONE paragraph (observed:
+        # job 106's fix reply, 909 chars, zero newlines, ending "... STATUS: DONE").
+        # Line-anchored regexes can't see mid-line labels. Break the paragraph at
+        # each label and retry; only runs when the strict parse already failed, so
+        # it can never downgrade a well-formed reply.
+        normalized = _INLINE_LABEL_RE.sub(lambda mo: "\n" + mo.group(1), text)
+        if _STATUS_RE.search(normalized):
+            text = normalized
+            m = _STATUS_RE.search(text)
     status = m.group(1).upper() if m else None
 
     def section(name):
