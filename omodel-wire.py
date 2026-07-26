@@ -1853,10 +1853,25 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
     // blocks from ITS system prompt only; workers keep theirs. The loom agent is
     // identified by its own prompt marker, so other agents are untouched.
     "experimental.chat.system.transform": async (_input, output) => {{
+      // NOTE: by the time this hook fires, opencode has already JOINED the system
+      // array into one string -- filtering array entries does nothing. Instead,
+      // parse each "Instructions from: <path>" header, read that file, and remove
+      // the exact block. Precise: only bytes that came from instruction files go.
+      const fs = await import("node:fs")
       const sys = output.system || []
-      const isLoom = sys.some((s) => typeof s === "string" && s.includes("You are `loom`, a ROUTER"))
-      if (!isLoom) return
-      output.system = sys.filter((s) => !(typeof s === "string" && s.startsWith("Instructions from: ")))
+      if (!sys.some((s) => typeof s === "string" && s.includes("You are `loom`, a ROUTER"))) return
+      output.system = sys.map((s) => {{
+        if (typeof s !== "string" || !s.includes("Instructions from: ")) return s
+        for (const m of s.matchAll(/Instructions from: ([^
+]+)
+/g)) {{
+          try {{
+            const content = fs.readFileSync(m[1], "utf8")
+            s = s.replace(m[0] + content, "").replace(m[0] + content.trimEnd(), "")
+          }} catch {{}}
+        }}
+        return s
+      }})
     }},
     tool: {{
       loom: tool({{
