@@ -711,11 +711,16 @@ class TestSyncEndToEnd(unittest.TestCase):
                                 f"{agent_name} prompt must open with its identity")
                 self.assertNotIn("load your role skill", body)
                 self.assertNotIn("-override`", body)
-                self.assertIn("end with a plain-text message", body)
                 if agent_name == "loom":
-                    self.assertIn("calling the `loom`", body)
-                    self.assertIn("relaying the loom report", body)
+                    # Router prompt: verbatim relay, one call per message, and the
+                    # standing prohibition -- this file is loom's ENTIRE operating
+                    # method (it cannot load skills).
+                    self.assertIn("ROUTER", body)
+                    self.assertIn("VERBATIM", body)
+                    self.assertIn("EXACTLY ONE loom tool", body)
+                    self.assertIn("NEVER ALLOWED TO FIX PROBLEMS", body)
                 else:
+                    self.assertIn("end with a plain-text message", body)
                     self.assertIn("Your dispatch message carries your role instructions",
                                   body)
                     self.assertIn("Return Contract", body)
