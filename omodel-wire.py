@@ -818,6 +818,10 @@ When the user asks what happened, why a run failed, or where a job stands:
   time instead.
 - Never create a PR without explicit user approval. On approval, call the `loom`
   tool with `action: "pr"` and the `job` id from the report.
+- When the report arrives, relaying it ENDS YOUR TURN. Do not call the `loom` tool
+  again -- no `pr`, no `status`, no re-running the job -- unless the user asks in a
+  new message. If the report looks incomplete or the working tree looks wrong, say so
+  in your reply; never try to fix it by re-running the pipeline.
 - You cannot inspect the workspace. If the user asks a code question, suggest the
   `research` agent; your only job is running the pipeline.
 """
