@@ -153,26 +153,23 @@ class FakeOpenCode:
 
 
 class TestTestPassedPhrasing(unittest.TestCase):
-    """Job 161 regression: '0 failed' is success phrasing, not failure."""
+    """The verdict is the contracted STATUS token alone. Prose is NEVER
+    inspected: substring heuristics manufactured failure spirals (job 161)."""
 
     def _p(self, result="ok", evidence="", status="DONE"):
         return {"result": result, "evidence": evidence, "status": status}
 
-    def test_zero_failed_passes(self):
-        p = self._p(evidence="7 tests, 7 passed, 0 failed. RESULT: PASS")
-        self.assertTrue(loom.Loom._test_passed(p))
-
-    def test_zero_failures_passes(self):
-        p = self._p(evidence="luacheck: 0 warnings; suite: 0 failures")
-        self.assertTrue(loom.Loom._test_passed(p))
-
-    def test_real_failures_fail(self):
-        self.assertFalse(loom.Loom._test_passed(self._p(evidence="2 tests failed")))
-        self.assertFalse(loom.Loom._test_passed(self._p(evidence="RESULT: FAIL")))
+    def test_done_passes_regardless_of_phrasing(self):
+        for ev in ("7 tests, 7 passed, 0 failed. RESULT: PASS",
+                   "no failures detected",
+                   "the previously failing test now passes",
+                   "2 tests failed"):
+            self.assertTrue(loom.Loom._test_passed(self._p(evidence=ev)),
+                            f"prose must not affect the verdict: {ev!r}")
 
     def test_non_done_fails(self):
-        p = self._p(evidence="all green", status="BLOCKED")
-        self.assertFalse(loom.Loom._test_passed(p))
+        for st in ("BLOCKED", "CONTINUE", "NEEDS_RESEARCH", None):
+            self.assertFalse(loom.Loom._test_passed(self._p(status=st)))
 
 
 class TestMarkdownWrappedContract(unittest.TestCase):
@@ -459,7 +456,7 @@ class LoomCase(unittest.TestCase):
         self.server.responses = {
             "agent-code": [reply("DONE", "implemented"),
                            reply("DONE", "fixed the assert")],
-            "agent-test": [reply("DONE", "1 failure", "FAIL test_x: boom"),
+            "agent-test": [reply("BLOCKED", "1 failure", "FAIL test_x: boom"),
                            reply("DONE", "all pass", "34/34 PASS")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }
@@ -575,7 +572,7 @@ class LoomCase(unittest.TestCase):
         self.server.responses = {
             "agent-code": [reply("DONE", "implemented"),
                            reply("DONE", "fixed the assert")],
-            "agent-test": [reply("DONE", "1 failure", "FAIL test_x: boom"),
+            "agent-test": [reply("BLOCKED", "1 failure", "FAIL test_x: boom"),
                            reply("DONE", "all pass", "34/34 PASS")],
             "agent-review": ["No blocking findings.\nSTATUS: DONE"],
         }

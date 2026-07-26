@@ -1049,13 +1049,14 @@ class Loom:
 
     @staticmethod
     def _test_passed(parsed):
-        # "0 failed" / "0 failures" / "0 tests failed" are SUCCESS phrasing --
-        # naive substring matching spiraled passing runs into fix loops (job 161:
-        # tester quoted the harness line "7 tests, 7 passed, 0 failed" and got
-        # three testfail cycles + escalation + pause for it).
-        blob = f"{parsed['result']} {parsed['evidence']}".upper()
-        blob = re.sub(r"\b0\s+(?:TESTS?\s+)?FAIL(?:ED|URES?)?\b", "", blob)
-        return "FAIL" not in blob and parsed["status"] == "DONE"
+        # Contracted tokens ONLY. The tester signals failing checks with
+        # STATUS: BLOCKED (observed consistently: jobs 138, 161); prose is never
+        # inspected -- a substring heuristic here manufactured failure spirals
+        # (job 161: "0 failed" read as FAIL). A tester that falsely reports DONE
+        # is caught downstream by review, which receives the test evidence
+        # verbatim (proven: job 138's reviewer caught harness tampering that the
+        # test phase had passed).
+        return parsed["status"] == "DONE"
 
     def _phase_review(self):
         self.emit("phase", "review: agent-review", title="reviewing...")
