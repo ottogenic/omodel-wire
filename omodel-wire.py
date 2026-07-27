@@ -4808,6 +4808,10 @@ def _build_parser():
     pc.add_argument("--force", action="store_true",
                     help="run even while an opencode process is alive")
     pc.add_argument("--db", help="opencode.db path (default: the standard one)")
+    pc.add_argument("--loom-db", help="loom.db path (default: the standard one)")
+    pc.add_argument("--keep-ledger", action="store_true",
+                    help="keep ALL loom jobs, even ones whose sessions were "
+                         "deleted (default: prune them to match)")
     pc.set_defaults(func=cmd_cleanup)
 
     return ap
@@ -5135,6 +5139,47 @@ def _opencode_db_path():
     return os.path.expanduser("~/.local/share/opencode/opencode.db")
 
 
+def _loom_db_path():
+    return os.path.expanduser("~/.local/share/otools/loom.db")
+
+
+def _prune_loom_jobs(loom_db, kept_sessions, dry_run=False):
+    """Drop loom jobs whose OpenCode sessions are all gone.
+
+    Returns (deleted_jobs, total_jobs). A job survives iff its parent_session
+    or any of its task sessions is still in `kept_sessions`. loom.db has no
+    foreign keys, so tasks/events/findings/notes are deleted explicitly."""
+    import sqlite3
+
+    if not os.path.exists(loom_db):
+        return (0, 0)
+    con = sqlite3.connect(loom_db)
+    try:
+        total, = con.execute("SELECT count(*) FROM jobs").fetchone()
+        alive = set(kept_sessions)
+        doomed = []
+        for job_id, parent in con.execute(
+                "SELECT id, parent_session FROM jobs"):
+            sessions = {parent} if parent else set()
+            sessions |= {r[0] for r in con.execute(
+                "SELECT session_id FROM tasks WHERE job_id=? "
+                "AND session_id IS NOT NULL", (job_id,))}
+            if not (sessions & alive):
+                doomed.append(job_id)
+        if dry_run or not doomed:
+            return (len(doomed), total)
+        marks = ",".join("?" * len(doomed))
+        for table in ("tasks", "events", "findings", "notes"):
+            con.execute(f"DELETE FROM {table} WHERE job_id IN ({marks})", doomed)
+        con.execute(f"DELETE FROM jobs WHERE id IN ({marks})", doomed)
+        con.commit()
+        con.execute("VACUUM")
+        con.commit()
+        return (len(doomed), total)
+    finally:
+        con.close()
+
+
 def _opencode_running():
     try:
         out = subprocess.run(["pgrep", "-x", "opencode"], capture_output=True)
@@ -5144,17 +5189,23 @@ def _opencode_running():
 
 
 def cmd_cleanup(args):
-    """Delete old OpenCode sessions. --keep N retains the newest N root
-    sessions (each with ALL its worker/child sessions); default 0 deletes
-    everything. FK cascade removes messages, parts, and session_* aux rows;
-    VACUUM reclaims the disk afterwards."""
+    """Delete old OpenCode sessions AND the loom jobs that lived in them.
+
+    --keep N retains the newest N root sessions (each with ALL its worker/child
+    sessions); default 0 deletes everything. FK cascade removes messages,
+    parts, and session_* aux rows; VACUUM reclaims the disk afterwards. Loom
+    jobs whose sessions are all gone are pruned too (their transcripts no
+    longer exist, so session-review could not read them) -- pass --keep-ledger
+    to retain the ledger regardless."""
     import sqlite3
 
     db = getattr(args, "db", None) or _opencode_db_path()
     if not os.path.exists(db):
         print(f"cleanup: no OpenCode db at {db}")
         return
-    if not getattr(args, "force", False) and _opencode_running():
+    # A dry run writes nothing, so the live-process guard does not apply to it.
+    if (not getattr(args, "dry_run", False)
+            and not getattr(args, "force", False) and _opencode_running()):
         print("cleanup: an opencode process is running -- close it first "
               "(or pass --force if you are sure nothing is mid-write).")
         raise SystemExit(2)
@@ -5183,6 +5234,12 @@ def cmd_cleanup(args):
             print(f"cleanup (dry run): would delete {total - len(kept)} of "
                   f"{total} sessions, keeping {len(keep_roots)} root(s) "
                   f"({len(kept)} sessions incl. workers).")
+            if not getattr(args, "keep_ledger", False):
+                jd, jt = _prune_loom_jobs(
+                    getattr(args, "loom_db", None) or _loom_db_path(),
+                    kept, dry_run=True)
+                print(f"cleanup (dry run): would delete {jd} of {jt} loom jobs "
+                      "(and their tasks/events/findings/notes).")
             return
         if kept:
             marks = ",".join("?" * len(kept))
@@ -5200,6 +5257,11 @@ def cmd_cleanup(args):
     print(f"cleanup: deleted {deleted} of {total} sessions "
           f"(kept {len(keep_roots)} root(s), {len(kept)} total incl. workers); "
           f"db {before / 1e6:.0f} MB -> {after / 1e6:.0f} MB")
+    if not getattr(args, "keep_ledger", False):
+        jd, jt = _prune_loom_jobs(
+            getattr(args, "loom_db", None) or _loom_db_path(), kept)
+        print(f"cleanup: deleted {jd} of {jt} loom jobs whose sessions are gone "
+              "(tasks/events/findings/notes with them)")
 
 
 def main(argv=None):
