@@ -797,7 +797,7 @@ class TestSyncEndToEnd(unittest.TestCase):
             # a no-op for plugin tools, and GenericTool only renders state.input).
             self.assertIn('method: "PATCH"', js)
             self.assertIn("/part/", js)
-            self.assertIn("restoreCard", js)
+            self.assertIn("finishCard", js)
 
     def test_role_contracts_carry_return_contract(self):
         # Every pipeline role's contract packet (injected per dispatch) carries the
