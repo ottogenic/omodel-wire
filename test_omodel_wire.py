@@ -23,6 +23,7 @@ What it covers:
   * plugin directory -- written to plugins/ (plural, per OpenCode docs) + cleanup
 """
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -2796,6 +2797,76 @@ class TestCopilotSync(unittest.TestCase):
         self.assertEqual(m._win_path("/mnt/c/Users/Otto/.copilot/x.ps1"),
                          r"C:\Users\Otto\.copilot\x.ps1")
         self.assertEqual(m._win_path("/home/otto/.copilot/x"), "/home/otto/.copilot/x")
+
+
+
+class CleanupCase(unittest.TestCase):
+    """omw cleanup: keep-N roots with descendants; FK cascade wipes the rest."""
+
+    def _mkdb(self, path):
+        import sqlite3
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE session(id TEXT PRIMARY KEY, parent_id TEXT, "
+            "  time_updated INTEGER);"
+            "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+            "  CONSTRAINT fk FOREIGN KEY(session_id) REFERENCES session(id) "
+            "  ON DELETE CASCADE);"
+            "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL, "
+            "  CONSTRAINT fk FOREIGN KEY(message_id) REFERENCES message(id) "
+            "  ON DELETE CASCADE);")
+        # three root sessions, oldest first; each has one child + message + part
+        for n in (1, 2, 3):
+            con.execute("INSERT INTO session VALUES(?,NULL,?)", (f"root{n}", n * 100))
+            con.execute("INSERT INTO session VALUES(?,?,?)",
+                        (f"kid{n}", f"root{n}", n * 100 + 1))
+            con.execute("INSERT INTO message VALUES(?,?)", (f"m{n}", f"kid{n}"))
+            con.execute("INSERT INTO part VALUES(?,?)", (f"p{n}", f"m{n}"))
+        con.commit()
+        con.close()
+
+    def _run(self, db, **kw):
+        ns = argparse.Namespace(db=db, keep=kw.get("keep", 0),
+                                dry_run=kw.get("dry_run", False), force=True)
+        m.cmd_cleanup(ns)
+
+    def test_keep_n_retains_roots_and_descendants(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "oc.db")
+            self._mkdb(db)
+            self._run(db, keep=1)  # newest root = root3
+            con = sqlite3.connect(db)
+            ids = {r[0] for r in con.execute("SELECT id FROM session")}
+            self.assertEqual(ids, {"root3", "kid3"})
+            self.assertEqual(
+                [r[0] for r in con.execute("SELECT id FROM message")], ["m3"])
+            self.assertEqual(
+                [r[0] for r in con.execute("SELECT id FROM part")], ["p3"])
+            con.close()
+
+    def test_no_keep_deletes_everything(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "oc.db")
+            self._mkdb(db)
+            self._run(db)
+            con = sqlite3.connect(db)
+            for t in ("session", "message", "part"):
+                self.assertEqual(
+                    con.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0, t)
+            con.close()
+
+    def test_dry_run_deletes_nothing(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "oc.db")
+            self._mkdb(db)
+            self._run(db, keep=1, dry_run=True)
+            con = sqlite3.connect(db)
+            self.assertEqual(
+                con.execute("SELECT count(*) FROM session").fetchone()[0], 6)
+            con.close()
 
 
 if __name__ == "__main__":
