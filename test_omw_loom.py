@@ -25,6 +25,7 @@ _spec.loader.exec_module(loom)
 
 
 MODEL_ERROR = "___MODEL_ERROR___"   # sentinel: fake server answers with an API error
+MODEL_ERROR_TRANSIENT = "___MODEL_ERROR_502___"   # sentinel: transient provider 502
 
 
 def reply(status, result="ok", evidence="checks ran", extra="", body=""):
@@ -113,6 +114,15 @@ class FakeOpenCode:
                 with outer._lock:
                     queue = outer.responses.setdefault(agent, [])
                     text = queue.pop(0) if queue else reply("DONE", "default")
+                if text == MODEL_ERROR_TRANSIENT:
+                    self._send({"info": {"role": "assistant",
+                                         "error": {"name": "UnknownError",
+                                                   "data": {"message":
+                                                            '{"code":502,"message":"Network '
+                                                            'connection lost.","metadata":'
+                                                            '{"error_type":"provider_unavailable"}}'}}},
+                                "parts": []})
+                    return
                 if text == MODEL_ERROR:
                     self._send({"info": {"role": "assistant",
                                          "error": {"name": "APIError",
@@ -170,6 +180,57 @@ class TestTestPassedPhrasing(unittest.TestCase):
     def test_non_done_fails(self):
         for st in ("BLOCKED", "CONTINUE", "NEEDS_RESEARCH", None):
             self.assertFalse(loom.Loom._test_passed(self._p(status=st)))
+
+
+class TestTransientProviderRetry(unittest.TestCase):
+    """Jobs 211/216 regression: OpenRouter 502s killed runs instantly -- one 21
+    minutes into correct work. Transient payloads retry; config errors do not."""
+
+    TRANSIENT = [
+        '{"code":502,"message":"Network connection lost.",'
+        '"metadata":{"error_type":"provider_unavailable"}}',
+        '{"code":502,"message":"Upstream error from Phala: The upstream provider '
+        'returned an error","metadata":{"error_type":"provider_unavailable"}}',
+        "429 rate limit exceeded",
+        "The model is temporarily overloaded",
+        "upstream request timed out",
+    ]
+    PERMANENT = [
+        'The model `foo-bar` does not exist',
+        "401 invalid api key",
+        "insufficient credits for this request",
+    ]
+
+    def test_transient_payloads_detected(self):
+        for d in self.TRANSIENT:
+            self.assertTrue(loom.is_transient_provider_error(d), d[:60])
+
+    def test_config_errors_not_retried(self):
+        for d in self.PERMANENT:
+            self.assertFalse(loom.is_transient_provider_error(d), d[:60])
+
+    def test_backoff_schedule_is_light_and_bounded(self):
+        self.assertEqual(loom.PROVIDER_RETRY_DELAYS[0], 0, "first retry immediate")
+        self.assertEqual(list(loom.PROVIDER_RETRY_DELAYS), [0, 10, 30, 60])
+        self.assertLessEqual(sum(loom.PROVIDER_RETRY_DELAYS), 120,
+                             "total added wait stays bounded")
+
+    def test_prompt_retries_then_succeeds(self):
+        server = FakeOpenCode()
+        try:
+            # first attempt errors transiently, second returns a real reply
+            server.responses = {"agent-code": [MODEL_ERROR_TRANSIENT, reply("DONE", "ok")]}
+            tp = loom.Transport(server.url, retries=1)
+            sess = tp.create_session(None, "t", None)
+            orig = loom.PROVIDER_RETRY_DELAYS
+            loom.PROVIDER_RETRY_DELAYS = (0, 0, 0, 0)   # no sleeping in tests
+            try:
+                text = tp.prompt(sess["id"], "go", "agent-code")
+            finally:
+                loom.PROVIDER_RETRY_DELAYS = orig
+            self.assertIn("STATUS: DONE", text)
+        finally:
+            server.stop()
 
 
 class TestResearchReturnsToAsker(unittest.TestCase):
