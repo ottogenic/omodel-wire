@@ -1484,19 +1484,30 @@ def cmd_pr(args, wire_settings=None, default_models_path=None):
             return 2
         tp = Transport(getattr(args, "attach", None) or job["server_url"])
         loom = Loom(led, tp, args.job, cfg=loom_config(wire_settings),
-                    model_ranking=_load_ranking(default_models_path) if default_models_path else {})
+                    model_ranking=_load_ranking(default_models_path) if default_models_path else {},
+                    json_events=getattr(args, "json_events", False))
         _install_signals(loom)
+        loom.emit("phase", "pr: agent-test creates the PR", title="creating PR...")
         parsed, raw = loom._dispatch(
             "agent-test", "verify",
-            "The user approved a PR for this work. PR creation is delegated to you: create "
-            "a branch, commit the change with explicit paths, push, and open the PR with "
-            "your verification evidence in the body. Report the PR URL.", resume=True)
+            "The user approved a PR for this work. PR creation is delegated to you:\n"
+            "1. `git fetch origin` and base the branch on origin/main -- NEVER on the "
+            "current HEAD (demo/benchmark checkouts sit on old baselines; branching "
+            "there drags unrelated baseline-vs-main changes into the PR).\n"
+            "2. Carry over ONLY the files this job changed (stash/apply or checkout "
+            "the changed paths onto the new branch). If main already touched the same "
+            "region, resolve keeping this job's version.\n"
+            "3. Commit those explicit paths, push, and open the PR with your "
+            "verification evidence in the body. Verify with `gh pr diff` that the PR "
+            "contains ONLY this job's files, and report the PR URL.", resume=True)
         print(parsed["result"] or raw)
+        loom.emit("phase", "pr: agent-review reviews the PR", title="reviewing PR...")
         rparsed, rraw = loom._dispatch(
             "agent-review", "review",
             "A PR was opened for the reviewed work above. Perform PR review per your "
             "role instructions.", resume=True)
         print(rparsed["result"] or rraw)
+        loom.emit("done", "PR flow complete", title="PR complete")
         return 0
     finally:
         led.close()
@@ -1557,6 +1568,7 @@ def add_parser(sub, io_parent=None):
         px.add_argument("--db", help=argparse_suppress())
         if name == "pr":
             px.add_argument("--attach")
+            px.add_argument("--json-events", action="store_true")
 
     psay = lsub.add_parser("say", help="queue an operator note for the running job")
     psay.add_argument("text")

@@ -1979,7 +1979,8 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
             if (args.note) argv.push("--note", args.note)
           }} else {{
             if (args.job == null) return "loom: 'pr' needs the job id."
-            argv.push("pr", "--job", String(args.job), "--attach", String(serverUrl))
+            argv.push("pr", "--job", String(args.job), "--attach", String(serverUrl),
+                      "--json-events")
           }}
           // ---- live tool-card updates ------------------------------------------
           // Upstream, plugin ctx.metadata() is a silent no-op (registry.ts bridges
