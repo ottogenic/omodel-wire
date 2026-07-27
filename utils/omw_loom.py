@@ -255,11 +255,29 @@ def describe_part(part):
 # ---------------------------------------------------------------------------
 # OpenCode server transport (urllib; retries connection errors, not HTTP ones).
 # ---------------------------------------------------------------------------
+# Provider hiccups arrive as HTTP 200 with an error payload, so they bypass the
+# connection-error retry below. These are transient (the provider is briefly
+# down/overloaded) and worth retrying; config errors (bad model, auth, quota)
+# are not. Observed live: OpenRouter 502 "Network connection lost." and
+# "Upstream error from Phala", each killing a job mid-work.
+PROVIDER_RETRY_DELAYS = (0, 10, 30, 60)   # immediate, then light backoff
+_TRANSIENT_RE = re.compile(
+    r"provider_unavailable|rate.?limit|overloaded|timeout|timed out|temporarily"
+    r"|network connection lost|upstream error|\b50[234]\b|\b429\b",
+    re.IGNORECASE)
+
+
+def is_transient_provider_error(detail):
+    """True when a model-error payload looks like a passing provider failure."""
+    return bool(_TRANSIENT_RE.search(detail or ""))
+
+
 class Transport:
-    def __init__(self, base_url, timeout=30, retries=3):
+    def __init__(self, base_url, timeout=30, retries=3, on_retry=None):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
         self.retries = retries
+        self.on_retry = on_retry   # (agent, model, detail, next_delay) -> None
 
     def _call(self, method, path, body=None, timeout=None):
         url = self.base + path
@@ -294,17 +312,25 @@ class Transport:
         if model:
             prov, _, mid = model.partition("/")
             body["model"] = {"providerID": prov, "modelID": mid}
-        resp = self._call("POST", f"/session/{session_id}/message", body, timeout=timeout)
-        parts = (resp or {}).get("parts") or []
-        text = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
-        err = ((resp or {}).get("info") or {}).get("error")
-        if err and not text:
-            # A model/provider-level failure (bad model ref, auth, quota) is a
-            # configuration problem, not a malformed worker reply -- surface it.
-            detail = err.get("data", {}).get("message") or err.get("name") or str(err)
-            raise LoomServerError(f"model error on {agent}"
-                                  f"{' (' + model + ')' if model else ''}: {detail[:300]}")
-        return text
+        last_detail = ""
+        for i, delay in enumerate(PROVIDER_RETRY_DELAYS):
+            if delay:
+                time.sleep(delay)
+            resp = self._call("POST", f"/session/{session_id}/message", body, timeout=timeout)
+            parts = (resp or {}).get("parts") or []
+            text = "\n".join(p.get("text", "") for p in parts
+                             if p.get("type") == "text").strip()
+            err = ((resp or {}).get("info") or {}).get("error")
+            if not (err and not text):
+                return text
+            last_detail = err.get("data", {}).get("message") or err.get("name") or str(err)
+            # Config problems (bad model ref, auth, quota) never heal on retry.
+            if not is_transient_provider_error(last_detail):
+                break
+            if self.on_retry and i + 1 < len(PROVIDER_RETRY_DELAYS):
+                self.on_retry(agent, model, last_detail, PROVIDER_RETRY_DELAYS[i + 1])
+        raise LoomServerError(f"model error on {agent}"
+                              f"{' (' + model + ')' if model else ''}: {last_detail[:300]}")
 
     def abort(self, session_id):
         try:
