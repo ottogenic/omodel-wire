@@ -5211,6 +5211,7 @@ def cmd_cleanup(args):
         raise SystemExit(2)
 
     before = os.path.getsize(db)
+    events = 0
     con = sqlite3.connect(db)
     try:
         con.execute("PRAGMA foreign_keys=ON")
@@ -5248,12 +5249,31 @@ def cmd_cleanup(args):
         else:
             cur = con.execute("DELETE FROM session")
         deleted = cur.rowcount
+        # The event-sourcing log keys on aggregate_id == session id but has NO
+        # FK to session, so it does not cascade -- and it is the bulk of the
+        # file (285k rows / ~790 MB observed). event_sequence -> event DOES
+        # cascade, so dropping the parent rows clears both. Restrict to `ses_`
+        # aggregates: any other aggregate type opencode adds stays untouched.
+        try:
+            if kept:
+                marks = ",".join("?" * len(kept))
+                ev = con.execute(
+                    "DELETE FROM event_sequence WHERE aggregate_id LIKE 'ses!_%' "
+                    f"ESCAPE '!' AND aggregate_id NOT IN ({marks})", kept)
+            else:
+                ev = con.execute("DELETE FROM event_sequence "
+                                 "WHERE aggregate_id LIKE 'ses!_%' ESCAPE '!'")
+            events = ev.rowcount
+        except sqlite3.OperationalError:
+            events = 0  # older schema without the event tables
         con.commit()
         con.execute("VACUUM")
         con.commit()
     finally:
         con.close()
     after = os.path.getsize(db)
+    if events:
+        print(f"cleanup: cleared the event log for {events} dead session(s)")
     print(f"cleanup: deleted {deleted} of {total} sessions "
           f"(kept {len(keep_roots)} root(s), {len(kept)} total incl. workers); "
           f"db {before / 1e6:.0f} MB -> {after / 1e6:.0f} MB")

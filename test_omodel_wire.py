@@ -2814,14 +2814,26 @@ class CleanupCase(unittest.TestCase):
             "  ON DELETE CASCADE);"
             "CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL, "
             "  CONSTRAINT fk FOREIGN KEY(message_id) REFERENCES message(id) "
-            "  ON DELETE CASCADE);")
+            "  ON DELETE CASCADE);"
+            # event log: aggregate_id IS a session id, but NO fk to session
+            "CREATE TABLE event_sequence(aggregate_id TEXT PRIMARY KEY, "
+            "  seq INTEGER);"
+            "CREATE TABLE event(id TEXT PRIMARY KEY, aggregate_id TEXT NOT NULL, "
+            "  CONSTRAINT fk FOREIGN KEY(aggregate_id) "
+            "  REFERENCES event_sequence(aggregate_id) ON DELETE CASCADE);")
         # three root sessions, oldest first; each has one child + message + part
         for n in (1, 2, 3):
-            con.execute("INSERT INTO session VALUES(?,NULL,?)", (f"root{n}", n * 100))
-            con.execute("INSERT INTO session VALUES(?,?,?)",
-                        (f"kid{n}", f"root{n}", n * 100 + 1))
-            con.execute("INSERT INTO message VALUES(?,?)", (f"m{n}", f"kid{n}"))
+            root, kid = f"ses_root{n}", f"ses_kid{n}"
+            con.execute("INSERT INTO session VALUES(?,NULL,?)", (root, n * 100))
+            con.execute("INSERT INTO session VALUES(?,?,?)", (kid, root, n * 100 + 1))
+            con.execute("INSERT INTO message VALUES(?,?)", (f"m{n}", kid))
             con.execute("INSERT INTO part VALUES(?,?)", (f"p{n}", f"m{n}"))
+            for sid in (root, kid):
+                con.execute("INSERT INTO event_sequence VALUES(?,0)", (sid,))
+                con.execute("INSERT INTO event VALUES(?,?)", (f"evt_{sid}", sid))
+        # a non-session aggregate must survive any cleanup
+        con.execute("INSERT INTO event_sequence VALUES('other_agg',0)")
+        con.execute("INSERT INTO event VALUES('evt_other','other_agg')")
         con.commit()
         con.close()
 
@@ -2838,8 +2850,8 @@ class CleanupCase(unittest.TestCase):
             "CREATE TABLE findings(id INTEGER PRIMARY KEY, job_id INTEGER);"
             "CREATE TABLE notes(id INTEGER PRIMARY KEY, job_id INTEGER);")
         for n in (1, 2, 3):
-            con.execute("INSERT INTO jobs VALUES(?,?)", (n, f"root{n}"))
-            con.execute("INSERT INTO tasks VALUES(?,?,?)", (n, n, f"kid{n}"))
+            con.execute("INSERT INTO jobs VALUES(?,?)", (n, f"ses_root{n}"))
+            con.execute("INSERT INTO tasks VALUES(?,?,?)", (n, n, f"ses_kid{n}"))
             for t in ("events", "findings", "notes"):
                 con.execute(f"INSERT INTO {t} VALUES(?,?)", (n, n))
         # job 4 never recorded a session (created, never dispatched)
@@ -2862,7 +2874,12 @@ class CleanupCase(unittest.TestCase):
             self._run(db, keep=1)  # newest root = root3
             con = sqlite3.connect(db)
             ids = {r[0] for r in con.execute("SELECT id FROM session")}
-            self.assertEqual(ids, {"root3", "kid3"})
+            self.assertEqual(ids, {"ses_root3", "ses_kid3"})
+            # the KEPT session's event log must survive intact
+            aggs = {r[0] for r in con.execute(
+                "SELECT aggregate_id FROM event_sequence")}
+            self.assertEqual(aggs, {"ses_root3", "ses_kid3", "other_agg"},
+                             "kept sessions keep their events; dead ones do not")
             self.assertEqual(
                 [r[0] for r in con.execute("SELECT id FROM message")], ["m3"])
             self.assertEqual(
@@ -2879,6 +2896,24 @@ class CleanupCase(unittest.TestCase):
             for t in ("session", "message", "part"):
                 self.assertEqual(
                     con.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0, t)
+            con.close()
+
+    def test_event_log_purged_for_dead_sessions(self):
+        """The event log is the bulk of the file and does NOT cascade from
+        session -- without this, cleanup reclaims nothing (792 MB observed)."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "oc.db")
+            self._mkdb(db)
+            self._run(db)
+            con = sqlite3.connect(db)
+            aggs = {r[0] for r in con.execute(
+                "SELECT aggregate_id FROM event_sequence")}
+            self.assertEqual(aggs, {"other_agg"},
+                             "session aggregates go; other aggregates stay")
+            self.assertEqual(
+                [r[0] for r in con.execute("SELECT id FROM event")],
+                ["evt_other"], "event rows cascade from event_sequence")
             con.close()
 
     def test_loom_jobs_pruned_with_their_sessions(self):
