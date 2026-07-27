@@ -1111,15 +1111,32 @@ def oc_refresh_role_artifacts(config_path):
 # gaps, then proposes repo-local instruction updates -- REPORT-FIRST, approval-gated.
 SESSION_REVIEW_SKILL = r"""---
 name: session-review
-description: Audit recent loom pipeline sessions -- mine loom.db and opencode.db for failures, timing, and instruction gaps; propose updates to the repo's .loom/skills/*-local.md instruction files.
+description: Audit THIS session's loom run -- mine loom.db and opencode.db for the current job's failures, timing, and instruction gaps; propose updates to the repo's .loom/skills/*-local.md instruction files. Reviews other/multiple jobs only when the user names them.
 ---
 
 # Session review
 
-An audit pass over recent loom pipeline runs. You mine the deterministic ledger for what
-actually happened, diagnose why workers failed or stalled, and turn each diagnosis into a
-concrete repo-local instruction update. REPORT-FIRST: propose every change and write only
-after approval.
+An audit pass over THIS session's loom pipeline run. You mine the deterministic ledger
+for what actually happened, diagnose why workers failed or stalled, and turn each
+diagnosis into a concrete repo-local instruction update. REPORT-FIRST: propose every
+change and write only after approval.
+
+## 0. Scope: the current run only
+
+Default scope is the loom job launched from THIS conversation -- not "recent jobs" and
+never the whole ledger. Resolve the job id in this order:
+
+1. The loom tool result earlier in this conversation states it ("job <id>"). Use that.
+2. Else match the invoking session: the conductor stamps the launching session id on
+   the job row -- `SELECT id FROM jobs WHERE parent_session = '<this session id>'
+   ORDER BY id DESC LIMIT 1`.
+3. Else take the newest job for this checkout -- `SELECT id, goal FROM jobs WHERE
+   dir = '<absolute repo dir>' ORDER BY id DESC LIMIT 1` -- and SAY which job you
+   picked and why before proceeding.
+
+Audit multiple jobs or another job ONLY when the user names them or explicitly asks for
+a cross-run audit. If the pick is ambiguous (e.g. parallel runs in the same directory),
+list the candidates with timestamps and goals and ask; do not audit them all.
 
 ## 1. Read the loom ledger
 
@@ -1128,27 +1145,45 @@ never disturbed:
 
     DB="file:$HOME/.local/share/otools/loom.db?mode=ro"
 
-- Recent jobs: id, packet, risk, state, created/finished timestamps.
-- Events per job -- especially the kinds `compose`, `malformed`, `timeout`, `escalate`,
-  `blocked`, and `antispin`; each is a symptom (bad reply format, stall, hand-off up the
-  ladder, dead end, or a spin cut short).
-- Per-phase durations: diff consecutive event timestamps to see where a job spent its
-  time (plan vs code vs test vs review).
+Tables (current schema): `jobs(id, created, updated, dir, parent_session, goal, risk,
+phase, status, plan, worker_model, report)`; `tasks(job_id, role, purpose, session_id,
+attempts, model, last_status, spin)`; `findings(job_id, n, text, status)`;
+`events(job_id, ts, kind, detail)`; `notes(job_id, ts, text)`.
+
+For YOUR job id, pull:
+- Symptom events: `malformed`, `testfail`, `findings`, `fix`, `escalate`, `blocked`,
+  `antispin`, `timeout`, `stale`, `paused`, `error` -- each is a bad reply format, a
+  failed test cycle, a review round, a hand-off up the ladder, or a stall.
+- Timeline events: `phase`, `status`, `dispatch`, `resume`, `session`. Diff consecutive
+  timestamps for per-phase durations (plan vs code vs test vs review vs fix rounds).
+- Review findings from the `findings` table: the reviewer's blockers, numbered per fix
+  round (`n = round*100 + k`), `status` pending or fixed. The fix loop batches EVERY
+  open blocker back to the coder each round, re-tests, then re-reviews the COMPLETE
+  change; rounds repeat until the review is clean or `max_fix_rounds` pauses the job.
+  (A job that shows `done` with rows still `pending` predates this loop -- note it as
+  historical, don't diagnose it as a fresh failure.)
 
 If `sqlite3` isn't on PATH, Python's stdlib `sqlite3` module reads the same file.
 
-## 2. Optionally mine the worker transcripts
+## 2. Mine the worker transcripts -- this job's sessions only
 
-Each task row in the ledger carries the worker's OpenCode session id. For any suspicious
-task, open `~/.local/share/opencode/opencode.db` (read-only, same `?mode=ro` trick) and
-read the `message` / `part` tables for that session id to see what the worker actually
-said and did -- tool calls, errors, and its final reply.
+Each task row carries the worker's OpenCode session id; the workers were created as
+children of the same parent session. For any suspicious task, open
+`~/.local/share/opencode/opencode.db` (read-only, same `?mode=ro` trick) and read the
+`message` / `part` tables for THAT session id to see what the worker actually said and
+did -- tool calls, errors, and its final reply.
+
+Confine transcript reads to the session ids on THIS job's task rows (plus the loom
+lead's own session). Other sessions in opencode.db belong to other runs; reading them
+wastes context and pollutes the diagnosis.
 
 ## 3. Diagnose
 
 Look for patterns, not one-offs:
 - repeated malformed replies (contract not followed) -- which role, which field;
 - spins: `CONTINUE` loops with nothing new, or `antispin` events;
+- fix-round churn: blockers that took multiple rounds because a fix was partial or a
+  test was hollow -- quote the reviewer's re-raised finding;
 - escalations and timeouts -- and whether the phase budget or the task was at fault;
 - instruction gaps: the worker did X wrong because nothing in its instructions said
   otherwise. These are the highest-value findings.
