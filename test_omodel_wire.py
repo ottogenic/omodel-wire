@@ -2825,9 +2825,33 @@ class CleanupCase(unittest.TestCase):
         con.commit()
         con.close()
 
+    def _mk_loomdb(self, path):
+        """Ledger mirroring the real one: NO foreign keys, jobs keyed to
+        sessions via parent_session and tasks.session_id."""
+        import sqlite3
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE jobs(id INTEGER PRIMARY KEY, parent_session TEXT);"
+            "CREATE TABLE tasks(id INTEGER PRIMARY KEY, job_id INTEGER, "
+            "  session_id TEXT);"
+            "CREATE TABLE events(id INTEGER PRIMARY KEY, job_id INTEGER);"
+            "CREATE TABLE findings(id INTEGER PRIMARY KEY, job_id INTEGER);"
+            "CREATE TABLE notes(id INTEGER PRIMARY KEY, job_id INTEGER);")
+        for n in (1, 2, 3):
+            con.execute("INSERT INTO jobs VALUES(?,?)", (n, f"root{n}"))
+            con.execute("INSERT INTO tasks VALUES(?,?,?)", (n, n, f"kid{n}"))
+            for t in ("events", "findings", "notes"):
+                con.execute(f"INSERT INTO {t} VALUES(?,?)", (n, n))
+        # job 4 never recorded a session (created, never dispatched)
+        con.execute("INSERT INTO jobs VALUES(4,NULL)")
+        con.commit()
+        con.close()
+
     def _run(self, db, **kw):
         ns = argparse.Namespace(db=db, keep=kw.get("keep", 0),
-                                dry_run=kw.get("dry_run", False), force=True)
+                                dry_run=kw.get("dry_run", False), force=True,
+                                loom_db=kw.get("loom_db"),
+                                keep_ledger=kw.get("keep_ledger", False))
         m.cmd_cleanup(ns)
 
     def test_keep_n_retains_roots_and_descendants(self):
@@ -2857,15 +2881,50 @@ class CleanupCase(unittest.TestCase):
                     con.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0, t)
             con.close()
 
+    def test_loom_jobs_pruned_with_their_sessions(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db, ldb = os.path.join(td, "oc.db"), os.path.join(td, "loom.db")
+            self._mkdb(db)
+            self._mk_loomdb(ldb)
+            self._run(db, keep=1, loom_db=ldb)  # keeps root3/kid3 only
+            con = sqlite3.connect(ldb)
+            self.assertEqual([r[0] for r in con.execute("SELECT id FROM jobs")],
+                             [3], "only the job whose sessions survived")
+            for t in ("tasks", "events", "findings", "notes"):
+                self.assertEqual(
+                    [r[0] for r in con.execute(f"SELECT job_id FROM {t}")], [3],
+                    f"{t} rows for pruned jobs must go (loom.db has no cascade)")
+            con.close()
+
+    def test_keep_ledger_leaves_loom_untouched(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as td:
+            db, ldb = os.path.join(td, "oc.db"), os.path.join(td, "loom.db")
+            self._mkdb(db)
+            self._mk_loomdb(ldb)
+            self._run(db, keep=1, loom_db=ldb, keep_ledger=True)
+            con = sqlite3.connect(ldb)
+            self.assertEqual(
+                con.execute("SELECT count(*) FROM jobs").fetchone()[0], 4)
+            con.close()
+
     def test_dry_run_deletes_nothing(self):
         import sqlite3
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "oc.db")
             self._mkdb(db)
-            self._run(db, keep=1, dry_run=True)
+            ldb = os.path.join(td, "loom.db")
+            self._mk_loomdb(ldb)
+            self._run(db, keep=1, dry_run=True, loom_db=ldb)
             con = sqlite3.connect(db)
             self.assertEqual(
                 con.execute("SELECT count(*) FROM session").fetchone()[0], 6)
+            con.close()
+            con = sqlite3.connect(ldb)
+            self.assertEqual(
+                con.execute("SELECT count(*) FROM jobs").fetchone()[0], 4,
+                "dry run must not touch the ledger either")
             con.close()
 
 
