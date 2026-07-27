@@ -2043,15 +2043,21 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
                                   sessionId: session, parentSessionId: ctx.sessionID }}
             p.state.input = {{ description: title, subagent_type: "loom" }}
           }})
-          const restoreCard = () => patchPart((p) => {{
+          // Completion card: a one-line summary. Restoring the original input
+          // would repaint the ENTIRE packet -- the goal's third appearance in
+          // the transcript (prompt, tool call, report). A finished card needs
+          // neither the packet nor the task morph.
+          const finishCard = (summary) => patchPart((p) => {{
             if (origTool !== undefined) p.tool = origTool
-            if (origInput !== undefined) p.state.input = origInput
+            p.state.title = summary
+            p.state.input = {{ loom: summary }}
           }})
 
           const proc = Bun.spawn(argv, {{ cwd: dir, stdout: "pipe", stderr: "pipe" }})
           const onAbort = () => {{ try {{ proc.kill("SIGTERM") }} catch {{}} }}
           ctx.abort.addEventListener("abort", onAbort, {{ once: true }})
           let report = ""
+          let dispatches = 0
           const lines = []
           // Milestones only: worker sessions are directly clickable in the TUI now,
           // so the status/dispatch/session/skills/compose chatter adds nothing.
@@ -2068,6 +2074,7 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
               let ev
               try {{ ev = JSON.parse(line) }} catch {{ lines.push(line); continue }}
               if (ev.type === "report") {{ report = ev.report; continue }}
+              if (ev.type === "dispatch") dispatches++
               if (KEEP.has(ev.type)) lines.push(`${{ev.type}}: ${{ev.detail || ""}}`)
               const title = ev.title || ev.detail || ev.type
               try {{ ctx.metadata({{ title }}) }} catch {{}}   // no-op today; upstream fix welcome
@@ -2077,14 +2084,18 @@ export const OtoolsLoom = async ({{ serverUrl, directory }}) => {{
           }}
           const err = await new Response(proc.stderr).text()
           const code = await proc.exited
-          await restoreCard()
+          const summary =
+            code === 0
+              ? (dispatches ? `pipeline complete (${{dispatches}} dispatches)` : "complete")
+              : `stopped (exit ${{code}})`
+          await finishCard(summary)
           if (report)
-            return {{ title: "loom report", output: report, metadata: {{ exitCode: code }} }}
+            return {{ title: summary, output: report, metadata: {{ exitCode: code }} }}
           if (code !== 0) {{
             const tail = lines.slice(-10).join("\\n")
-            return {{ title: "loom failed", output: (tail + "\\n" + err).trim() || `exit ${{code}}` }}
+            return {{ title: summary, output: (tail + "\\n" + err).trim() || `exit ${{code}}` }}
           }}
-          return {{ title: "loom", output: lines.join("\\n") || "(no output)" }}
+          return {{ title: summary, output: lines.join("\\n") || "(no output)" }}
         }},
       }}),
     }},

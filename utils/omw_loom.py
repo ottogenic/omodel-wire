@@ -1194,8 +1194,9 @@ class Loom:
         tasks = self.led.tasks(self.job_id)
         lines = [f"- {t['role']} [{t['purpose']}]: {t['last_status'] or '-'} "
                  f"(session {t['session_id']}, attempts {t['attempts']})" for t in tasks]
-        report = ("LOOM JOB COMPLETE\n"
-                  f"GOAL: {self.led.job(self.job_id)['goal']}\n\n"
+        # No GOAL restatement: the goal already sits directly above this
+        # report in the caller's transcript (user prompt + tool-call packet).
+        report = (f"LOOM JOB {self.job_id} COMPLETE\n\n"
                   f"REVIEW: {getattr(self, '_final_review', 'clean')}\n\n"
                   "WORKERS:\n" + "\n".join(lines) +
                   # Do NOT hand the orchestrator a runnable command here: local models

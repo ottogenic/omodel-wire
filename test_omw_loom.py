@@ -507,7 +507,9 @@ class LoomCase(unittest.TestCase):
         for s in self.server.created():
             self.assertEqual(s["parentID"], "ses_parent")
             self.assertIn("subagent)", s["title"])
-        self.assertIn("LOOM JOB COMPLETE", job["report"])
+        self.assertRegex(job["report"], r"LOOM JOB \d+ COMPLETE")
+        self.assertNotIn("GOAL:", job["report"],
+                         "the goal must not be restated in the report")
 
     def test_plan_phase_with_parallel_research(self):
         self.server.responses = {
