@@ -4797,6 +4797,19 @@ def _build_parser():
     pp.add_argument("--no-color", action="store_true", help="(read) disable ANSI colors")
     pp.set_defaults(func=cmd_proxy)
 
+    pc = sub.add_parser("cleanup", parents=[io_parent],
+                        help="delete old OpenCode sessions (messages/parts cascade; "
+                             "then VACUUM)")
+    pc.add_argument("--keep", type=int, default=0,
+                    help="retain the newest N root sessions with their workers "
+                         "(default 0: delete ALL sessions)")
+    pc.add_argument("--dry-run", action="store_true",
+                    help="report what would be deleted, delete nothing")
+    pc.add_argument("--force", action="store_true",
+                    help="run even while an opencode process is alive")
+    pc.add_argument("--db", help="opencode.db path (default: the standard one)")
+    pc.set_defaults(func=cmd_cleanup)
+
     return ap
 
 
@@ -5118,6 +5131,77 @@ def cmd_proxy_read(args):
 # ============================================================================
 # Main entry point
 # ============================================================================
+def _opencode_db_path():
+    return os.path.expanduser("~/.local/share/opencode/opencode.db")
+
+
+def _opencode_running():
+    try:
+        out = subprocess.run(["pgrep", "-x", "opencode"], capture_output=True)
+        return out.returncode == 0
+    except OSError:
+        return False  # no pgrep (non-Linux dev box): skip the guard
+
+
+def cmd_cleanup(args):
+    """Delete old OpenCode sessions. --keep N retains the newest N root
+    sessions (each with ALL its worker/child sessions); default 0 deletes
+    everything. FK cascade removes messages, parts, and session_* aux rows;
+    VACUUM reclaims the disk afterwards."""
+    import sqlite3
+
+    db = getattr(args, "db", None) or _opencode_db_path()
+    if not os.path.exists(db):
+        print(f"cleanup: no OpenCode db at {db}")
+        return
+    if not getattr(args, "force", False) and _opencode_running():
+        print("cleanup: an opencode process is running -- close it first "
+              "(or pass --force if you are sure nothing is mid-write).")
+        raise SystemExit(2)
+
+    before = os.path.getsize(db)
+    con = sqlite3.connect(db)
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        total, = con.execute("SELECT count(*) FROM session").fetchone()
+        keep_n = max(0, getattr(args, "keep", 0) or 0)
+        roots = [r[0] for r in con.execute(
+            "SELECT id FROM session WHERE parent_id IS NULL "
+            "ORDER BY time_updated DESC")]
+        keep_roots = roots[:keep_n]
+        if keep_roots:
+            marks = ",".join("?" * len(keep_roots))
+            kept = [r[0] for r in con.execute(
+                "WITH RECURSIVE kept(id) AS ("
+                f"  SELECT id FROM session WHERE id IN ({marks})"
+                "  UNION"
+                "  SELECT s.id FROM session s JOIN kept k ON s.parent_id = k.id)"
+                "SELECT id FROM kept", keep_roots)]
+        else:
+            kept = []
+        if getattr(args, "dry_run", False):
+            print(f"cleanup (dry run): would delete {total - len(kept)} of "
+                  f"{total} sessions, keeping {len(keep_roots)} root(s) "
+                  f"({len(kept)} sessions incl. workers).")
+            return
+        if kept:
+            marks = ",".join("?" * len(kept))
+            cur = con.execute(
+                f"DELETE FROM session WHERE id NOT IN ({marks})", kept)
+        else:
+            cur = con.execute("DELETE FROM session")
+        deleted = cur.rowcount
+        con.commit()
+        con.execute("VACUUM")
+        con.commit()
+    finally:
+        con.close()
+    after = os.path.getsize(db)
+    print(f"cleanup: deleted {deleted} of {total} sessions "
+          f"(kept {len(keep_roots)} root(s), {len(kept)} total incl. workers); "
+          f"db {before / 1e6:.0f} MB -> {after / 1e6:.0f} MB")
+
+
 def main(argv=None):
     ap = _build_parser()
     args = ap.parse_args(argv)
