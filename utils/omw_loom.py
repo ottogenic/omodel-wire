@@ -53,7 +53,8 @@ DEFAULTS = {
     "step_timeout": 1800,       # seconds one worker step may run before abort
     "max_attempts": 3,          # escalation-ladder rungs before pausing (>=4 never pauses early)
     "max_test_cycles": 3,       # test-fail -> fix -> retest loops before escalating
-    "max_fix_findings": 10,     # review findings fixed before pausing (runaway guard)
+    "max_fix_findings": 10,     # (legacy) per-finding cap, kept for compatibility
+    "max_fix_rounds": 4,        # batch fix rounds (review -> fix all -> retest -> re-review)
     "research_parallel": 4,     # concurrent agent-research sessions in a fan-out
     "max_research_rounds": 3,   # NEEDS_RESEARCH -> answer -> resume, per worker step
     "nudge_malformed": True,    # one reprompt when a reply is missing STATUS:
@@ -458,12 +459,19 @@ class Ledger:
             return self.db.execute(
                 "SELECT * FROM tasks WHERE job_id=? ORDER BY id", (job_id,)).fetchall()
 
-    def add_findings(self, job_id, findings):
+    def add_findings(self, job_id, findings, round_no=0):
+        """Record findings for TRACKING. Merge, never wipe: a later round that
+        reports fewer findings must not erase earlier ones from the audit trail
+        (the old DELETE dropped 2-4 real blockers per job)."""
         with self.lock:
-            self.db.execute("DELETE FROM findings WHERE job_id=? AND status='pending'", (job_id,))
+            have = {(r["n"], r["text"]) for r in self.db.execute(
+                "SELECT n,text FROM findings WHERE job_id=?", (job_id,)).fetchall()}
             for n, txt in findings:
-                self.db.execute("INSERT INTO findings(job_id,n,text) VALUES(?,?,?)",
-                                (job_id, n, txt))
+                if (n, txt) in have:
+                    continue
+                self.db.execute(
+                    "INSERT INTO findings(job_id,n,text) VALUES(?,?,?)",
+                    (job_id, n + round_no * 100, txt))
             self.db.commit()
 
     def pending_findings(self, job_id):
@@ -1119,7 +1127,6 @@ class Loom:
 
     def _phase_review(self):
         self.emit("phase", "review: agent-review", title="reviewing...")
-        job = self.led.job(self.job_id)
         packet = (f"Review this completed implementation.\n\n{self._packet()}\n\n"
                   f"TEST EVIDENCE:\n"
                   f"{getattr(self, '_last_test_evidence', '(see agent-test session)')}\n\n"
@@ -1128,38 +1135,60 @@ class Loom:
                   "If there are none, say 'No blocking findings.'")
         parsed, raw = self._dispatch("agent-review", "review", packet)
         parsed, raw = self._serve_research("agent-review", "review", parsed, raw)
-        fixed = 0
-        # STRICTLY one finding at a time: fix the first pending finding, re-test,
-        # re-review (same review session), and only then look at what remains --
-        # exactly the v1 agent-team Fix Loop contract the reviewer skill expects.
-        while not (parsed["clean"] or not parsed["findings"]):
+
+        # BATCH ROUNDS: the coder fixes every blocker the reviewer raised, then the
+        # reviewer re-reviews the WHOLE change. Repeat while blockers remain.
+        # Findings are parsed for the ledger (audit trail) only -- the loop turns on
+        # the reviewer's verdict, never on our regex. Rationale: one-at-a-time
+        # abandoned 2-4 blockers per job, cost a full test+review cycle each, and
+        # still produced shallow fixes (a coder patched half a finding and the
+        # reviewer had to re-raise it).
+        rounds = 0
+        while not self._review_clean(parsed):
             self._check_stop()
-            self.led.add_findings(self.job_id, parsed["findings"])
-            pend = self.led.pending_findings(self.job_id)
-            self.emit("findings", f"{len(pend)} blocker/regression finding(s) pending")
-            row = pend[0]
-            fixed += 1
-            if fixed > self.cfg["max_fix_findings"]:
+            rounds += 1
+            self.led.add_findings(self.job_id, parsed["findings"], round_no=rounds)
+            n = len(parsed["findings"]) or "unparsed"
+            self.emit("findings", f"round {rounds}: {n} blocker(s) -> coder")
+            if rounds > self.cfg["max_fix_rounds"]:
                 self.led.update_job(self.job_id, status="paused",
-                                    report="paused: finding-fix cap reached")
-                self.emit("paused", "fix cap reached; human review needed")
-                raise LoomPaused("fix cap")
-            self.emit("fix", f"finding {row['n']}: dispatching a NEW agent-code session",
-                      title=f"fixing finding {row['n']}...")
-            self._code_step(f"fix finding {row['n']}",
-                            f"Fix exactly this review finding -- nothing else.\n\n"
-                            f"{self._packet()}\n\nFINDING: {row['text']}")
+                                    report=f"paused: {rounds - 1} fix rounds without a "
+                                           "clean review")
+                self.emit("paused", "fix-round cap reached; human review needed")
+                raise LoomPaused("fix round cap")
+
+            # The reviewer's FULL text goes back -- no extraction, so an unparseable
+            # review still reaches the coder intact (silent-pass hole closed).
+            review_text = strip_contract_tail(raw) or parsed["result"] or raw
+            self.emit("fix", f"round {rounds}: coder fixing all blockers",
+                      title=f"fix round {rounds}...")
+            self._code_step("implement",
+                            "The reviewer found blockers in your implementation. Fix "
+                            "EVERY blocker listed below -- all of them, in one pass.\n\n"
+                            f"REVIEW FINDINGS:\n{review_text}\n\n"
+                            "Do not change anything the reviewer did not raise.",
+                            resume=True)
             self._dispatch("agent-test", "verify",
-                           f"A fix for review finding {row['n']} landed. Re-run the "
-                           "relevant checks and report.", resume=True)
-            self.led.finding_done(row["id"])
+                           "Fixes for the review findings landed. Re-run the checks "
+                           "and report exact PASS/FAIL evidence.", resume=True)
+            for row in self.led.pending_findings(self.job_id):
+                self.led.finding_done(row["id"])
             parsed, raw = self._dispatch(
                 "agent-review", "review",
-                f"Finding {row['n']} was fixed and re-tested. Re-review ONLY that finding "
-                "and regressions from its fix. List anything still blocking with the same "
-                "numbered FINDING format; otherwise say 'No blocking findings.'", resume=True)
+                "The fixes landed and were re-tested. Re-review the COMPLETE change: "
+                "list every remaining blocker/regression in the same numbered FINDING "
+                "format, or say 'No blocking findings.'", resume=True)
+            parsed, raw = self._serve_research("agent-review", "review", parsed, raw)
+
         self.emit("review", "no blocking findings")
         self._final_review = parsed["result"] or raw
+
+    @staticmethod
+    def _review_clean(parsed):
+        """A review is clean when it declares clean AND raises no findings.
+        Findings win over the phrase: a reply listing blockers is never clean,
+        even if it also contains 'No blocking findings' somewhere in its prose."""
+        return not parsed["findings"] and parsed["clean"]
 
     def _finish(self):
         tasks = self.led.tasks(self.job_id)
