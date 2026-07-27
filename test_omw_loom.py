@@ -754,7 +754,10 @@ class LoomCase(unittest.TestCase):
         tests = self.server.prompts("agent-test")
         self.assertEqual(tests[0][0], tests[1][0], "retest must resume the SAME test session")
 
-    def test_review_findings_fixed_one_at_a_time_in_new_sessions(self):
+    def test_review_findings_fixed_in_batch_rounds_same_sessions(self):
+        """Batch model: every blocker goes back in ONE dispatch to the RESUMED
+        coder; the reviewer re-reviews the whole change and its verdict (not our
+        regex) decides whether another round runs."""
         finding_reply = ("FINDING 1: a.py:3 null check | PASS CONDITION: added\n"
                          "FINDING 2: b.py:9 secret log | PASS CONDITION: removed\n"
                          "STATUS: DONE")
@@ -762,8 +765,8 @@ class LoomCase(unittest.TestCase):
                   "STATUS: DONE")
         self.server.responses = {
             "agent-code": [reply("DONE", "implemented"),
-                           reply("DONE", "fixed finding 1"),
-                           reply("DONE", "fixed finding 2")],
+                           reply("DONE", "fixed round 1"),
+                           reply("DONE", "fixed round 2")],
             "agent-test": [reply("DONE"),
                            reply("DONE", "recheck 1 pass"),
                            reply("DONE", "recheck 2 pass")],
@@ -772,26 +775,43 @@ class LoomCase(unittest.TestCase):
         lm, job_id = self.make_loom()
         lm.run()
         self.assertEqual(self.led.job(job_id)["status"], "done")
+
         reviews = self.server.prompts("agent-review")
         self.assertEqual(len(reviews), 3)
         self.assertEqual({r[0] for r in reviews}, {reviews[0][0]},
                          "all reviews share ONE session")
-        self.assertIn("Finding 1 was fixed", reviews[1][2])
+
         code = self.server.prompts("agent-code")
-        self.assertEqual(len(code), 3)
-        self.assertEqual(len({c[0] for c in code}), 3,
-                         "each finding gets a NEW agent-code session")
-        # one at a time: fix-1 dispatched before re-review round 2, fix-2 after it
-        order = [(a, t) for _, a, t, _ in self.server.prompts()]
-        fixes = [i for i, (a, t) in enumerate(order)
-                 if a == "agent-code" and t.startswith("Fix exactly this review finding")]
-        rereview = next(i for i, (a, t) in enumerate(order)
-                        if a == "agent-review" and "Finding 1 was fixed" in t)
-        self.assertEqual(len(fixes), 2)
-        self.assertLess(fixes[0], rereview)
-        self.assertLess(rereview, fixes[1])
-        self.assertIn("null check", order[fixes[0]][1])
-        self.assertIn("secret log", order[fixes[1]][1])
+        self.assertEqual(len(code), 3, "implement + one dispatch per fix round")
+        self.assertEqual(len({c[0] for c in code}), 1,
+                         "coder RESUMES its own session across fix rounds")
+
+        # round 1 carries BOTH findings verbatim (no extraction, no dropping)
+        self.assertIn("FINDING 1", code[1][2])
+        self.assertIn("FINDING 2", code[1][2])
+        self.assertIn("Fix EVERY blocker", code[1][2])
+
+        # every finding reported across rounds is recorded for the audit trail
+        rows = self.led.db.execute(
+            "SELECT text FROM findings WHERE job_id=?", (job_id,)).fetchall()
+        self.assertGreaterEqual(len(rows), 2, "findings tracked in the ledger")
+
+    def test_unparseable_review_still_reaches_the_coder(self):
+        """Silent-pass hole: a reviewer that describes blockers in prose (no
+        FINDING lines) must still trigger a fix round with its full text."""
+        prose = ("This change has a blocker: the null check at a.py:3 is missing "
+                 "and will crash on empty input.\nSTATUS: DONE")
+        self.server.responses = {
+            "agent-code": [reply("DONE", "implemented"), reply("DONE", "fixed")],
+            "agent-test": [reply("DONE"), reply("DONE", "pass")],
+            "agent-review": [prose, "No blocking findings.\nSTATUS: DONE"],
+        }
+        lm, job_id = self.make_loom()
+        lm.run()
+        code = self.server.prompts("agent-code")
+        self.assertEqual(len(code), 2, "prose blocker must still cause a fix round")
+        self.assertIn("null check at a.py:3", code[1][2],
+                      "the reviewer's full text is forwarded verbatim")
 
     def test_blocked_code_gets_architect_diagnosis_then_resumes(self):
         self.server.responses = {
