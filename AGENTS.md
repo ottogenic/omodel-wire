@@ -16,10 +16,13 @@ task-specific lives in a **skill** (see the index at the bottom) that loads on d
   live in omodel-manager, read via `--configs` / `$OMODEL_CONFIGS` / sibling
   `../omodel-manager/configs`. Never copy them here or reintroduce `model_recipes.json` /
   `DEFAULT_RECIPES` (retired in 0.2.0).
-- **Idempotent & non-destructive.** Every run merges into the existing config and prunes only
-  what it manages (`MANAGED_AGENTS`). Never clobber user-authored agents/providers or
-  preserved cloud settings.
-- **Sampling plugin path is `plugins/` (plural)**; `tool_call` is declared on every model.
+- **Idempotent & field-scoped.** `omw sync` owns managed DGX provider entries, the
+  native Build/Plan fields `model`/`temperature`/`top_p`/`options`, and the generated
+  `plugins/dgx-sampling.js`. Preserve all unrelated agents, agent fields, permissions,
+  built-in providers, and user settings.
+- **No custom workflow config.** `tool_call` is declared on every discovered model and
+  Build/Plan consume omodel-manager's code/reason presets. Never emit custom agents,
+  prompts, skills, or state-machine plugins; those belong to omodel-pipeline.
 - **You open PRs — you never merge, push to `main`, or approve.** (See the `open-a-pr` skill.)
 - **Cross-platform paths** (WSL/Linux + Windows): use `os.path` / `expanduser`; never assume
   a POSIX-only home.

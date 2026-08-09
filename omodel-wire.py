@@ -18,23 +18,19 @@ Stdlib only -- no pip install. See README.md for usage and AGENTS.md for the ful
 architecture, rules, and how to extend.
 
 Quick start:
-  omodel-wire.py --install-aliases     # add the `omw` shell alias (re-open shell after)
-  omw                                 # detect tools + sync (default sampling)
-  omw --profiles                      # + build the agent roster for reasoning models
-  omw --profiles --web-search exa --write-shell-env
-  omw --dry-run                       # preview opencode.json + plugin, write nothing
+  python3 omodel-wire.py shell-init
+  omw sync --dry-run
+  omw sync
 
---profiles builds, per reasoning model, an agent roster from omodel-manager's
-declared per-model configs (configs/*.toml) -- capabilities + per-mode sampling are
-DECLARED, not probed (fast). Roster: visible `research` / `code` / `agent` + the
-`loom` pipeline lead (whose conductor dispatches the hidden `agent-research` /
-`agent-code` / `agent-test` / `agent-architect` / `agent-review` workers) -- plus
-Ctrl+T thinking variants and an agent-aware chat.params plugin that pins sampling.
+`omw sync` owns DGX provider entries, native Build/Plan model and preset fields,
+and the DGX sampling plugin. It never writes custom agents, prompts, skills,
+permissions, or workflow state.
 """
 
 __version__ = "0.2.0"
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -2681,8 +2677,297 @@ def oc_audit(args):
     return 0
 
 
+BUILTIN_PRESET_ROLES = {"build": "code", "plan": "reason"}
+BUILTIN_OWNED_FIELDS = ("model", "temperature", "top_p", "options", "variant", "disable")
+
+
+def _merge_dicts(base, overlay):
+    """Recursively merge dictionaries without mutating either input."""
+    out = copy.deepcopy(base or {})
+    for key, value in (overlay or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge_dicts(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _builtin_preset_options(recipe, preset):
+    """Translate one TOML preset's native thinking controls faithfully."""
+    cap = (recipe.get("capabilities") or {})
+    control = recipe.get("thinking_control", cap.get("thinking_control", "none"))
+    options = {}
+    if control == "enable_thinking":
+        options = {"chat_template_kwargs": {"enable_thinking": bool(preset.get("thinking"))}}
+    elif control == "reasoning_effort":
+        options = {"reasoning_effort": "high" if preset.get("thinking") else "low"}
+    # control=none means the TOML's explicit options are the sole authority.
+    return _merge_dicts(options, preset.get("options") or {})
+
+
+def _builtin_preset_vector(recipe, preset, output_limit=None):
+    """OpenCode chat.params vector for one Build/Plan TOML preset."""
+    sampling = preset.get("sampling") or {}
+    vec = {}
+    if "temperature" in sampling:
+        vec["temperature"] = sampling["temperature"]
+    if "top_p" in sampling:
+        vec["topP"] = sampling["top_p"]
+    if "top_k" in sampling:
+        vec["topK"] = sampling["top_k"]
+    if preset.get("max_output"):
+        maximum = preset["max_output"]
+        vec["maxOutputTokens"] = min(maximum, output_limit) if output_limit else maximum
+    options = _builtin_preset_options(recipe, preset)
+    for key in ("min_p", "presence_penalty", "frequency_penalty", "repetition_penalty"):
+        if key in sampling:
+            options[key] = sampling[key]
+    if options:
+        vec["options"] = options
+    return vec
+
+
+def _resolve_builtin_model(requested, existing, default, refs, preset_role, configs):
+    """Resolve an explicit/default Build/Plan model against the live managed refs."""
+    refs = list(refs)
+
+    def resolve(value):
+        if not value:
+            return None
+        if value in refs:
+            return value
+        matches = [ref for ref in refs if ref.split("/", 1)[1] == value]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"model '{value}' is live on multiple providers; use one of: "
+                             + ", ".join(matches))
+        return None
+
+    if requested:
+        selected = resolve(requested)
+        if not selected:
+            raise ValueError(f"model '{requested}' is not currently available")
+        return selected
+    for candidate in (existing, default):
+        selected = resolve(candidate)
+        if selected:
+            return selected
+    for ref in refs:
+        model_id = ref.split("/", 1)[1]
+        recipe = match_recipe(model_id, configs)
+        if (recipe or {}).get("presets", {}).get(preset_role):
+            return ref
+    return refs[0] if refs else None
+
+
+def oc_builtin_sampling_plugin_js(per_model_sampling):
+    """Apply TOML sampling by current DGX model and native Build/Plan agent."""
+    table = json.dumps(per_model_sampling, indent=2)
+    return f'''// AUTO-GENERATED by omodel-wire. Build/Plan presets from omodel-manager TOMLs.
+const MANAGED_PREFIX = {json.dumps(PROVIDER_PREFIX)}
+const SAMPLING = {table}
+
+function isManaged(input) {{
+  const p = input && input.provider ? input.provider : {{}}
+  const m = input && input.model ? input.model : {{}}
+  return [p.id, p.name, p.providerID, m.providerID].filter(Boolean)
+    .some((value) => String(value).startsWith(MANAGED_PREFIX))
+}}
+
+export const DgxSampling = async () => ({{
+  "chat.params": async (input, output) => {{
+    if (!isManaged(input)) return
+    const model = input && input.model ? input.model : {{}}
+    const sampling = (SAMPLING[model.id] || {{}})[input.agent]
+    if (!sampling) return
+    if ("temperature" in sampling) output.temperature = sampling.temperature
+    if ("topP" in sampling) output.topP = sampling.topP
+    if ("topK" in sampling) output.topK = sampling.topK
+    if ("maxOutputTokens" in sampling) output.maxOutputTokens = sampling.maxOutputTokens
+    if (sampling.options) {{
+      output.options = output.options || {{}}
+      for (const key in sampling.options) output.options[key] = sampling.options[key]
+    }}
+  }},
+}})
+'''
+
+
+def oc_provider_sync(args):
+    """Sync DGX models plus TOML defaults for OpenCode's native Build/Plan agents."""
+    config_path = os.path.expanduser(args.config)
+    configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
+    sampling = {
+        "mode": "opencode-default",
+        "temperature": None,
+        "top_p": None,
+        "top_k": None,
+        "presence_penalty": None,
+        "frequency_penalty": None,
+    }
+
+    print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
+    providers, refs, _, _ = oc_build_providers(
+        args._hosts, args._ports, args.timeout, sampling,
+        profiles=True, tool_call=not args.no_tool_call, recipes=configs)
+
+    # Every live model gets a sufficient declared output limit for its reason/code
+    # presets, clamped to that endpoint's actual context window.
+    for provider in providers.values():
+        for model_id, model in (provider.get("models") or {}).items():
+            recipe = match_recipe(model_id, configs)
+            presets = (recipe or {}).get("presets") or {}
+            requested = max((presets.get(role, {}).get("max_output", 0)
+                             for role in ("reason", "code")), default=0)
+            if requested:
+                context = model["limit"]["context"]
+                model["limit"]["output"] = min(
+                    context, max(model["limit"]["output"], requested))
+
+    if not providers:
+        print("  (no live endpoints found)")
+        if not args.allow_empty:
+            print("\nRefusing to rewrite config because nothing was discovered.")
+            print("If you really stopped all models, re-run with --allow-empty.")
+            return 2
+
+    cfg = oc_load_config(config_path)
+    cfg.setdefault("$schema", "https://opencode.ai/config.json")
+    existing = cfg.get("provider") or {}
+    kept = {k: v for k, v in existing.items() if not oc_is_managed(k)}
+    removed = [k for k in existing if oc_is_managed(k)]
+    kept.update(providers)
+    cfg["provider"] = kept
+
+    old_agents = cfg.get("agent") or {}
+    agents = dict(old_agents)
+    per_model_sampling = {}
+
+    # Build a table for every live model, not only the two currently assigned.
+    for provider_key, provider in providers.items():
+        for model_id, model in (provider.get("models") or {}).items():
+            recipe = match_recipe(model_id, configs)
+            if not recipe:
+                continue
+            role_vectors = {}
+            for agent_name, preset_role in BUILTIN_PRESET_ROLES.items():
+                preset = (recipe.get("presets") or {}).get(preset_role)
+                if preset:
+                    role_vectors[agent_name] = _builtin_preset_vector(
+                        recipe, preset, model["limit"]["output"])
+            if role_vectors:
+                per_model_sampling[model_id] = role_vectors
+
+    for agent_name, preset_role in BUILTIN_PRESET_ROLES.items():
+        previous = old_agents.get(agent_name) or {}
+        entry = {key: value for key, value in previous.items()
+                 if key not in BUILTIN_OWNED_FIELDS}
+        try:
+            model_ref = _resolve_builtin_model(
+                getattr(args, f"{agent_name}_model", None), previous.get("model"),
+                cfg.get("model"), refs, preset_role, configs)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        if model_ref:
+            entry["model"] = model_ref
+            model_id = model_ref.split("/", 1)[1]
+            recipe = match_recipe(model_id, configs)
+            preset = (recipe or {}).get("presets", {}).get(preset_role)
+            if preset:
+                sampling_values = preset.get("sampling") or {}
+                if "temperature" in sampling_values:
+                    entry["temperature"] = sampling_values["temperature"]
+                if "top_p" in sampling_values:
+                    entry["top_p"] = sampling_values["top_p"]
+                options = _builtin_preset_options(recipe, preset)
+                if options:
+                    entry["options"] = options
+        if entry:
+            agents[agent_name] = entry
+        else:
+            agents.pop(agent_name, None)
+    if agents:
+        cfg["agent"] = agents
+    else:
+        cfg.pop("agent", None)
+
+    live_refs = set(refs)
+    for key in ("model", "small_model"):
+        value = cfg.get(key)
+        if isinstance(value, str) and oc_is_managed(value.split("/", 1)[0]):
+            if value not in live_refs:
+                cfg.pop(key, None)
+                print(f"  removed stale {key}: {value}")
+    if cfg.get("default_agent") in (MANAGED_AGENTS - {"build", "plan"}):
+        stale_default = cfg["default_agent"]
+        if stale_default not in agents:
+            cfg.pop("default_agent", None)
+            print(f"  removed stale default_agent: {stale_default}")
+
+    plugin_path = os.path.join(os.path.dirname(config_path), "plugins", "dgx-sampling.js")
+    plugin_js = oc_builtin_sampling_plugin_js(per_model_sampling)
+    output_max = max(
+        (vector.get("maxOutputTokens", 0)
+         for roles in per_model_sampling.values() for vector in roles.values()),
+        default=0)
+    output_note = None
+    if output_max > 32768:
+        output_note = _ensure_shell_env(
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", str(output_max),
+            getattr(args, "write_shell_env", False))
+
+    print(f"\nDiscovered {len(refs)} model(s); removed {len(removed)} stale provider(s).")
+    if refs:
+        print("OpenCode model references now available:")
+        for ref in refs:
+            print(f"  - {ref}")
+        for agent_name in ("build", "plan"):
+            entry = agents.get(agent_name) or {}
+            print(f"  {agent_name}: {entry.get('model', '(OpenCode default)')} "
+                  f"[{BUILTIN_PRESET_ROLES[agent_name]} preset]")
+        if output_note:
+            print(f"  output: {output_note}")
+
+    if args.dry_run:
+        print("\n--- DRY RUN: would write opencode.json ---")
+        print(json.dumps(cfg, indent=2))
+        if per_model_sampling:
+            print(f"\n--- DRY RUN: would write {plugin_path} ---")
+            print(plugin_js)
+        return 0
+
+    parent = os.path.dirname(config_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as src, open(config_path + ".bak", "w") as backup:
+                backup.write(src.read())
+        except OSError:
+            pass
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    print(f"\nWrote {config_path}  (backup at {config_path}.bak)")
+    legacy_plugin = os.path.join(os.path.dirname(config_path), "plugin", "dgx-sampling.js")
+    if os.path.exists(legacy_plugin):
+        os.remove(legacy_plugin)
+    if per_model_sampling:
+        os.makedirs(os.path.dirname(plugin_path), exist_ok=True)
+        with open(plugin_path, "w") as f:
+            f.write(plugin_js)
+        print(f"Wrote {plugin_path}  (Build/Plan TOML sampling)")
+    elif os.path.exists(plugin_path):
+        os.remove(plugin_path)
+        print(f"Removed {plugin_path}  (no live matched TOML presets)")
+    print("Restart / reload OpenCode to pick up the changes.")
+    return 0
+
+
 def oc_sync(args, sampling, detected_installed):
-    """Run the OpenCode sync. Returns exit code (0 ok, 2 nothing found)."""
+    """Legacy agent/pipeline sync retained temporarily for migration."""
     config_path = os.path.expanduser(args.config)
 
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
@@ -3173,7 +3458,9 @@ def oc_load_config(path):
 
 
 def oc_is_managed(key):
-    return key in LEGACY_KEYS or key.startswith(PROVIDER_PREFIX)
+    key = str(key)
+    return (key in LEGACY_KEYS or key.startswith(PROVIDER_PREFIX)
+            or re.fullmatch(r"dgx\d+", key) is not None)
 
 
 # ============================================================================
@@ -3230,15 +3517,14 @@ SETTINGS_KEYS = {
     "configs_dir":     ("omodel-manager configs/ dir", None),
     "hosts":           ("comma-separated host IPs to probe", None),
     "ports":           ("comma-separated ports", ",".join(map(str, DEFAULT_PORTS))),
-    "default_agent":   ("startup agent (research/code/agent/loom)", "code"),
-    "web_search":      ("none|exa|mcp", "none"),
     "proxy_port":      ("proxy listen port (default: 9099)", 9099),
     "proxy_active":    ("is proxy currently active?", False),
 }
 # Retired settings -- silently dropped from wire.json on load so a stale value can't
 # linger and mislead (these belonged to the removed team orchestrator; per-agent model
 # routing lives in default_models.json).
-RETIRED_SETTINGS = ("team_model", "team_reasoning")
+RETIRED_SETTINGS = ("team_model", "team_reasoning", "team_task_budget",
+                    "default_agent", "web_search")
 
 
 def load_settings():
@@ -3315,34 +3601,22 @@ def cmd_home(args):
     """No-subcommand landing screen: status + suggested next steps. No network."""
     cfg_path = os.path.expanduser(_setting(args, "opencode_config"))
     cfg = oc_load_config(cfg_path) if os.path.exists(cfg_path) else {}
-    agents = cfg.get("agent", {}) or {}
-    managed = [k for k, v in agents.items()
-               if k in MANAGED_AGENTS and not (isinstance(v, dict) and v.get("disable"))]
+    providers = cfg.get("provider", {}) or {}
+    managed = {k: v for k, v in providers.items() if oc_is_managed(k)}
+    model_count = sum(len((v or {}).get("models") or {}) for v in managed.values())
     cdir = _configs_dir(_setting(args, "configs_dir"))
     ntoml = len([f for f in os.listdir(cdir) if f.endswith(".toml")]) if os.path.isdir(cdir) else 0
     hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
-    loom = (agents.get("loom") or {}).get("model") or "(from default_models.json)"
 
     print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
     print("Status:")
     cfg_note = "" if ntoml else "  [not found -- omw config --set configs_dir PATH]"
     print(f"  configs : {cdir}  ({ntoml} model config(s)){cfg_note}")
     print(f"  hosts   : {hosts}")
-    dfl = f", default @{cfg.get('default_agent')}" if cfg.get("default_agent") else ""
-    print(f"  opencode: {cfg_path}  ({len(managed)} managed agent(s){dfl})")
-    print(f"  loom    : {loom}")
+    print(f"  opencode: {cfg_path}  ({len(managed)} DGX provider(s), {model_count} model(s))")
     print(f"  settings: {WIRE_SETTINGS_FILE}{'' if os.path.exists(WIRE_SETTINGS_FILE) else '  (none yet)'}")
-
-    if not managed:
-        items = [("Sync the OpenCode agent roster from the model configs", "omw sync")]
-    else:
-        items = [
-            ("Review the agent roster (models, permissions)", "omw agents"),
-            ("Review per-model sampling", "omw models"),
-            ("Check for drift vs the known-good configs", "omw audit"),
-            ("Re-sync to known-good presets", "omw sync"),
-        ]
-    _suggest(items, header="Suggested next steps")
+    _suggest([("Discover and sync the current DGX models", "omw sync")],
+             header="Suggested next step")
 
 
 def cmd_config(args):
@@ -3356,21 +3630,6 @@ def cmd_config(args):
             save_settings(settings)
         editor = os.environ.get("EDITOR", "nano")
         sys.exit(subprocess.run([editor, WIRE_SETTINGS_FILE]).returncode)
-    handled_token = False
-    for role in ("coder", "reviewer"):
-        raw = getattr(args, f"set_gh_token_{role}", None)
-        if raw is None:
-            continue
-        handled_token = True
-        val = raw
-        if val == "__PROMPT__":
-            import getpass
-            val = getpass.getpass(f"Paste the {role} GitHub token (input hidden): ")
-        msg = _set_gh_token(role, val)
-        if msg:
-            print(msg)
-    if handled_token:
-        return
     if args.set:
         key, val = args.set
         if key not in SETTINGS_KEYS:
@@ -3393,15 +3652,8 @@ def cmd_config(args):
             print(f"  {k:16} {settings[k]}   ({desc})")
         else:
             print(f"  {k:16} (default: {dflt})   ({desc})")
-    # GitHub identity (stored as token files, not in wire.json)
-    print("\nGitHub identity (used by the otools-git-identity OpenCode plugin):")
-    for role in ("coder", "reviewer"):
-        state = "set" if os.path.exists(_gh_token_path(role)) else "unset"
-        print(f"  gh_token_{role:8} {state}   ({_gh_token_path(role)})")
-    _suggest([("Persist a value (VALUE 'none' to clear)", "omw config --set default_agent code"),
-              ("Set the shared-bot GitHub token (prompts, hidden)", "omw config --set-gh-token-coder"),
-              ("Set your reviewer GitHub token", "omw config --set-gh-token-reviewer")],
-             header="Set")
+    _suggest([("Persist a value (VALUE 'none' to clear)",
+               "omw config --set hosts 192.168.1.10,192.168.1.11")], header="Set")
 
 
 def cmd_detect(args):
@@ -3785,47 +4037,41 @@ def copilot_sync(args, sampling, detected_installed):
 
 
 def cmd_sync(args):
-    """Full profile sync: roster + providers + plugin + prompts (was --profiles)."""
+    """Discover DGX endpoints and sync only their provider/model entries."""
     _resolve_io(args)
     _resolve_hosts_ports(args)
-    if not args.default_agent:
-        args.default_agent = _setting(args, "default_agent")
-    if not args.web_search:
-        args.web_search = _setting(args, "web_search")
-    args.profiles = True   # the roster is the whole point of `sync`
-
-    sampling = build_sampling(args)
     detected = detect_tools()
     print_detection(detected)
-    installed = {t["key"] for t in detected if t["installed"]}
+    tool = next((t for t in detected if t["sync"] == "opencode"), None)
+    if tool and not tool["installed"]:
+        print(f"{tool['display']} not found on PATH -- writing config anyway "
+              f"(install it, or point --config, to use it).")
+    rc = oc_provider_sync(args)
+    if rc:
+        sys.exit(rc)
 
-    # Route to the requested target(s). --target opencode (default) preserves prior behavior;
-    # copilot writes the Copilot CLI config; all does every implemented target.
-    sync_funcs = {"opencode": oc_sync, "copilot": copilot_sync}
-    target = getattr(args, "target", None) or "opencode"
-    wanted = list(sync_funcs) if target == "all" else [target]
-    ran_any = False
-    for name in wanted:
-        func = sync_funcs.get(name)
-        if not func:
-            continue
-        ran_any = True
-        tool = next((t for t in detected if t["sync"] == name), None)
-        if tool and not tool["installed"]:
-            print(f"{tool['display']} not found on PATH -- writing config anyway "
-                  f"(install it, or point --config, to use it).")
-        rc = func(args, sampling, installed)
-        if rc not in (0,):
-            sys.exit(rc)
-    if not ran_any:
-        print(f"No sync target named {target!r}. (Implemented: opencode, copilot.)")
-        return
-    if not args.dry_run:
-        _suggest([
-            ("Review the agent roster", "omw agents"),
-            ("Review per-model sampling", "omw models"),
-            ("Confirm live config matches the known-good configs", "omw audit"),
-        ])
+
+def _add_provider_sync_args(p):
+    """Arguments for DGX provider and native Build/Plan sync."""
+    p.add_argument("--hosts", default=None,
+                   help="comma-separated host IPs to probe "
+                        "(default: wire.json hosts / shared ~/.config/otools/hosts / built-in)")
+    p.add_argument("--ports", default=None,
+                   help="comma-separated ports to probe on each host")
+    p.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
+    p.add_argument("--no-tool-call", action="store_true",
+                   help="don't declare tool_call on discovered models")
+    p.add_argument("--no-recipes", action="store_true",
+                   help="ignore model capability declarations from omodel-manager")
+    p.add_argument("--build-model", metavar="REF",
+                   help="default model for native Build (full ref or unique served ID)")
+    p.add_argument("--plan-model", metavar="REF",
+                   help="default model for native Plan (full ref or unique served ID)")
+    p.add_argument("--write-shell-env", action="store_true",
+                   help="persist OpenCode's output-token cap when live TOMLs require over 32k")
+    p.add_argument("--dry-run", action="store_true", help="print result, do not write")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="remove managed DGX providers if nothing is currently served")
 
 
 def _add_sync_args(p):
@@ -4708,17 +4954,9 @@ def _build_parser():
                            help="omodel-manager configs dir (default: wire.json / $OMODEL_CONFIGS / sibling)")
 
     ps = sub.add_parser("sync", parents=[io_parent],
-                        help="sync the agent roster from the model configs (OpenCode and/or Copilot)")
-    _add_sync_args(ps)
-    ps.add_argument("--target", choices=["opencode", "copilot", "all"], default="opencode",
-                    help="which tool to configure (default: opencode)")
-    ps.add_argument("--copilot-home", default=None,
-                    help="override Copilot's config home (default: $COPILOT_HOME or ~/.copilot)")
+                        help="sync live DGX providers and models into OpenCode")
+    _add_provider_sync_args(ps)
     ps.set_defaults(func=cmd_sync)
-
-    pa = sub.add_parser("audit", parents=[io_parent],
-                        help="compare live OpenCode sampling vs declared configs (offline drift check)")
-    pa.set_defaults(func=cmd_audit)
 
     pv = sub.add_parser("verify", parents=[io_parent],
                         help="probe live endpoints vs declared capabilities (slow, opt-in)")
@@ -4733,44 +4971,7 @@ def _build_parser():
     pc.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"), help="persist one setting")
     pc.add_argument("--edit", action="store_true", help="open wire.json in $EDITOR")
     pc.add_argument("--path", action="store_true", help="print the settings file path")
-    pc.add_argument("--set-gh-token-coder", nargs="?", const="__PROMPT__", default=None,
-                    metavar="TOKEN", dest="set_gh_token_coder",
-                    help="store the shared-bot GitHub token (coding agents commit/PR as this); "
-                         "omit TOKEN to be prompted with hidden input, pass 'none' to clear")
-    pc.add_argument("--set-gh-token-reviewer", nargs="?", const="__PROMPT__", default=None,
-                    metavar="TOKEN", dest="set_gh_token_reviewer",
-                    help="store your GitHub token (agent-review approves/merges the bot's PRs as "
-                         "this); omit TOKEN to be prompted, pass 'none' to clear")
     pc.set_defaults(func=cmd_config)
-
-    pag = sub.add_parser("agents", parents=[io_parent],
-                         help="list primary agents; show/tweak one (`omw agents code`)")
-    pag.add_argument("name", nargs="?", help="agent name to show or edit")
-    pag.add_argument("--set-model", metavar="REF", help="live-set this agent's model")
-    pag.set_defaults(func=cmd_agents)
-
-    psa = sub.add_parser("subagents", parents=[io_parent],
-                         help="list hidden workers; show/tweak (no name = all workers)")
-    psa.add_argument("name", nargs="?", help="worker name to show or edit")
-    psa.add_argument("--set-model", metavar="REF",
-                     help="live-set model (no name -> all workers)")
-    psa.set_defaults(func=cmd_subagents)
-
-    pm = sub.add_parser("models", parents=[io_parent],
-                        help="list models; show/tweak per-role sampling (`omw models qwen`)")
-    pm.add_argument("name", nargs="?", help="model name to show or edit")
-    pm.add_argument("--all", action="store_true",
-                    help="list every declared model, not just the live ones")
-    pm.add_argument("--role", choices=ROLE_ORDER, help="which role to edit (with --set-*)")
-    pm.add_argument("--set-temperature", type=float, metavar="T", help="live-set temperature")
-    pm.add_argument("--set-thinking", type=_boolish, metavar="BOOL",
-                    help="live-set thinking on/off (true|false)")
-    pm.set_defaults(func=cmd_models)
-
-    psk = sub.add_parser("skills", parents=[io_parent],
-                         help="list agent skills (global + project); show one with `omw skills <name>`")
-    psk.add_argument("name", nargs="?", help="skill to pretty-print (all its .md files)")
-    psk.set_defaults(func=cmd_skills)
 
     pd = sub.add_parser("detect", aliases=["doctor"],
                         help="report which agentic-dev tools are installed")
@@ -4779,10 +4980,6 @@ def _build_parser():
     psi = sub.add_parser("shell-init", aliases=["install-aliases"],
                          help="install the `omw` shell alias")
     psi.set_defaults(func=cmd_shell_init)
-
-    if loom_mod is not None:
-        pl = loom_mod.add_parser(sub)
-        pl.set_defaults(func=cmd_loom)
 
     pp = sub.add_parser("proxy", parents=[io_parent],
                         help="debug proxy: log OpenCode<->model traffic (on|off|replay|read|status)")

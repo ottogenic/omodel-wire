@@ -142,7 +142,8 @@ class FakeProbes:
         self._saved = {}
 
     def __enter__(self):
-        for name in ("probe", "probe_reasoning", "probe_vision", "discover_opencode_runtime_models"):
+        for name in ("probe", "probe_reasoning", "probe_vision",
+                     "discover_opencode_runtime_models", "_authed_remote_providers"):
             if hasattr(m, name):
                 self._saved[name] = getattr(m, name)
 
@@ -160,6 +161,7 @@ class FakeProbes:
         runtime_models = self.runtime_models
         m.discover_opencode_runtime_models = lambda opencode_path=None, timeout=5.0: (
             runtime_models, f"found {len(runtime_models)} runtime model(s)" if runtime_models else "no runtime models in test")
+        m._authed_remote_providers = lambda: set()
         return self
 
     def __exit__(self, *exc):
@@ -1512,6 +1514,160 @@ class TestSyncEndToEnd(unittest.TestCase):
             self.assertNotIn("options", looma)
 
 
+class TestProviderOnlySync(unittest.TestCase):
+    def _sync(self, tmp, initial=None, **over):
+        path = os.path.join(tmp, "opencode.json")
+        if initial is not None:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(initial, f)
+        args = make_args(tmp, **over)
+        with FakeProbes(), quiet():
+            rc = m.oc_provider_sync(args)
+        self.assertEqual(rc, 0)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_writes_providers_and_native_build_plan_defaults_to_clean_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._sync(tmp)
+            self.assertEqual(set(cfg), {"$schema", "provider", "agent"})
+            self.assertIn("dgx-n1-8000", cfg["provider"])
+            self.assertIn("Qwen3.6-27B-NVFP4",
+                          cfg["provider"]["dgx-n1-8000"]["models"])
+            self.assertEqual(cfg["agent"]["build"]["model"],
+                             "dgx-n1-8000/Qwen3.6-27B-NVFP4")
+            self.assertEqual(cfg["agent"]["build"]["temperature"], 0.6)
+            self.assertEqual(cfg["agent"]["plan"]["temperature"], 1.0)
+            self.assertEqual(cfg["agent"]["build"]["options"],
+                             {"chat_template_kwargs": {"enable_thinking": True}})
+            with open(os.path.join(tmp, "plugins", "dgx-sampling.js"),
+                      encoding="utf-8") as f:
+                plugin = f.read()
+            self.assertIn('"build"', plugin)
+            self.assertIn('"plan"', plugin)
+            self.assertIn('"topK": 20', plugin)
+
+    def test_preserves_every_unrelated_config_field(self):
+        initial = {
+            "$schema": "https://opencode.ai/config.json",
+            "agent": {"mine": {"mode": "primary"}},
+            "permission": {"bash": "ask"},
+            "disabled_providers": ["example"],
+            "provider": {
+                "openrouter": {"options": {"apiKey": "secret"}},
+                "dgx-stale-8000": {"models": {"old": {}}},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._sync(tmp, initial)
+            self.assertEqual(cfg["permission"], initial["permission"])
+            self.assertEqual(cfg["disabled_providers"], ["example"])
+            self.assertEqual(cfg["agent"]["mine"], initial["agent"]["mine"])
+            self.assertEqual(cfg["provider"]["openrouter"],
+                             initial["provider"]["openrouter"])
+            self.assertNotIn("dgx-stale-8000", cfg["provider"])
+
+    def test_stale_managed_models_and_disabled_builtin_stubs_are_cleaned(self):
+        initial = {
+            "model": "dgx-stale-8000/old",
+            "small_model": "dgx-stale-8000/small",
+            "default_agent": "code",
+            "provider": {
+                "dgx-stale-8000": {"models": {"old": {}}},
+                "dgx3": {"models": {"legacy": {}}},
+            },
+            "agent": {
+                "build": {"disable": True, "model": "dgx-stale-8000/old",
+                          "permission": {"bash": "ask"}},
+                "plan": {"disable": True, "model": "dgx-stale-8000/old"},
+                "mine": {"model": "custom/model"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._sync(tmp, initial)
+            self.assertNotIn("model", cfg)
+            self.assertNotIn("small_model", cfg)
+            self.assertNotIn("default_agent", cfg)
+            self.assertNotIn("dgx3", cfg["provider"])
+            self.assertNotIn("disable", cfg["agent"]["build"])
+            self.assertNotIn("disable", cfg["agent"]["plan"])
+            self.assertEqual(cfg["agent"]["build"]["permission"], {"bash": "ask"})
+            self.assertEqual(cfg["agent"]["mine"], {"model": "custom/model"})
+            with open(os.path.join(tmp, "plugins", "dgx-sampling.js"), encoding="utf-8") as f:
+                plugin = f.read()
+            self.assertNotIn('"old"', plugin)
+            self.assertNotIn('"legacy"', plugin)
+
+    def test_no_recipes_removes_stale_sampling_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = os.path.join(tmp, "plugins", "dgx-sampling.js")
+            os.makedirs(os.path.dirname(plugin))
+            with open(plugin, "w", encoding="utf-8") as f:
+                f.write("stale")
+            cfg = self._sync(tmp, no_recipes=True)
+            self.assertFalse(os.path.exists(plugin))
+            self.assertEqual(set(cfg["agent"]["build"]), {"model"})
+            self.assertEqual(set(cfg["agent"]["plan"]), {"model"})
+
+    def test_gpt_oss_uses_effort_without_qwen_thinking_kwargs(self):
+        configs = m.load_configs(os.path.join(os.path.dirname(__file__), "..",
+                                               "omodel-manager", "configs"))
+        recipe = m.match_recipe("gpt-oss-120b", configs)
+        if not recipe:
+            self.skipTest("sibling omodel-manager gpt-oss config not available")
+        for role in ("reason", "code"):
+            options = m._builtin_preset_options(recipe, recipe["presets"][role])
+            self.assertEqual(options, {"reasoning_effort": "high"})
+
+    def test_every_manager_toml_translates_reason_and_code(self):
+        config_dir = os.path.join(os.path.dirname(__file__), "..", "omodel-manager", "configs")
+        configs = m.load_configs(config_dir)
+        if not configs["recipes"]:
+            self.skipTest("sibling omodel-manager configs not available")
+        for recipe in configs["recipes"]:
+            with self.subTest(recipe=recipe["_file"]):
+                for preset_role in ("reason", "code"):
+                    preset = recipe.get("presets", {}).get(preset_role)
+                    self.assertIsNotNone(preset)
+                    options = m._builtin_preset_options(recipe, preset)
+                    vector = m._builtin_preset_vector(recipe, preset)
+                    sampling = preset.get("sampling") or {}
+                    if "temperature" in sampling:
+                        self.assertEqual(vector["temperature"], sampling["temperature"])
+                    if "top_p" in sampling:
+                        self.assertEqual(vector["topP"], sampling["top_p"])
+                    if "top_k" in sampling:
+                        self.assertEqual(vector["topK"], sampling["top_k"])
+                    if "min_p" in sampling:
+                        self.assertEqual(vector["options"]["min_p"], sampling["min_p"])
+                    if preset.get("options"):
+                        for key, value in preset["options"].items():
+                            self.assertIn(key, options)
+
+    def test_no_endpoints_does_not_refresh_pipeline_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_args(tmp, _hosts=["10.255.255.1"])
+            with FakeProbes(), quiet():
+                rc = m.oc_provider_sync(args)
+            self.assertEqual(rc, 2)
+            self.assertFalse(os.path.exists(args.config))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "plugins")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "prompts")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "skills")))
+
+    def test_public_cli_exposes_no_pipeline_commands(self):
+        parser = m._build_parser()
+        command_action = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction))
+        commands = set(command_action.choices)
+        self.assertNotIn("agents", commands)
+        self.assertNotIn("subagents", commands)
+        self.assertNotIn("skills", commands)
+        self.assertNotIn("audit", commands)
+        self.assertNotIn("loom", commands)
+
+
 # --------------------------------------------------------------------------- #
 # Plugin directory -- must match OpenCode docs (https://opencode.ai/docs/plugins/)
 # --------------------------------------------------------------------------- #
@@ -1747,7 +1903,7 @@ class TestCliViews(unittest.TestCase):
                 self.assertEqual(m.load_settings()["hosts"], "192.0.2.101,192.0.2.102")
                 a = types.SimpleNamespace(_settings=m.load_settings())
                 self.assertEqual(m._setting(a, "hosts"), "192.0.2.101,192.0.2.102")
-                self.assertEqual(m._setting(a, "default_agent"), "code")  # built-in fallback
+                self.assertEqual(m._setting(a, "ports"), "8000,8001,8002")
                 self.assertIsNone(m._setting(a, "configs_dir"))
             finally:
                 m.WIRE_SETTINGS_FILE = old
@@ -1759,10 +1915,12 @@ class TestCliViews(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             m.WIRE_SETTINGS_FILE = os.path.join(tmp, "wire.json")
             try:
-                m.save_settings({"team_model": "anthropic/claude-opus-4-8", "web_search": "exa"})
+                m.save_settings({"team_model": "anthropic/claude-opus-4-8",
+                                 "web_search": "exa", "ports": "8000"})
                 loaded = m.load_settings()
                 self.assertNotIn("team_model", loaded)
-                self.assertEqual(loaded["web_search"], "exa")   # other keys survive
+                self.assertNotIn("web_search", loaded)
+                self.assertEqual(loaded["ports"], "8000")
             finally:
                 m.WIRE_SETTINGS_FILE = old
 
@@ -1798,30 +1956,25 @@ class TestCliViews(unittest.TestCase):
             for role in ("reason", "code", "agent", "instruct"):
                 self.assertIn(role, det)
 
-    def test_home_suggests_sync_when_empty_and_review_when_synced(self):
+    def test_home_reports_provider_count_and_suggests_sync(self):
         with tempfile.TemporaryDirectory() as tmp:
             empty = types.SimpleNamespace(_settings={"configs_dir": FIXTURE_DIR,
                                                      "opencode_config": os.path.join(tmp, "none.json")})
             self.assertIn("omw sync", _capture(m.cmd_home, empty))
             cfg = self._synced(tmp)
             synced = types.SimpleNamespace(_settings={"configs_dir": FIXTURE_DIR,
-                                                      "opencode_config": cfg})
+                                                       "opencode_config": cfg})
             out = _capture(m.cmd_home, synced)
-            self.assertIn("managed agent", out)
-            self.assertIn("omw agents", out)
+            self.assertIn("1 DGX provider(s), 1 model(s)", out)
+            self.assertIn("omw sync", out)
 
     def test_main_dispatch_config_path(self):
         out = _capture(m.main, ["config", "--path"])
         self.assertIn(os.path.basename(m.WIRE_SETTINGS_FILE), out)
 
-    def test_main_dispatch_models_list(self):
-        # No live opencode config -> nothing live -> default lists nothing...
-        out = _capture(m.main, ["models", "--configs", FIXTURE_DIR])
-        self.assertNotIn("MODEL", out)
-        self.assertIn("No models are live", out)
-        # ...but --all shows the full declared catalogue.
-        out_all = _capture(m.main, ["models", "--all", "--configs", FIXTURE_DIR])
-        self.assertIn("MODEL", out_all)
+    def test_main_rejects_retired_models_command(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.main(["models", "--configs", FIXTURE_DIR])
 
     def test_models_list_defaults_to_live_only(self):
         with tempfile.TemporaryDirectory() as tmp:

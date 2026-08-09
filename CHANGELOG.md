@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **`omw sync` is provider and native-agent only.** It replaces live DGX
+  provider/model entries, maps OpenCode Build to TOML `code` presets and Plan to
+  `reason` presets, and emits a model/agent-keyed sampling plugin for knobs OpenCode
+  cannot express directly. It removes unavailable managed models while preserving
+  unrelated config. Custom agents, prompts, skills, web search, GitHub identity,
+  Copilot rosters, and loom move to the separate `omodel-pipeline` project.
 - **loom v3: deterministic packet composition.** Role instructions and the Return
   Contract move out of opencode skills/system prompts into loom-composed dispatch
   packets: global defaults + per-role contracts under ~/.config/otools/loom/skills/
