@@ -1596,13 +1596,21 @@ def oc_effort_options(caps, level):
 
 def oc_build_variants(caps):
     """Ctrl+T-cyclable thinking-depth presets for one reasoning model."""
-    variants = {"no-think": {"options": oc_off_options(caps)}}
+    variants = {"no-think": oc_off_options(caps)}
     if caps["graded"]:
         for lvl in ("low", "medium", "high"):
-            variants[lvl] = {"options": oc_effort_options(caps, lvl)}
+            variants[lvl] = oc_effort_options(caps, lvl)
     else:
-        variants["think"] = {"options": oc_effort_options(caps, "high")}
+        variants["think"] = oc_effort_options(caps, "high")
     return variants
+
+
+def oc_recipe_variants(recipe):
+    """Translate generic TOML variant options to OpenCode's direct option map."""
+    return {
+        name: copy.deepcopy((variant or {}).get("options") or {})
+        for name, variant in ((recipe or {}).get("variants") or {}).items()
+    }
 
 
 # Built-in fallback for a reasoning model with no curated recipe: the 4 roles
@@ -2142,7 +2150,13 @@ export const DgxSampling = async () => {{
       if ("maxOutputTokens" in s) output.maxOutputTokens = s.maxOutputTokens
       if (s.options) {{
         output.options = output.options || {{}}
-        for (const k in s.options) output.options[k] = s.options[k]
+        const selected = input.message && input.message.model
+          ? input.message.model.variant
+          : undefined
+        const variant = selected && m.variants ? (m.variants[selected] || {{}}) : {{}}
+        for (const k in s.options) {{
+          if (!(k in variant)) output.options[k] = s.options[k]
+        }}
       }}
     }},
   }}
@@ -2209,7 +2223,7 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
                     caps = caps_from_capabilities(rec)
                     entry["reasoning"] = True
                     entry["temperature"] = True   # let agent/variant temps apply
-                    entry["variants"] = oc_build_variants(caps)
+                    entry["variants"] = oc_recipe_variants(rec) or oc_build_variants(caps)
                     reasoning_caps[f"{key}/{m['id']}"] = caps
                     if verbose:
                         print(f"    reasoning: {m['id']} -> declared ({rec['_file']})")
@@ -2787,7 +2801,13 @@ export const DgxSampling = async () => ({{
     if ("maxOutputTokens" in sampling) output.maxOutputTokens = sampling.maxOutputTokens
     if (sampling.options) {{
       output.options = output.options || {{}}
-      for (const key in sampling.options) output.options[key] = sampling.options[key]
+      const selected = input.message && input.message.model
+        ? input.message.model.variant
+        : undefined
+      const variant = selected && model.variants ? (model.variants[selected] || {{}}) : {{}}
+      for (const key in sampling.options) {{
+        if (!(key in variant)) output.options[key] = sampling.options[key]
+      }}
     }}
   }},
 }})
@@ -3147,7 +3167,7 @@ def oc_sync(args, sampling, detected_installed):
                 # generic probe-derived ones -- e.g. Nemotron's enable_thinking /
                 # low_effort, which the Qwen-style probe variants can't express.
                 if matched_recipe.get("variants"):
-                    mentry["variants"] = matched_recipe["variants"]
+                    mentry["variants"] = oc_recipe_variants(matched_recipe)
                 ctx = mentry["limit"]["context"]   # auto-probed: matches running 128K/256K server
                 # If the recipe declares a larger per-request budget, raise the output
                 # cap so the largest preset isn't clamped; never exceed the context.

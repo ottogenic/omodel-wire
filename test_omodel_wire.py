@@ -457,8 +457,8 @@ class TestVariantsAndPlugin(unittest.TestCase):
     def test_graded_variants(self):
         v = m.oc_build_variants(dict(FULL_CAPS))
         self.assertEqual(set(v), {"no-think", "low", "medium", "high"})
-        self.assertEqual(v["high"]["options"]["reasoning_effort"], "high")
-        self.assertTrue(v["low"]["options"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(v["high"]["reasoning_effort"], "high")
+        self.assertTrue(v["low"]["chat_template_kwargs"]["enable_thinking"])
 
     def test_ungraded_variants(self):
         caps = dict(FULL_CAPS, graded=False)
@@ -468,7 +468,7 @@ class TestVariantsAndPlugin(unittest.TestCase):
     def test_no_disable_gives_empty_off_options(self):
         caps = dict(FULL_CAPS, can_disable=False, graded=False)
         v = m.oc_build_variants(caps)
-        self.assertEqual(v["no-think"]["options"], {})
+        self.assertEqual(v["no-think"], {})
 
     def test_sampling_plugin_js_is_valid(self):
         mid = "Qwen3.6-27B-NVFP4"
@@ -477,6 +477,8 @@ class TestVariantsAndPlugin(unittest.TestCase):
         self.assertIn("chat.params", js)
         self.assertIn(m.PROVIDER_PREFIX, js)
         self.assertIn("input.model", js)   # sampling is now keyed by the running model
+        self.assertIn("input.message.model.variant", js)
+        self.assertIn("if (!(k in variant))", js)
         # the embedded AGENT_SAMPLING table must be valid JSON we can round-trip;
         # it's now nested: {model_id: {agent: vec}}.
         table = js.split("const AGENT_SAMPLING =", 1)[1].split("\n\nfunction", 1)[0].strip()
@@ -614,6 +616,32 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(entry["reasoning"])
         self.assertIn("variants", entry)
         self.assertIn("dgx-n1-8000/Qwen3.6-27B-NVFP4", caps)
+
+    def test_profiles_prefer_declared_model_variants(self):
+        declared = {
+            "xhigh": {"options": {"reasoning_effort": "xhigh"}},
+            "no-think": {"options": {
+                "chat_template_kwargs": {"enable_thinking": False}}},
+        }
+        expected = {
+            "xhigh": {"reasoning_effort": "xhigh"},
+            "no-think": {"chat_template_kwargs": {"enable_thinking": False}},
+        }
+        recipes = {"recipes": [{
+            "_file": "qwen.toml",
+            "match": ["Qwen3.6-27B-NVFP4"],
+            "capabilities": {
+                "reasoning": True,
+                "thinking_control": "enable_thinking",
+            },
+            "variants": declared,
+        }]}
+        with FakeProbes():
+            providers, _, _, _ = m.oc_build_providers(
+                ["192.0.2.101"], [8000], 1.0, self.SD,
+                profiles=True, recipes=recipes, verbose=False)
+        entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
+        self.assertEqual(entry["variants"], expected)
 
     def test_vision_writes_attachment_and_modalities(self):
         with FakeProbes():
@@ -1546,6 +1574,8 @@ class TestProviderOnlySync(unittest.TestCase):
             self.assertIn('"build"', plugin)
             self.assertIn('"plan"', plugin)
             self.assertIn('"topK": 20', plugin)
+            self.assertIn("input.message.model.variant", plugin)
+            self.assertIn("if (!(key in variant))", plugin)
 
     def test_preserves_every_unrelated_config_field(self):
         initial = {
