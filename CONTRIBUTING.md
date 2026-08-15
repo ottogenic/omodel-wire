@@ -3,14 +3,19 @@
 A small, private, single-maintainer project. The workflow below keeps history clean and
 releases traceable without ceremony.
 
-## Branching — GitHub Flow
+## Solo publishing workflow
 
-- **`main` is always releasable.** Never commit directly to `main`.
-- **Short-lived feature branches** off `main`, named by type:
+- **`main` is always releasable.** This is a single-maintainer repo, so tested direct pushes to
+  `main` are the default when the maintainer requests publishing.
+- **Branches and worktrees are optional isolation.** Use them when the maintainer requests one,
+  concurrent work is active, or preserving the currently working version is useful. Pull requests
+  are opt-in, never automatic.
+- Optional short-lived branches off `main` are named by type:
   - `feat/<slug>` — a new capability (e.g. `feat/pi-dev-target`)
   - `fix/<slug>` — a bug fix (e.g. `fix/vision-false-positive`)
   - `chore/<slug>` / `docs/<slug>` / `refactor/<slug>` — everything else
-- Keep a branch focused on one change. Rebase on `main` before merging.
+- Keep a branch focused on one change. Integrate it locally into canonical `main`, push `main`,
+  verify local and remote agree, then delete the temporary branch/worktree.
 
 ## Commits — Conventional Commits
 
@@ -26,14 +31,17 @@ chore(cli): add --version flag
 Types: `feat`, `fix`, `docs`, `refactor`, `chore`, `test`. `scope` is optional
 (e.g. `recipes`, `agents`, `opencode`, `cli`). Add a body when the "why" isn't obvious.
 
-## Merging (reviewer / maintainer only)
+## Publishing to main
 
-Merging is the **reviewer/maintainer's** step, not the contributor's. **AI contributors never
-merge — they open the PR and stop.**
-
-- **Squash-merge** feature branches into `main` so `main` reads as one clean commit per
-  change. Delete the branch after merging.
-- The squash commit's subject should itself be a Conventional Commit.
+- AI contributors may commit and push directly to `main` when the maintainer requests publishing.
+- Before pushing, run the required checks and inspect status, diff, and recent history. Never
+  force-push; stage only explicit intended paths.
+- If development used a branch/worktree, finish by updating the canonical checkout at
+  `/mnt/c/Users/Otto/Documents/Projects/omodel-wire`, integrating the tested commit into local
+  `main`, pushing `main`, and verifying canonical `HEAD`, local `main`, and `origin/main` agree.
+- Keep `main` to one clean Conventional Commit per focused change. Delete temporary branches and
+  worktrees after integration.
+- Use the PR/reviewer workflow only when the maintainer explicitly requests a PR.
 
 ## Releases — SemVer + tags
 
@@ -50,7 +58,7 @@ To cut a release: bump `__version__`, add a dated section to `CHANGELOG.md`, com
 git tag -a vX.Y.Z -m "vX.Y.Z"
 ```
 
-## Before you open a PR / merge
+## Before you publish
 
 1. `python3 -m unittest test_omodel_wire` passes (expected-failures are fine; hard
    failures are not), and `python3 -m py_compile omodel-wire.py` passes.

@@ -23,7 +23,9 @@ task-specific lives in a **skill** (see the index at the bottom) that loads on d
 - **No custom workflow config.** `tool_call` is declared on every discovered model and
   Build/Plan consume omodel-manager's code/reason presets. Never emit custom agents,
   prompts, skills, or state-machine plugins; those belong to omodel-pipeline.
-- **You open PRs — you never merge, push to `main`, or approve.** (See the `open-a-pr` skill.)
+- **Publishing follows the maintainer's requested destination.** This is a single-maintainer repo;
+  when publishing is requested, the default is a tested direct push to `main`. Open a PR only when
+  the maintainer explicitly requests one. Never force-push or bypass required checks.
 - **Cross-platform paths** (WSL/Linux + Windows): use `os.path` / `expanduser`; never assume
   a POSIX-only home.
 
@@ -36,12 +38,15 @@ task-specific lives in a **skill** (see the index at the bottom) that loads on d
 - **Prefer `--dry-run`** while iterating; never write `$HOME` dotfiles from tests. Tests build
   their own args namespace and call `oc_sync`/`cmd_*` directly — keep arg **dest-names** and
   function signatures stable.
-- **Parallel-safe git.** Other agents may share this repo. Work in your own `git worktree`,
-  branch first (`git switch -c …`), stage **explicit paths** (never `git add -A`), and start
-  from a clean tree — if `git status` shows work that isn't yours, stop and surface it. Test
-  via `python3 ./omodel-wire.py …` from your checkout, **not** the `omw` alias; pass
-  `--configs <path>` explicitly (the sibling default may not resolve from a worktree). Full
-  flow: the `open-a-pr` skill.
+- **Solo git by default.** Work in the canonical checkout. Use a branch/worktree only when the
+  maintainer requests it, concurrent work is actually active, or isolation protects a working
+  version. Start clean, stage **explicit paths** (never `git add -A`), and inspect status, diff,
+  and recent history before committing or pushing. Test via `python3 ./omodel-wire.py …`; when in
+  a worktree, pass `--configs <path>` explicitly rather than relying on the sibling default.
+- **Publishing is not complete until the live checkout is current.** After branch/worktree work,
+  integrate it into `/mnt/c/Users/Otto/Documents/Projects/omodel-wire`, push the requested
+  destination, and verify canonical `HEAD`, local `main`, and `origin/main` agree. Do not tell the
+  maintainer to run `omw` while the alias-target checkout is behind the published change.
 
 ## Skills — load the one matching your task first
 
@@ -53,12 +58,13 @@ via the `skill` tool).
 | Make a code change (file layout, how to extend, checks to run) | **`code-changes`** |
 | Modify how the tool generates OpenCode config (agent/permission fields, vetted gotchas, plugin dir, doc pointers) | **`opencode-reference`** |
 | Prove the generated sampling actually reaches the model server | **`validate-opencode`** |
-| Commit + open a pull request | **`open-a-pr`** |
-| Review / approve / merge an open PR | delegate to **`agent-review`** (see the note below the table) |
+| Open an explicitly requested pull request | **`open-a-pr`** |
+| Review / approve / merge an explicitly requested PR | delegate to **`agent-review`** (see the note below the table) |
 
 Other docs (read directly when relevant): `README.md` (user-facing), `CHANGELOG.md`.
 
-**Reviews** are handled by **`agent-review`**, whose global role is extended here by
+**When a PR is explicitly requested**, reviews are handled by **`agent-review`**, whose global
+role is extended here by
 `agent-review-extend`. It checks tested work against the caller's criteria and `REVIEW.md`,
 classifies findings, and merges a PR only when authorized and clean. Delegate by name through the
 `task` tool; fix one blocker/regression at a time and reuse the same reviewer `task_id`.
