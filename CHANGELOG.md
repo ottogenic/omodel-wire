@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Native Build/Plan sync now preserves declared model variants.** `omw sync` uses a
+  matched TOML's model-native `[variants.*]` entries instead of replacing them with
+  generic inferred controls, translates their option shape for OpenCode, and keeps the
+  sampling plugin from overriding the active Ctrl+T variant.
+
 ### Changed
 - **`omw sync` is provider and native-agent only.** It replaces live DGX
   provider/model entries, maps OpenCode Build to TOML `code` presets and Plan to
