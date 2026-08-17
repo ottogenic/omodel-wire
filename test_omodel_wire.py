@@ -588,6 +588,7 @@ class TestProviders(unittest.TestCase):
                 profiles=False, verbose=False)
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["tool_call"])
+        self.assertEqual(entry["name"], "Qwen3.6-27B-NVFP4")
         self.assertEqual(refs, ["dgx-n1-8000/Qwen3.6-27B-NVFP4"])
 
     def test_tool_call_can_be_disabled(self):

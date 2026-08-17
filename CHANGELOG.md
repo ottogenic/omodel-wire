@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Model display names no longer include the serving hostname and port.** Provider
+  IDs remain host-qualified for unambiguous routing and model selection.
 - **Native Build/Plan sync now preserves declared model variants.** `omw sync` uses a
   matched TOML's model-native `[variants.*]` entries instead of replacing them with
   generic inferred controls, translates their option shape for OpenCode, and keeps the

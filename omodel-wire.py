@@ -2191,7 +2191,7 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
                 ctx = m["max_model_len"] or DEFAULT_CONTEXT
                 out = min(DEFAULT_OUTPUT, max(4096, ctx // 2))
                 entry = {
-                    "name": f"{m['id']} ({host_label(host)}:{port})",
+                    "name": m["id"],
                     "limit": {"context": ctx, "output": out},
                 }
                 rec = match_recipe(m["id"], recipes) if recipes else None
