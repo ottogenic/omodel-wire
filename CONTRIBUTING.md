@@ -36,9 +36,10 @@ Types: `feat`, `fix`, `docs`, `refactor`, `chore`, `test`. `scope` is optional
 - AI contributors may commit and push directly to `main` when the maintainer requests publishing.
 - Before pushing, run the required checks and inspect status, diff, and recent history. Never
   force-push; stage only explicit intended paths.
-- If development used a branch/worktree, finish by updating the canonical checkout at
-  `/mnt/c/Users/Otto/Documents/Projects/omodel-wire`, integrating the tested commit into local
-  `main`, pushing `main`, and verifying canonical `HEAD`, local `main`, and `origin/main` agree.
+- If development used a branch/worktree, finish by updating the canonical checkout (the one the
+  `omw` alias targets — resolve it rather than assuming a path), integrating the tested commit
+  into local `main`, pushing `main`, and verifying canonical `HEAD`, local `main`, and
+  `origin/main` agree.
 - Keep `main` to one clean Conventional Commit per focused change. Delete temporary branches and
   worktrees after integration.
 - Use the PR/reviewer workflow only when the maintainer explicitly requests a PR.

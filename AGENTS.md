@@ -43,10 +43,11 @@ task-specific lives in a **skill** (see the index at the bottom) that loads on d
   version. Start clean, stage **explicit paths** (never `git add -A`), and inspect status, diff,
   and recent history before committing or pushing. Test via `python3 ./omodel-wire.py …`; when in
   a worktree, pass `--configs <path>` explicitly rather than relying on the sibling default.
-- **Publishing is not complete until the live checkout is current.** After branch/worktree work,
-  integrate it into `/mnt/c/Users/Otto/Documents/Projects/omodel-wire`, push the requested
-  destination, and verify canonical `HEAD`, local `main`, and `origin/main` agree. Do not tell the
-  maintainer to run `omw` while the alias-target checkout is behind the published change.
+- **Publishing is not complete until the canonical checkout is current.** After branch/worktree
+  work, integrate it into the canonical checkout (the one the `omw` alias targets — resolve it,
+  don't assume a path), push the requested destination, and verify canonical `HEAD`, local `main`,
+  and `origin/main` agree. Do not tell the maintainer to run `omw` while the alias-target checkout
+  is behind the published change.
 
 ## Skills — load the one matching your task first
 
