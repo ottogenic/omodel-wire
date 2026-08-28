@@ -7,6 +7,26 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`omw verify`'s vision probe no longer false-negatives on servers that choke on
+  degenerate images.** The test image was a 1x1 RGBA PNG -- a degenerate size/depth
+  that at least one live vLLM build hung on indefinitely (probe timeout -> `vision`
+  declared but reported as absent). The probe now sends an 8x8 plain-RGB blue PNG;
+  against the same endpoint the old image timed out while the new one is answered
+  "Blue" in ~1-7s.
+- **Native Build/Plan sync resolves the manager's canonical preset names.** It looked
+  up the retired `reason`/`code` preset keys (left over from the pre-manager recipe
+  schema) while every omodel-manager TOML declares `plan`/`build` -- so each matched
+  model's Build/Plan agents silently ran without the TOML's thinking knobs
+  (`enable_thinking` / `reasoning_effort`) and sampling, and no sampling plugin was
+  written. `BUILTIN_PRESET_ROLES` and the per-model output-cap bump now use the
+  canonical `plan`/`build` names, and the offline suite's manager-TOML translation
+  checks run against the renamed presets again (21 previously-red tests green).
+- **Models whose served id matched no manager config no longer lose thinking levels
+  silently.** The Qwen3.8-27B NVFP4 quant (e.g. served as
+  `qwen3.8-27b-nvfp4-vllm-dflash2`) now resolves omodel-manager's new
+  `qwen3.8-27b-nvfp4` config, so `omw sync` declares `reasoning` and the
+  Ctrl+T think levels (no-think / low / medium / xhigh) on the model entry, and the
+  Build/Plan agents get the model's xhigh-effort thinking presets.
 - **Model display names no longer include the serving hostname and port.** Provider
   IDs remain host-qualified for unambiguous routing and model selection.
 - **Native Build/Plan sync now preserves declared model variants.** `omw sync` uses a
@@ -16,11 +36,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 - **`omw sync` is provider and native-agent only.** It replaces live DGX
-  provider/model entries, maps OpenCode Build to TOML `code` presets and Plan to
-  `reason` presets, and emits a model/agent-keyed sampling plugin for knobs OpenCode
-  cannot express directly. It removes unavailable managed models while preserving
-  unrelated config. Custom agents, prompts, skills, web search, GitHub identity,
-  Copilot rosters, and loom move to the separate `omodel-pipeline` project.
+  provider/model entries, maps OpenCode Build to the TOML `build` preset and Plan to
+  the `plan` preset (the manager's canonical preset names), and emits a
+  model/agent-keyed sampling plugin for knobs OpenCode cannot express directly. It
+  removes unavailable managed models while preserving unrelated config. Custom agents,
+  prompts, skills, web search, GitHub identity, Copilot rosters, and loom move to the
+  separate `omodel-pipeline` project.
 - **loom v3: deterministic packet composition.** Role instructions and the Return
   Contract move out of opencode skills/system prompts into loom-composed dispatch
   packets: global defaults + per-role contracts under ~/.config/otools/loom/skills/

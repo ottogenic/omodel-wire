@@ -1240,9 +1240,13 @@ GLOBAL_SKILLS["session-review"] = SESSION_REVIEW_SKILL
 
 # The blue test image + the word we expect a real vision model to say back.
 # A text-only server typically 200s and ignores the image -> answer won't say "blue".
+# 8x8 plain RGB (no alpha channel): a 1x1 or alpha-bearing PNG is a DEGENERATE input
+# that some multimodal preprocessing pipelines choke on -- observed live: a vLLM build
+# hung indefinitely (probe timeout) on the old 1x1 RGBA test image while answering the
+# 8x8 one correctly. The probe must test vision, not the pipeline's edge-case tolerance.
 BLUE_PNG_DATA_URL = (
     "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="
 )
 EXPECTED_COLOR = "blue"
 
@@ -2795,7 +2799,10 @@ def oc_audit(args):
     return 0
 
 
-BUILTIN_PRESET_ROLES = {"build": "code", "plan": "reason"}
+# Native OpenCode agent -> omodel-manager TOML preset. The manager's canonical
+# preset names are `plan`/`build` (test_configs enforces exactly these), so the
+# map is identity; the legacy `reason`/`code` names were retired from every TOML.
+BUILTIN_PRESET_ROLES = {"build": "build", "plan": "plan"}
 BUILTIN_OWNED_FIELDS = ("model", "temperature", "top_p", "options", "variant", "disable")
 
 
@@ -2943,7 +2950,7 @@ def oc_provider_sync(args):
             recipe = match_recipe(model_id, configs)
             presets = (recipe or {}).get("presets") or {}
             requested = max((presets.get(role, {}).get("max_output", 0)
-                             for role in ("reason", "code")), default=0)
+                             for role in ("plan", "build")), default=0)
             if requested:
                 context = model["limit"]["context"]
                 model["limit"]["output"] = min(

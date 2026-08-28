@@ -57,6 +57,9 @@ FULL_CAPS = {"reasoning": True, "can_disable": True, "effort_ok": True,
 
 # Self-contained declared-config fixture matching the FakeProbes model (no live
 # probing anymore; capabilities come from configs). CI-safe: no sibling repo needed.
+# Carries BOTH preset families: the native Build/Plan sync reads the manager's
+# canonical `plan`/`build` presets, while the retained legacy --profiles roster
+# path reads `reason`/`code`/`agent`/`instruct`.
 FIXTURE_DIR = tempfile.mkdtemp(prefix="omw-cfg-")
 with open(os.path.join(FIXTURE_DIR, "qwen3.6-27b-nvfp4.toml"), "w", encoding="utf-8") as _f:
     _f.write(
@@ -64,6 +67,10 @@ with open(os.path.join(FIXTURE_DIR, "qwen3.6-27b-nvfp4.toml"), "w", encoding="ut
         '"Qwen3.6-35B-A3B-NVFP4", "Qwen3.6-35B"]\n'
         '[capabilities]\n'
         'vision = false\nreasoning = true\ntool_call = true\nthinking_control = "enable_thinking"\n'
+        '[presets.plan]\nthinking = true\n[presets.plan.sampling]\n'
+        'temperature = 1.0\ntop_p = 0.95\ntop_k = 20\n'
+        '[presets.build]\nthinking = true\n[presets.build.sampling]\n'
+        'temperature = 0.6\ntop_p = 0.95\ntop_k = 20\n'
         '[presets.reason]\nthinking = true\n[presets.reason.sampling]\n'
         'temperature = 1.0\ntop_p = 0.95\ntop_k = 20\n'
         '[presets.code]\nthinking = true\n[presets.code.sampling]\n'
@@ -80,6 +87,12 @@ with open(os.path.join(FIXTURE_DIR, "nemotron-3-super.toml"), "w", encoding="utf
         'thinking_control = "none"\n'
         '[capabilities]\nvision = false\nreasoning = true\ntool_call = true\n'
         'thinking_control = "enable_thinking"\n'
+        '[presets.plan]\nthinking = true\n'
+        'options.chat_template_kwargs = { enable_thinking = true }\n'
+        '[presets.plan.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
+        '[presets.build]\nthinking = true\n'
+        'options.chat_template_kwargs = { enable_thinking = true }\n'
+        '[presets.build.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
         '[presets.reason]\nthinking = true\n'
         'options.chat_template_kwargs = { enable_thinking = true }\n'
         '[presets.reason.sampling]\ntemperature = 1.0\ntop_p = 0.95\n'
@@ -1646,18 +1659,18 @@ class TestProviderOnlySync(unittest.TestCase):
         recipe = m.match_recipe("gpt-oss-120b", configs)
         if not recipe:
             self.skipTest("sibling omodel-manager gpt-oss config not available")
-        for role in ("reason", "code"):
+        for role in ("plan", "build"):
             options = m._builtin_preset_options(recipe, recipe["presets"][role])
             self.assertEqual(options, {"reasoning_effort": "high"})
 
-    def test_every_manager_toml_translates_reason_and_code(self):
+    def test_every_manager_toml_translates_plan_and_build(self):
         config_dir = os.path.join(os.path.dirname(__file__), "..", "omodel-manager", "configs")
         configs = m.load_configs(config_dir)
         if not configs["recipes"]:
             self.skipTest("sibling omodel-manager configs not available")
         for recipe in configs["recipes"]:
             with self.subTest(recipe=recipe["_file"]):
-                for preset_role in ("reason", "code"):
+                for preset_role in ("plan", "build"):
                     preset = recipe.get("presets", {}).get(preset_role)
                     self.assertIsNotNone(preset)
                     options = m._builtin_preset_options(recipe, preset)
