@@ -1343,7 +1343,24 @@ def print_detection(detected):
 # DGX endpoint probing
 # ============================================================================
 def host_label(host):
-    return HOST_LABELS.get(host, host.split(".")[-1])
+    """Short, stable label for a provider key (`dgx-<label>-<port>`).
+
+    An explicit HOST_LABELS entry always wins, matched on the full host first and
+    then on the leading segment so one label covers both `n1` and `n1.tailnet.ts.net`.
+    Otherwise: an IPv4 literal keeps its last octet (`192.0.2.64` -> `64`), while a
+    hostname uses its FIRST dotted segment. That last case matters for MagicDNS names
+    -- with a trailing-segment split, every `*.ts.net` host collapses to `net` and the
+    hosts share one provider key, so the last one probed silently overwrites the rest.
+    """
+    h = (host or "").strip().rstrip(".")
+    if h in HOST_LABELS:
+        return HOST_LABELS[h]
+    parts = h.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return parts[-1]                      # IPv4 literal -> last octet
+    if parts[0] in HOST_LABELS:
+        return HOST_LABELS[parts[0]]
+    return parts[0] or h                      # hostname/FQDN -> leading segment
 
 
 def probe(host, port, timeout):
@@ -2357,28 +2374,115 @@ def _export_line(kind, var, val):
     return f"set -gx {var} {val}\n" if kind == "fish" else f"export {var}={val}\n"
 
 
+ENV_BLOCK_START = "# >>> omodel-wire managed env >>>"
+ENV_BLOCK_END = "# <<< omodel-wire managed env <<<"
+_ENV_ASSIGN_RE = re.compile(
+    r"^\s*(?:export\s+|set\s+-gx\s+)([A-Za-z_][A-Za-z0-9_]*)[\s=]+(\S+)\s*$")
+
+
+def _split_env_block(text):
+    """(before, {VAR: value}, after) for our managed block in an rc file's text.
+
+    A missing/unterminated block yields an empty mapping and the text as `before`,
+    so the caller simply appends a fresh block.
+    """
+    i = text.find(ENV_BLOCK_START)
+    if i == -1:
+        return text, {}, ""
+    j = text.find(ENV_BLOCK_END, i)
+    if j == -1:
+        return text, {}, ""
+    values = {}
+    for line in text[i + len(ENV_BLOCK_START):j].splitlines():
+        hit = _ENV_ASSIGN_RE.match(line)
+        if hit:
+            values[hit.group(1)] = hit.group(2)
+    return text[:i], values, text[j + len(ENV_BLOCK_END):]
+
+
+def _render_env_block(kind, values):
+    body = "".join(_export_line(kind, k, v) for k, v in sorted(values.items()))
+    return f"{ENV_BLOCK_START}\n{body}{ENV_BLOCK_END}\n"
+
+
 def _ensure_shell_env(var, val, do_write):
-    """Idempotently make VAR=val available to OpenCode via the shell rc.
-    Returns a human note. Only writes when do_write is true."""
-    if os.environ.get(var):
-        return f"{var} already set in this shell."
+    """Make VAR=val available to OpenCode via the shell rc. Returns a human note;
+    only writes when do_write is true.
+
+    Two properties matter here, because this runs on EVERY sync with whatever models
+    happen to be live at that moment:
+
+    * Managed block, rewritten in place -- re-syncing updates the existing line
+      instead of appending another `export`, so the rc never accumulates duplicates.
+    * RAISE-ONLY for numeric values. OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX is a
+      per-step CEILING, not a target; the real per-model capping comes from each
+      provider's limit.output and the plugin's maxOutputTokens. So a sync that finds
+      only a small-output model must not lower a ceiling a big-output model needs --
+      otherwise swapping models silently truncates a reasoning model mid-thought.
+    """
     rc, kind = _shell_rc()
-    if not do_write:
-        return (f"set {var} to use this:  {_export_line(kind, var, val).strip()}  "
-                f"(add to {rc}, or re-run with --write-shell-env)")
+
+    def _num(x):
+        try:
+            return int(str(x).strip())
+        except (TypeError, ValueError):
+            return None
+
+    new_n = _num(val)
+
     try:
         existing = ""
         if os.path.exists(rc):
             with open(rc) as f:
                 existing = f.read()
-        if var in existing:
-            return f"{var} already present in {rc}."
-        os.makedirs(os.path.dirname(rc), exist_ok=True)
-        with open(rc, "a") as f:
-            f.write(f"\n# added by omodel-wire.py\n{_export_line(kind, var, val)}")
-        return f"Appended {var}={val} to {rc} (open a new shell to apply)."
     except OSError as e:
-        return f"could not edit {rc} ({e}); set {var}={val} yourself."
+        return f"could not read {rc} ({e}); set {var}={val} yourself."
+
+    before, managed, after = _split_env_block(existing)
+    cur = managed.get(var)
+    cur_n = _num(cur)
+
+    # Raise-only: keep the bigger of the two when both sides are numeric.
+    keep_current = cur is not None and (
+        (new_n is not None and cur_n is not None and cur_n >= new_n) or
+        (new_n is None and cur == val))
+    target = cur if keep_current else val
+
+    # An assignment OUTSIDE our block wins at shell-eval time (last one wins), so
+    # surface it rather than silently fighting it on every sync.
+    stray = any(_ENV_ASSIGN_RE.match(ln) and _ENV_ASSIGN_RE.match(ln).group(1) == var
+                for ln in (before + after).splitlines())
+
+    if not do_write:
+        if keep_current:
+            return f"{var} already {cur} in {rc} (>= {val})."
+        return (f"set {var} to use this:  {_export_line(kind, var, target).strip()}  "
+                f"(add to {rc}, or re-run with --write-shell-env)")
+
+    note_stray = (f"  NOTE: an unmanaged {var} assignment elsewhere in {rc} "
+                  f"may override this.") if stray else ""
+
+    if keep_current and not stray:
+        return f"{var} already {cur} in {rc} (>= {val}); left as is."
+
+    managed[var] = target
+    try:
+        os.makedirs(os.path.dirname(rc), exist_ok=True)
+        body = _render_env_block(kind, managed)
+        if before and not before.endswith("\n"):
+            before += "\n"
+        with open(rc, "w") as f:
+            f.write(before + body + after)
+    except OSError as e:
+        return f"could not edit {rc} ({e}); set {var}={target} yourself."
+
+    what = "kept at" if keep_current else "set to"
+    live = os.environ.get(var)
+    live_note = ""
+    if live and _num(live) is not None and new_n is not None and _num(live) < new_n:
+        live_note = f"  (current shell still has {var}={live}; open a new shell)"
+    return (f"{var} {what} {target} in {rc} (managed block)."
+            f"{live_note}{note_stray}")
 
 
 def install_aliases():
