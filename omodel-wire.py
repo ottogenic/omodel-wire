@@ -3012,9 +3012,6 @@ def oc_provider_sync(args):
                     entry["temperature"] = sampling_values["temperature"]
                 if "top_p" in sampling_values:
                     entry["top_p"] = sampling_values["top_p"]
-                options = _builtin_preset_options(recipe, preset)
-                if options:
-                    entry["options"] = options
         if entry:
             agents[agent_name] = entry
         else:

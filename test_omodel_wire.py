@@ -1580,14 +1580,15 @@ class TestProviderOnlySync(unittest.TestCase):
                              "dgx-n1-8000/Qwen3.6-27B-NVFP4")
             self.assertEqual(cfg["agent"]["build"]["temperature"], 0.6)
             self.assertEqual(cfg["agent"]["plan"]["temperature"], 1.0)
-            self.assertEqual(cfg["agent"]["build"]["options"],
-                             {"chat_template_kwargs": {"enable_thinking": True}})
+            self.assertNotIn("options", cfg["agent"]["build"])
+            self.assertNotIn("options", cfg["agent"]["plan"])
             with open(os.path.join(tmp, "plugins", "dgx-sampling.js"),
                       encoding="utf-8") as f:
                 plugin = f.read()
             self.assertIn('"build"', plugin)
             self.assertIn('"plan"', plugin)
             self.assertIn('"topK": 20', plugin)
+            self.assertIn('"enable_thinking": true', plugin)
             self.assertIn("input.message.model.variant", plugin)
             self.assertIn("if (!(key in variant))", plugin)
 
