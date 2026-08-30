@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Build/Plan sampling now follows the model selected at request time.** Native agent
+  blocks retain only their model selection instead of baking in the model that happened
+  to be selected during sync; the generated per-model plugin owns temperature, top-p,
+  and top-k and explicitly clears parameters omitted by a model's TOML. Endpoint
+  discovery also retries one transient reset so a busy live model is less likely to be
+  dropped from the provider and sampling tables.
 - **`omw verify`'s vision probe no longer false-negatives on servers that choke on
   degenerate images.** The test image was a 1x1 RGBA PNG -- a degenerate size/depth
   that at least one live vLLM build hung on indefinitely (probe timeout -> `vision`

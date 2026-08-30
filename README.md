@@ -50,10 +50,10 @@ omw config
 - Adds one OpenCode provider per live host and port.
 - Adds every model currently returned by that endpoint's `/v1/models` response.
 - Replaces stale providers named `dgx-*` and legacy `dgx`/`dgxN` keys.
-- Maps native Build to each model's TOML `code` preset and native Plan to its
-  `reason` preset.
-- Writes `plugins/dgx-sampling.js` so `top_k`, `min_p`, penalties, native reasoning
-  options, and output limits follow the current model and built-in agent.
+- Maps native Build to each model's TOML `build` preset and native Plan to its
+  `plan` preset while keeping their config blocks free of model-specific sampling.
+- Writes `plugins/dgx-sampling.js` so temperature, `top_p`, `top_k`, penalties,
+  native reasoning options, and output limits follow the current model and built-in agent.
 - Preserves unrelated agents, agent fields, OpenCode settings, and providers.
 - Removes stale managed top-level model references and old disabled Build/Plan stubs.
 - Refuses to write when no endpoint responds unless `--allow-empty` is explicit.

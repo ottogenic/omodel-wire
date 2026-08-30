@@ -182,6 +182,37 @@ class FakeProbes:
             setattr(m, name, fn)
 
 
+class TestDiscoveryProbe(unittest.TestCase):
+    def test_retries_one_transient_endpoint_failure(self):
+        calls = []
+        original = m.urllib.request.urlopen
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+            def read(self):
+                return json.dumps({"data": [{"id": "deepseek", "max_model_len": 1048576}]}).encode()
+
+        def urlopen(request, timeout):
+            calls.append((request.full_url, timeout))
+            if len(calls) == 1:
+                raise m.urllib.error.URLError("transient reset")
+            return Response()
+
+        m.urllib.request.urlopen = urlopen
+        try:
+            found = m.probe("otto-dgx-1.example", 8000, 2.0)
+        finally:
+            m.urllib.request.urlopen = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(found, [{"id": "deepseek", "max_model_len": 1048576}])
+
+
 # --------------------------------------------------------------------------- #
 # Roster / spec integrity
 # --------------------------------------------------------------------------- #
@@ -1578,8 +1609,8 @@ class TestProviderOnlySync(unittest.TestCase):
                           cfg["provider"]["dgx-n1-8000"]["models"])
             self.assertEqual(cfg["agent"]["build"]["model"],
                              "dgx-n1-8000/Qwen3.6-27B-NVFP4")
-            self.assertEqual(cfg["agent"]["build"]["temperature"], 0.6)
-            self.assertEqual(cfg["agent"]["plan"]["temperature"], 1.0)
+            self.assertEqual(set(cfg["agent"]["build"]), {"model"})
+            self.assertEqual(set(cfg["agent"]["plan"]), {"model"})
             self.assertNotIn("options", cfg["agent"]["build"])
             self.assertNotIn("options", cfg["agent"]["plan"])
             with open(os.path.join(tmp, "plugins", "dgx-sampling.js"),
@@ -1591,6 +1622,22 @@ class TestProviderOnlySync(unittest.TestCase):
             self.assertIn('"enable_thinking": true', plugin)
             self.assertIn("input.message.model.variant", plugin)
             self.assertIn("if (!(key in variant))", plugin)
+            self.assertIn('output.temperature = "temperature" in sampling', plugin)
+            self.assertIn('output.topP = "topP" in sampling', plugin)
+            self.assertIn('output.topK = "topK" in sampling', plugin)
+
+    def test_deepseek_vector_clears_undeclared_top_k(self):
+        configs = m.load_configs(os.path.join(os.path.dirname(__file__), "..",
+                                               "omodel-manager", "configs"))
+        recipe = m.match_recipe("deepseek-v4-flash-dspark", configs)
+        if not recipe:
+            self.skipTest("sibling omodel-manager DeepSeek config not available")
+        vector = m._builtin_preset_vector(recipe, recipe["presets"]["build"])
+        self.assertEqual(vector["temperature"], 1.0)
+        self.assertEqual(vector["topP"], 0.95)
+        self.assertNotIn("topK", vector)
+        plugin = m.oc_builtin_sampling_plugin_js({"deepseek-v4-flash-dspark": {"build": vector}})
+        self.assertIn('output.topK = "topK" in sampling ? sampling.topK : undefined', plugin)
 
     def test_preserves_every_unrelated_config_field(self):
         initial = {

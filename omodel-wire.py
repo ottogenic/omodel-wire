@@ -102,6 +102,7 @@ def load_shared_hosts():
         pass
     return out
 PROBE_TIMEOUT = 2.0                    # seconds per /v1/models probe
+PROBE_ATTEMPTS = 2                     # tolerate one transient reset from a busy endpoint
 VISION_TIMEOUT = 30.0                  # seconds for the image probe (first call is slow)
 VISION_MAXTOKENS = 2048                # a vision *reasoning* model can burn a lot of tokens
                                         # thinking before it emits the answer; too low ->
@@ -1370,13 +1371,16 @@ def host_label(host):
 def probe(host, port, timeout):
     """Return list of {id, max_model_len} for a live endpoint, or None if dead."""
     url = f"http://{host}:{port}/v1/models"
-    try:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, ValueError):
-        return None
+    for attempt in range(PROBE_ATTEMPTS):
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+                json.JSONDecodeError, ValueError):
+            if attempt + 1 == PROBE_ATTEMPTS:
+                return None
     models = []
     for m in data.get("data", []):
         mid = m.get("id")
@@ -2906,9 +2910,9 @@ export const DgxSampling = async () => ({{
     const model = input && input.model ? input.model : {{}}
     const sampling = (SAMPLING[model.id] || {{}})[input.agent]
     if (!sampling) return
-    if ("temperature" in sampling) output.temperature = sampling.temperature
-    if ("topP" in sampling) output.topP = sampling.topP
-    if ("topK" in sampling) output.topK = sampling.topK
+    output.temperature = "temperature" in sampling ? sampling.temperature : undefined
+    output.topP = "topP" in sampling ? sampling.topP : undefined
+    output.topK = "topK" in sampling ? sampling.topK : undefined
     if ("maxOutputTokens" in sampling) output.maxOutputTokens = sampling.maxOutputTokens
     if (sampling.options) {{
       output.options = output.options || {{}}
@@ -3003,15 +3007,6 @@ def oc_provider_sync(args):
             return 2
         if model_ref:
             entry["model"] = model_ref
-            model_id = model_ref.split("/", 1)[1]
-            recipe = match_recipe(model_id, configs)
-            preset = (recipe or {}).get("presets", {}).get(preset_role)
-            if preset:
-                sampling_values = preset.get("sampling") or {}
-                if "temperature" in sampling_values:
-                    entry["temperature"] = sampling_values["temperature"]
-                if "top_p" in sampling_values:
-                    entry["top_p"] = sampling_values["top_p"]
         if entry:
             agents[agent_name] = entry
         else:
