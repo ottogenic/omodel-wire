@@ -80,6 +80,36 @@ class LoaderTests(unittest.TestCase):
     def test_missing_dir_is_empty(self):
         self.assertEqual(mw.load_configs(os.path.join(self.tmp, "nope"))["recipes"], [])
 
+    def test_recursive_metadata_and_deterministic_order(self):
+        for kind, name in (("node", "zeta"), ("card", "alpha"), ("cluster", "middle")):
+            folder = pathlib.Path(self.tmp) / kind
+            folder.mkdir(exist_ok=True)
+            (folder / f"{name}.toml").write_text(
+                f'match = ["{name}"]\n', encoding="utf-8")
+        recipes = mw.load_configs(self.tmp)["recipes"]
+        metadata = [(r["_file"], r["_key"], r.get("_kind")) for r in recipes]
+        self.assertEqual(metadata, [
+            ("card/alpha.toml", "alpha", "card"),
+            ("cluster/middle.toml", "middle", "cluster"),
+            ("fixture-model.toml", "fixture-model", None),
+            ("node/zeta.toml", "zeta", "node"),
+        ])
+
+    def test_duplicate_stems_remain_addressable_by_exact_relative_path(self):
+        for kind in ("card", "node"):
+            folder = pathlib.Path(self.tmp) / kind
+            folder.mkdir()
+            (folder / "duplicate.toml").write_text(
+                f'match = ["{kind}"]\n', encoding="utf-8")
+        recipes = mw.load_configs(self.tmp)["recipes"]
+        duplicate = [r for r in recipes if r["_key"] == "duplicate"]
+        self.assertEqual([r["_file"] for r in duplicate],
+                         ["card/duplicate.toml", "node/duplicate.toml"])
+        self.assertEqual(
+            mw._recipe_for_config("node/duplicate.toml", {"recipes": duplicate})["match"],
+            ["node"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

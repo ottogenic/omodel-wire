@@ -35,6 +35,7 @@ import tempfile
 import types
 import unittest
 import sys
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULE_PATH = os.path.join(HERE, "omodel-wire.py")
@@ -520,6 +521,7 @@ class TestVariantsAndPlugin(unittest.TestCase):
         js = m.oc_agent_sampling_plugin_js({mid: sampling}, mid)
         self.assertIn("chat.params", js)
         self.assertIn(m.PROVIDER_PREFIX, js)
+        self.assertIn(m.DEPLOYMENT_PROVIDER_PREFIX, js)
         self.assertIn("input.model", js)   # sampling is now keyed by the running model
         self.assertIn("input.message.model.variant", js)
         self.assertIn("if (!(k in variant))", js)
@@ -696,6 +698,268 @@ class TestProviders(unittest.TestCase):
         entry = providers["dgx-n1-8000"]["models"]["Qwen3.6-27B-NVFP4"]
         self.assertTrue(entry["attachment"])
         self.assertEqual(entry["modalities"]["input"], ["text", "image"])
+
+
+class TestManagedDeployments(unittest.TestCase):
+    SD = {"mode": "server-default", "temperature": None, "top_p": None,
+          "top_k": None, "presence_penalty": None, "frequency_penalty": None}
+
+    @staticmethod
+    def endpoint(device, kind, port, served="Qwen3.6-27B-NVFP4",
+                 model_config="qwen3.6-27b-nvfp4.toml"):
+        return {
+            "device": device, "kind": kind, "profile": "fixture",
+            "served_model": served, "model_config": model_config,
+            "base_url": f"http://192.0.2.{port - 7900}:{port}/v1",
+            "host": f"192.0.2.{port - 7900}", "port": port,
+        }
+
+    @contextlib.contextmanager
+    def probes(self, responses):
+        original = m.probe_endpoint
+        m.probe_endpoint = lambda base, timeout: responses.get(base)
+        try:
+            yield
+        finally:
+            m.probe_endpoint = original
+
+    def test_card_node_cluster_keys_and_dead_record_ignored(self):
+        endpoints = [
+            self.endpoint("Spark Card", "card", 8000),
+            self.endpoint("Rack/Node", "node", 8001),
+            self.endpoint("Training Cluster", "cluster", 8002),
+            self.endpoint("Dead Node", "node", 8003),
+        ]
+        responses = {
+            e["base_url"]: ([{"id": e["served_model"], "max_model_len": 65536}]
+                            if e["device"] != "Dead Node" else None)
+            for e in endpoints
+        }
+        with self.probes(responses):
+            providers, refs, _, _ = m.oc_build_providers(
+                [], [], 1.0, self.SD, profiles=True, recipes=FIXTURE_CONFIGS,
+                verbose=False, endpoints=endpoints)
+        self.assertEqual(set(providers), {
+            "otools-spark-card", "otools-rack-node", "otools-training-cluster"})
+        self.assertNotIn("otools-dead-node", providers)
+        self.assertIn("card", providers["otools-spark-card"]["name"].lower())
+        self.assertIn("Spark Card", providers["otools-spark-card"]["name"])
+        self.assertEqual(len(refs), 3)
+
+    def test_exact_model_config_applies_only_to_recorded_served_model(self):
+        exact = {
+            "_file": "card/exact.toml", "_key": "exact", "match": ["never-fuzzy"],
+            "capabilities": {"reasoning": True, "tool_call": True,
+                             "thinking_control": "enable_thinking"},
+            "presets": {"plan": {"sampling": {"temperature": 0.31}},
+                        "build": {"sampling": {"temperature": 0.41}}},
+        }
+        fuzzy_extra = {
+            "_file": "node/extra.toml", "_key": "extra", "match": ["extra-model"],
+            "capabilities": {"reasoning": False, "tool_call": True},
+        }
+        recipes = {"recipes": [exact, fuzzy_extra]}
+        endpoint = self.endpoint("Card One", "card", 8000, "served-special",
+                                 "card/exact.toml")
+        responses = {endpoint["base_url"]: [
+            {"id": "served-special", "max_model_len": 65536},
+            {"id": "extra-model", "max_model_len": 65536},
+        ]}
+        with self.probes(responses):
+            providers, _, _, available = m.oc_build_providers(
+                [], [], 1.0, self.SD, profiles=True, recipes=recipes,
+                verbose=False, endpoints=[endpoint])
+        models = providers["otools-card-one"]["models"]
+        self.assertTrue(models["served-special"]["reasoning"])
+        self.assertNotIn("reasoning", models["extra-model"])
+        self.assertIs(available["otools-card-one/served-special"]["recipe"], exact)
+        self.assertIs(available["otools-card-one/extra-model"]["recipe"], fuzzy_extra)
+        selected = m._recipe_for_model_ref(
+            "otools-card-one/served-special", recipes, available)
+        self.assertEqual(selected["presets"]["build"]["sampling"]["temperature"], 0.41)
+
+    def test_stale_recorded_identity_warns_and_uses_returned_model_fuzzy_match(self):
+        endpoint = self.endpoint("Node One", "node", 8000, "old-model",
+                                 "card/incorrect.toml")
+        responses = {endpoint["base_url"]: [
+            {"id": "Qwen3.6-27B-NVFP4", "max_model_len": 65536}]}
+        output = io.StringIO()
+        with self.probes(responses), contextlib.redirect_stdout(output):
+            providers, _, _, _ = m.oc_build_providers(
+                [], [], 1.0, self.SD, profiles=True, recipes=FIXTURE_CONFIGS,
+                verbose=False, endpoints=[endpoint])
+        entry = providers["otools-node-one"]["models"]["Qwen3.6-27B-NVFP4"]
+        self.assertTrue(entry["reasoning"])
+        self.assertIn("did not serve recorded model 'old-model'", output.getvalue())
+
+    def test_managed_sync_prunes_old_dgx_provider_and_reports_endpoint_count(self):
+        endpoint = self.endpoint("Node One", "node", 8000)
+        card = self.endpoint("b70", "card", 8001,
+                             "qwen3.8-27b-gptq-int4-b70")
+        responses = {
+            endpoint["base_url"]: [
+                {"id": endpoint["served_model"], "max_model_len": 65536}],
+            card["base_url"]: [
+                {"id": card["served_model"], "max_model_len": 262144}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "opencode.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "provider": {
+                        "dgx-stale-8000": {"models": {"old": {}}},
+                        "b70-local": m.RETIRED_B70_PROVIDER,
+                    },
+                    "model": "b70-local/qwen3.8-27b",
+                    "small_model": "b70-local/qwen3.8-27b",
+                    "agent": {
+                        "custom": {"model": "dgx-stale-8000/Qwen3.6-27B-NVFP4"},
+                        "build": {"model": "dgx-stale-8000/Qwen3.6-27B-NVFP4"},
+                        "plan": {"model": "dgx-stale-8000/Qwen3.6-27B-NVFP4"},
+                        "card-user": {"model": "b70-local/qwen3.8-27b"},
+                    },
+                }, f)
+            args = make_args(tmp, _hosts=[], _ports=[], _endpoints=[endpoint, card])
+            output = io.StringIO()
+            with self.probes(responses), contextlib.redirect_stdout(output):
+                self.assertEqual(m.oc_provider_sync(args), 0)
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            self.assertNotIn("dgx-stale-8000", cfg["provider"])
+            self.assertNotIn("b70-local", cfg["provider"])
+            self.assertIn("otools-node-one", cfg["provider"])
+            self.assertIn("otools-b70", cfg["provider"])
+            self.assertEqual(cfg["agent"]["custom"]["model"],
+                             "otools-node-one/Qwen3.6-27B-NVFP4")
+            self.assertEqual(cfg["agent"]["build"]["model"],
+                             "otools-node-one/Qwen3.6-27B-NVFP4")
+            self.assertEqual(cfg["agent"]["plan"]["model"],
+                             "otools-node-one/Qwen3.6-27B-NVFP4")
+            self.assertEqual(cfg["agent"]["card-user"]["model"],
+                             "otools-b70/qwen3.8-27b-gptq-int4-b70")
+            self.assertEqual(cfg["model"], "otools-b70/qwen3.8-27b-gptq-int4-b70")
+            self.assertEqual(cfg["small_model"],
+                             "otools-b70/qwen3.8-27b-gptq-int4-b70")
+            self.assertIn("Probing 2 managed deployment endpoint(s)", output.getvalue())
+
+    def test_retired_b70_match_rejects_any_customization(self):
+        self.assertTrue(m.oc_is_retired_b70_provider("b70-local", m.RETIRED_B70_PROVIDER))
+        customized = json.loads(json.dumps(m.RETIRED_B70_PROVIDER))
+        customized["models"]["qwen3.8-27b"]["limit"]["output"] = 4096
+        self.assertFalse(m.oc_is_retired_b70_provider("b70-local", customized))
+        customized = json.loads(json.dumps(m.RETIRED_B70_PROVIDER))
+        customized["custom"] = True
+        self.assertFalse(m.oc_is_retired_b70_provider("b70-local", customized))
+
+    def test_registry_loader_and_absent_registry_fallback(self):
+        old_deployments = m.DEPLOYMENTS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = os.path.join(tmp, "deployments.json")
+            record = self.endpoint("Node One", "node", 8000)
+            record = {k: record[k] for k in
+                      ("device", "kind", "profile", "served_model", "model_config", "base_url")}
+            with open(registry, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 1,
+                           "deployments": {"Node One": record}}, f)
+            m.DEPLOYMENTS_FILE = registry
+            try:
+                loaded = m.load_deployments()
+                self.assertEqual(loaded[0]["host"], "192.0.2.100")
+                self.assertEqual(loaded[0]["port"], 8000)
+                m.DEPLOYMENTS_FILE = os.path.join(tmp, "missing.json")
+                args = types.SimpleNamespace(hosts=None, ports=None,
+                                             _settings={"hosts": "198.51.100.7",
+                                                        "ports": "9000"})
+                m._resolve_sync_discovery(args)
+                self.assertIsNone(args._endpoints)
+                self.assertEqual(args._hosts, ["198.51.100.7"])
+                self.assertEqual(args._ports, [9000])
+            finally:
+                m.DEPLOYMENTS_FILE = old_deployments
+
+    def test_malformed_or_wrong_version_registry_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deployments.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 2,
+                           "deployments": {}}, f)
+            with quiet():
+                self.assertEqual(m.load_deployments(path), [])
+
+    def test_invalid_registry_fails_closed_without_legacy_discovery(self):
+        old_deployments = m.DEPLOYMENTS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deployments.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 2,
+                           "deployments": {}}, f)
+            m.DEPLOYMENTS_FILE = path
+            args = types.SimpleNamespace(hosts=None, ports=None,
+                                         _settings={"hosts": "198.51.100.7",
+                                                    "ports": "9000"})
+            try:
+                with quiet():
+                    m._resolve_sync_discovery(args)
+                self.assertEqual(args._endpoints, [])
+                self.assertEqual(args._hosts, [])
+                self.assertEqual(args._ports, [])
+                self.assertTrue(args._deployment_registry_invalid)
+            finally:
+                m.DEPLOYMENTS_FILE = old_deployments
+
+    def test_registry_requires_exact_profile_and_model_config_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deployments.json")
+            record = self.endpoint("Node One", "node", 8000)
+            record["model_config"] = ""
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 1,
+                           "deployments": {"Node One": record}}, f)
+            with quiet():
+                status, endpoints = m.load_deployments(path, with_status=True)
+            self.assertEqual(status, "invalid")
+            self.assertEqual(endpoints, [])
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 1,
+                           "deployments": {"bad": {
+                               "device": "bad", "kind": "node",
+                               "base_url": "ssh://example.test:8000/v1"}}}, f)
+            with quiet():
+                self.assertEqual(m.load_deployments(path), [])
+
+    def test_invalid_registry_cannot_prune_with_allow_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "opencode.json")
+            original = {"provider": {"otools-node": {"models": {"served": {}}}}}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(original, f)
+            args = make_args(tmp, allow_empty=True, _hosts=[], _ports=[], _endpoints=[])
+            args._deployment_registry_invalid = True
+            with quiet():
+                self.assertEqual(m.oc_provider_sync(args), 2)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), original)
+
+    def test_provider_id_collision_invalidates_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deployments.json")
+            first = self.endpoint("Rack/Node", "node", 8000)
+            second = self.endpoint("Rack-Node", "node", 8001)
+            fields = ("device", "kind", "profile", "served_model", "model_config", "base_url")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"$otools": "model_deployments", "version": 1,
+                           "deployments": {
+                               "one": {key: first[key] for key in fields},
+                               "two": {key: second[key] for key in fields},
+                           }}, f)
+            with quiet():
+                status, endpoints = m.load_deployments(path, with_status=True)
+            self.assertEqual(status, "invalid")
+            self.assertEqual(endpoints, [])
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("not json")
+            with quiet():
+                self.assertEqual(m.load_deployments(path), [])
 
 
 # --------------------------------------------------------------------------- #
@@ -1625,6 +1889,44 @@ class TestProviderOnlySync(unittest.TestCase):
             self.assertIn('output.temperature = "temperature" in sampling', plugin)
             self.assertIn('output.topP = "topP" in sampling', plugin)
             self.assertIn('output.topK = "topK" in sampling', plugin)
+            self.assertIn('"dgx-n1-8000/Qwen3.6-27B-NVFP4"', plugin)
+
+    def test_builtin_sampling_is_qualified_by_provider_and_model(self):
+        plugin = m.oc_builtin_sampling_plugin_js({
+            "otools-card/shared": {"build": {"temperature": 0.1}},
+            "otools-node/shared": {"build": {"temperature": 0.9}},
+        })
+        self.assertIn('"otools-card/shared"', plugin)
+        self.assertIn('"otools-node/shared"', plugin)
+        self.assertIn("`${providerID}/${model.id}`", plugin)
+
+    def test_dry_run_never_enables_shell_environment_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            original_ensure = m._ensure_shell_env
+            original_configs = m.load_configs
+            m._ensure_shell_env = lambda key, value, write: calls.append(
+                (key, value, write)) or "previewed"
+            m.load_configs = lambda _: {"recipes": [{
+                "_file": "node/wide.toml", "_key": "wide",
+                "match": ["Qwen3.6-27B-NVFP4"],
+                "capabilities": {"reasoning": True, "tool_call": True,
+                                 "thinking_control": "enable_thinking"},
+                "presets": {
+                    "plan": {"thinking": True, "max_output": 65536, "sampling": {}},
+                    "build": {"thinking": True, "max_output": 32768, "sampling": {}},
+                },
+            }]}
+            try:
+                args = make_args(tmp, dry_run=True, write_shell_env=True)
+                with FakeProbes(), quiet():
+                    self.assertEqual(m.oc_provider_sync(args), 0)
+            finally:
+                m._ensure_shell_env = original_ensure
+                m.load_configs = original_configs
+            self.assertTrue(calls)
+            self.assertFalse(calls[0][2])
+            self.assertFalse(os.path.exists(os.path.join(tmp, "opencode.json")))
 
     def test_deepseek_vector_clears_undeclared_top_k(self):
         configs = m.load_configs(os.path.join(os.path.dirname(__file__), "..",
@@ -1759,6 +2061,15 @@ class TestProviderOnlySync(unittest.TestCase):
         self.assertNotIn("audit", commands)
         self.assertNotIn("loom", commands)
 
+    def test_sync_help_hides_legacy_hosts_and_ports_flags(self):
+        parser = m._build_parser()
+        command_action = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction))
+        sync_help = command_action.choices["sync"].format_help()
+        self.assertNotIn("--hosts", sync_help)
+        self.assertNotIn("--ports", sync_help)
+
 
 # --------------------------------------------------------------------------- #
 # Plugin directory -- must match OpenCode docs (https://opencode.ai/docs/plugins/)
@@ -1854,6 +2165,46 @@ class TestAudit(unittest.TestCase):
             args = make_args(tmp)
             with quiet():
                 self.assertEqual(m.oc_audit(args), 2)
+
+
+class TestVerify(unittest.TestCase):
+    def test_registered_endpoint_failure_is_a_mismatch(self):
+        configs = {"recipes": [{
+            "_file": "node/live.toml", "match": ["live-model"],
+            "capabilities": {"reasoning": True, "vision": False},
+        }]}
+        endpoints = [
+            {"device": "live", "host": "192.0.2.1", "port": 8000,
+             "base_url": "http://192.0.2.1:8000/v1", "served_model": "live-model",
+             "model_config": "node/live.toml"},
+            {"device": "down", "host": "192.0.2.2", "port": 8000,
+             "base_url": "http://192.0.2.2:8000/v1", "served_model": "down-model",
+             "model_config": "node/down.toml"},
+        ]
+        args = types.SimpleNamespace(configs="unused", timeout=1, _endpoints=endpoints)
+        responses = {endpoints[0]["base_url"]: [{"id": "live-model"}],
+                     endpoints[1]["base_url"]: None}
+        output = io.StringIO()
+        with mock.patch.object(m, "load_configs", return_value=configs), \
+                mock.patch.object(m, "probe_endpoint",
+                                  side_effect=lambda base, timeout: responses[base]), \
+                mock.patch.object(m, "probe_reasoning", return_value={"reasoning": True}), \
+                mock.patch.object(m, "probe_vision", return_value=(False, None, "text-only")), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(m.oc_verify(args), 1)
+        self.assertIn("[DOWN] endpoint did not return any models", output.getvalue())
+
+    def test_all_registered_endpoints_down_is_failure(self):
+        endpoint = {"device": "down", "host": "192.0.2.2", "port": 8000,
+                    "base_url": "http://192.0.2.2:8000/v1",
+                    "served_model": "down-model", "model_config": "node/down.toml"}
+        args = types.SimpleNamespace(configs="unused", timeout=1, _endpoints=[endpoint])
+        output = io.StringIO()
+        with mock.patch.object(m, "load_configs", return_value={"recipes": []}), \
+                mock.patch.object(m, "probe_endpoint", return_value=None), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(m.oc_verify(args), 1)
+        self.assertIn("1 registered endpoint(s) unavailable", output.getvalue())
 
 
 class TestSharedHosts(unittest.TestCase):
@@ -2013,6 +2364,10 @@ class TestCliViews(unittest.TestCase):
                 self.assertNotIn("team_model", loaded)
                 self.assertNotIn("web_search", loaded)
                 self.assertEqual(loaded["ports"], "8000")
+                with open(m.WIRE_SETTINGS_FILE, encoding="utf-8") as f:
+                    persisted = json.load(f)
+                self.assertIn("team_model", persisted)
+                self.assertIn("web_search", persisted)
             finally:
                 m.WIRE_SETTINGS_FILE = old
 
@@ -2057,7 +2412,7 @@ class TestCliViews(unittest.TestCase):
             synced = types.SimpleNamespace(_settings={"configs_dir": FIXTURE_DIR,
                                                        "opencode_config": cfg})
             out = _capture(m.cmd_home, synced)
-            self.assertIn("1 DGX provider(s), 1 model(s)", out)
+            self.assertIn("1 managed provider(s), 1 model(s)", out)
             self.assertIn("omw sync", out)
 
     def test_main_dispatch_config_path(self):

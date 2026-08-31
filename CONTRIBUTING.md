@@ -64,7 +64,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 1. `python3 -m unittest test_omodel_wire` passes (expected-failures are fine; hard
    failures are not), and `python3 -m py_compile omodel-wire.py` passes.
 2. `python3 omodel-wire.py --dry-run` and `--profiles --dry-run` produce sane output.
-3. Model configs are owned by **omodel-manager** (`configs/*.toml`); this tool only
+3. Model configs are owned by **omodel-manager** (recursive `configs/**/*.toml`); this tool only
    consumes them. Adding/tuning a model happens there, not here.
 4. Docs updated (`README.md` for user-facing flags, `AGENTS.md` for architecture) and a
    `CHANGELOG.md` entry added under **Unreleased**.

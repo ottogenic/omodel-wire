@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Manager deployments now fail closed and retain exact config identity.** Sync distinguishes
+  an absent or valid-empty deployment registry from a malformed one, validates all required
+  endpoint fields, preserves same-stem TOMLs in different device-kind directories, and migrates
+  unambiguous legacy `dgx-*` agent model refs to their `otools-<device>` replacement. Dry-run no
+  longer rewrites retired settings or shell environment files. Invalid intent cannot prune with
+  `--allow-empty`, colliding device/provider ids are rejected, and native sampling is keyed by
+  provider plus model so identical served ids on different devices retain their exact config.
 - **Build/Plan sampling now follows the model selected at request time.** Native agent
   blocks retain only their model selection instead of baking in the model that happened
   to be selected during sync; the generated per-model plugin owns temperature, top-p,

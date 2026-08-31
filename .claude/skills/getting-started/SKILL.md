@@ -1,18 +1,20 @@
 ---
 name: getting-started
-description: End-to-end onboarding for the otools DGX stack — serve local models on a DGX host with omodel-manager (omm) and wire them into OpenCode with omodel-wire (omw). Use when a user is setting up from scratch or asks how to install, provision a host, launch a model, install OpenCode, sync the agent roster, or "help me get started / onboard / set this up". Covers shell aliases, DGX provisioning, launching a first model, the HuggingFace token, installing OpenCode, and syncing + tweaking the agent roster.
+description: End-to-end onboarding for the otools model stack — serve local models on managed card, node, or cluster devices with omodel-manager (omm) and wire them into OpenCode with omodel-wire (omw).
 ---
 
-# Getting started with the otools DGX stack
+# Getting started with the otools model stack
 
 Two sibling tools, run in this order:
 
 | Tool | Alias | Job |
 | --- | --- | --- |
-| **omodel-manager** | `omm` | Launches & manages vLLM model containers on your DGX host(s). |
-| **omodel-wire** | `omw` | Discovers those live models and wires them into **OpenCode** as an agent roster. |
+| **omodel-manager** | `omm` | Launches and manages vLLM deployments on card, node, and cluster devices. |
+| **omodel-wire** | `omw` | Probes the manager's deployment registry and wires live models into **OpenCode**. |
 
-`omw` reads `omm`'s model configs from the sibling `../omodel-manager/configs` (or `--configs` / `$OMODEL_CONFIGS`), so keep both repos checked out side by side.
+`omw` reads `omm`'s recursive `configs/card`, `configs/node`, and `configs/cluster`
+model configs plus `~/.config/otools/deployments.json` (override
+`OMODEL_MANAGER_DEPLOYMENTS`). Keep both repos checked out side by side.
 
 ## How to drive this guide (for the AI assistant)
 
@@ -99,7 +101,7 @@ Alternatives: `npm install -g opencode-ai` (or `bun`/`pnpm`). Docs: <https://ope
 
 ---
 
-## 6. Sync the agent roster (omw)
+## 6. Sync OpenCode (omw)
 
 With at least one model live (step 3) and OpenCode installed, wire it up:
 
@@ -107,63 +109,34 @@ With at least one model live (step 3) and OpenCode installed, wire it up:
 omw sync         # probes your live endpoints, reads omm's configs, writes ~/.config/opencode/opencode.json
 ```
 
-`omw sync` writes the OpenCode config, sampling plugin, minimal role prompts, and global `agent-*`
-skills. It builds visible agents **research / code / agent / team** and hidden workers
-**agent-research / agent-code / agent-test / agent-instruct / agent-architect / agent-review**.
-Re-run it to reset to known-good. Useful flags: `--dry-run`, `--hosts`/`--ports`, and
-`--team-task-budget N`; model preferences live in `default_models.json`.
+`omw sync` probes each recorded deployment `base_url` exactly, ignores stale/dead
+records, and refreshes only managed `otools-*` providers plus native OpenCode Build/Plan
+model selections and their sampling plugin. Re-run it whenever deployments change.
+`--dry-run` previews the result without writing. Hosts and ports in `wire.json` are
+retained only for unmanaged fallback when the deployment registry is absent or valid-empty.
+An invalid registry fails closed instead of probing unrelated legacy endpoints.
 
 Confirm it worked (safe — run these and show output):
 
 ```bash
-omw audit        # live config vs the known-good configs
-opencode         # launch OpenCode; Tab cycles research/code/agent/team
+omw verify       # optional slow live capability check against declarations
+opencode models  # confirm otools-<device>/<served-id> refs are present
+opencode         # launch OpenCode; native Build and Plan use the synced presets
 ```
 
 ---
 
-## 7. View & tweak agents and models
-
-**See the roster:**
+## 7. Select Build and Plan models
 
 ```bash
-omw agents            # primary agents (research, code, agent, team)
-omw subagents         # all six hidden agent-* workers
-omw agents team       # detail for one agent
+opencode models       # includes otools-<device>/<served-id>
+omw sync --dry-run    # shows the Build/Plan choices without writing
 ```
 
-**See the models and their exact refs:**
-
-```bash
-omw models            # live models — the MODEL column is the host-qualified ref you pass to --set-model
-omw models --all      # include declared-but-offline models
-```
-
-`omw models` prints the **host-qualified ref** (`dgx-<host>/<served-id>`) — one row per live instance, so the same model on two hosts is two distinct refs. Copy that exact MODEL value for `--set-model` below.
-
-**Pin an agent (or all workers) to a specific model** — use the full ref from `omw models`:
-
-```bash
-omw agents code --set-model dgx-102-8000/unsloth/qwen3-coder-next-fp8   # exact host-qualified ref
-omw agents team --set-model anthropic/claude-opus-4-8                   # a cloud model works too
-omw subagents   --set-model dgx-103-8000/qwen3-coder-next-fp8           # all hidden workers at once
-```
-
-If a name maps to more than one host, `--set-model` lists the exact refs to choose from instead of guessing. (Live `--set-*` edits touch only `~/.config/opencode/`; `omw sync` resets them.)
-
-**Edit your default model preferences** — `default_models.json` in the omodel-wire repo picks each agent's model at `sync` time. Unlike `--set-model`, these are **host-agnostic**: list bare served ids in order of preference and sync resolves each to whichever host is live (falling back to a cloud model if none are). Structure:
-
-```json
-{
-  "agents":   { "team": ["unsloth/qwen3-coder-next-fp8", "openai/gpt-5.5"], "research": ["…"], "code": ["…"], "agent": ["…"] },
-  "subagents": {
-    "agent-research": ["…"], "agent-code": ["…"], "agent-test": ["…"],
-    "agent-instruct": ["…"], "agent-architect": ["…"], "agent-review": ["github-copilot/claude-opus-4.8"]
-  }
-}
-```
-
-Hand-edit that file, then `omw sync` to apply. (Offer to open it and show the current contents.)
+Use `omw sync --build-model REF --plan-model REF` to select explicit device-qualified
+refs. Without those flags, sync preserves a still-live native selection or chooses a
+compatible live model. Legacy unmanaged discovery may still produce `dgx-*` refs during
+migration, but manager deployments use `otools-*`.
 
 ---
 

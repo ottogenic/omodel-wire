@@ -75,9 +75,11 @@ An agent is an object under the top-level `agent` block (or a markdown file in
 - Per-step output is capped at **32k** unless `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX`
   is set (`--write-shell-env` appends it).
 - Anthropic extended thinking uses `options.thinking = {type:"enabled", budgetTokens:N}`
-  (NOT `reasoningEffort`) and **requires `temperature: 1.0`**. Non-`dgx-` (cloud) team
+  (NOT `reasoningEffort`) and **requires `temperature: 1.0`**. Non-managed (cloud) team
   models have their local `chat_template_kwargs` / `reasoning_effort` / `top_p` stripped
   automatically.
+- Managed providers use `otools-<device>`; old `dgx-*` providers remain recognized and
+  pruned during migration. The sampling plugin deliberately scopes to both prefixes.
 - Anthropic Pro/Max subscription OAuth was removed from OpenCode (ToS) — use an API key
   (`ANTHROPIC_API_KEY` / `/connect`).
 

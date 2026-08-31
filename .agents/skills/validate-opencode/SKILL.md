@@ -39,8 +39,9 @@ happens to equal the default proves nothing.
 > presets, flags drift, and suggests `--profiles` to re-sync. Run it first; drop to the
 > manual steps below only to understand a specific diff or to check something it doesn't.
 
-1. **Source of truth:** the matched model's preset table in omodel-manager
-   `configs/<key>.toml` (`[presets.reason|code|agent|instruct]` → sampling + `max_output`
+1. **Source of truth:** the deployment's exact recursive model config in omodel-manager,
+   such as `configs/card/<key>.toml`, `configs/node/<key>.toml`, or
+   `configs/cluster/<key>.toml` (`[presets.reason|code|agent|instruct]` → sampling + `max_output`
    + `options`).
 2. **Generated config:** read BOTH files — the sampling is split:
    - `opencode.json` agent blocks carry `temperature`, `top_p`, and the thinking

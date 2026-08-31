@@ -13,7 +13,7 @@ through **`agent-review-extend`**. This file is only the bar those skills check 
 
 - **Stdlib only** — no third-party imports.
 - **Single script** — the tool stays in `omodel-wire.py` (+ `test_*.py`). Model configs are
-  owned by omodel-manager (`configs/*.toml`); never copy them here or reintroduce
+  owned by omodel-manager (recursive `configs/**/*.toml`); never copy them here or reintroduce
   `model_recipes.json` / `DEFAULT_RECIPES` (retired in 0.2.0).
 - **LF endings** (`.gitattributes` enforces) — the shebang must stay runnable on Linux.
 - **Naming** — kebab-case CLI surface, snake_case importable Python (`test_*.py`).

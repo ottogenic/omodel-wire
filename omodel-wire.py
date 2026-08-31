@@ -7,8 +7,8 @@ Two jobs on one laptop:
   1) DETECT which agentic-dev tools you have installed (OpenCode today;
      pi.dev / Claude Code / others are stubbed for the future).
 
-  2) For the tools that support it, SYNC the OpenAI-compatible model endpoints
-     running on your DGX Spark nodes into that tool's config.
+  2) For the tools that support it, SYNC omodel-manager's OpenAI-compatible
+     card, node, and cluster deployments into that tool's config.
 
 Right now only OpenCode is wired up for syncing. The detection layer and the
 "configurator" registry are deliberately pluggable so adding pi.dev / Claude
@@ -22,8 +22,8 @@ Quick start:
   omw sync --dry-run
   omw sync
 
-`omw sync` owns DGX provider entries, native Build/Plan model and preset fields,
-and the DGX sampling plugin. It never writes custom agents, prompts, skills,
+`omw sync` owns managed provider entries, native Build/Plan model and preset fields,
+and the managed sampling plugin. It never writes custom agents, prompts, skills,
 permissions, or workflow state.
 """
 
@@ -81,6 +81,8 @@ HOST_LABELS = {                       # friendly short labels for provider keys
 # Shared with omodel-manager: `omm install`/`ps` manage this file; omw reads it so
 # both tools see the same fleet. Absent/empty -> fall back to DEFAULT_HOSTS.
 HOSTS_FILE = os.path.expanduser("~/.config/otools/hosts")
+DEPLOYMENTS_FILE = os.path.expanduser(os.environ.get(
+    "OMODEL_MANAGER_DEPLOYMENTS", "~/.config/otools/deployments.json"))
 
 
 def load_shared_hosts():
@@ -148,9 +150,11 @@ def _configs_dir(path=None):
 
 
 def load_configs(configs_dir=None):
-    """Load the generic per-model configs from <manager>/configs/*.toml (owned by
+    """Load generic per-model configs recursively from <manager>/configs (owned by
     omodel-manager). Returns {"recipes": [...]} compatible with match_recipe().
-    Non-.toml files are ignored; files that fail to parse are warned and skipped."""
+    Flat fixture directories remain supported. Non-.toml files are ignored; files
+    that fail to parse are warned and skipped. Relative paths, not filename stems,
+    are authoritative because different device kinds may share a stem."""
     d = _configs_dir(configs_dir)
     recipes = []
     if not os.path.isdir(d):
@@ -158,19 +162,120 @@ def load_configs(configs_dir=None):
               f"        point it with --configs PATH or $OMODEL_CONFIGS "
               f"(omodel-manager's configs/).")
         return {"recipes": recipes}
-    for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".toml"):
-            continue
-        p = os.path.join(d, fn)
+    paths = []
+    for root, dirs, files in os.walk(d):
+        dirs.sort()
+        for fn in sorted(files):
+            if fn.endswith(".toml"):
+                paths.append(os.path.join(root, fn))
+    for p in sorted(paths, key=lambda path: os.path.relpath(path, d).replace("\\", "/")):
+        rel = os.path.normpath(os.path.relpath(p, d)).replace("\\", "/")
+        key = os.path.splitext(os.path.basename(p))[0]
         try:
             with open(p, "rb") as f:
                 recipe = tomllib.load(f)
         except (tomllib.TOMLDecodeError, OSError) as e:
-            print(f"  warning: {fn} did not parse: {e}; skipping")
+            print(f"  warning: {rel} did not parse: {e}; skipping")
             continue
-        recipe.setdefault("_file", fn)
+        recipe["_file"] = rel
+        recipe["_key"] = key
+        first = rel.split("/", 1)[0]
+        if first in ("card", "node", "cluster") and "/" in rel:
+            recipe["_kind"] = first
         recipes.append(recipe)
     return {"recipes": recipes}
+
+
+def _recipe_for_config(model_config, recipes):
+    """Find a recipe by the manager's exact normalized configs-relative path."""
+    if not model_config:
+        return None
+    wanted = os.path.normpath(str(model_config)).replace("\\", "/").lstrip("./")
+    return next((r for r in (recipes or {}).get("recipes", [])
+                 if r.get("_file") == wanted), None)
+
+
+def _normalize_deployment(name, record):
+    """Validate and normalize one manager deployment record, or return None."""
+    if not isinstance(record, dict):
+        print(f"  warning: deployment {name!r} is not an object; skipping")
+        return None
+    device = record.get("device")
+    base_url = record.get("base_url")
+    required = ("profile", "served_model", "model_config")
+    if (not isinstance(device, str) or not device.strip() or not isinstance(base_url, str)
+            or any(not isinstance(record.get(key), str) or not record[key].strip()
+                   for key in required)):
+        print(f"  warning: deployment {name!r} is missing required endpoint fields; skipping")
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(base_url.strip())
+        host, port = parsed.hostname, parsed.port
+    except (TypeError, ValueError):
+        host, port, parsed = None, None, None
+    if parsed is None or parsed.scheme not in ("http", "https") or not host or port is None:
+        print(f"  warning: deployment {name!r} has an invalid HTTP(S) base_url with no host/port; skipping")
+        return None
+    kind = record.get("kind")
+    if kind not in ("card", "node", "cluster"):
+        print(f"  warning: deployment {name!r} has invalid kind {kind!r}; skipping")
+        return None
+    path = parsed.path.rstrip("/")
+    normalized_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    return {
+        "device": device.strip(),
+        "kind": kind,
+        "profile": record.get("profile") if isinstance(record.get("profile"), str) else "",
+        "served_model": (record.get("served_model")
+                         if isinstance(record.get("served_model"), str) else ""),
+        "model_config": (record.get("model_config")
+                         if isinstance(record.get("model_config"), str) else ""),
+        "base_url": normalized_url,
+        "host": host,
+        "port": port,
+    }
+
+
+def _deployment_provider_base(device):
+    value = re.sub(r"[^a-z0-9]+", "-", device.lower()).strip("-")
+    return DEPLOYMENT_PROVIDER_PREFIX + (value or "device")
+
+
+def load_deployments(path=None, with_status=False):
+    """Load v1 deployment intent and optionally report absent/valid/invalid status."""
+    def done(status, endpoints):
+        return (status, endpoints) if with_status else endpoints
+
+    path = os.path.expanduser(path or DEPLOYMENTS_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return done("absent", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  warning: could not load manager deployments from {path}: {exc}; "
+              "refusing unmanaged fallback")
+        return done("invalid", [])
+    if (not isinstance(data, dict) or data.get("$otools") != "model_deployments"
+            or type(data.get("version")) is not int or data.get("version") != 1
+            or not isinstance(data.get("deployments"), dict)):
+        print(f"  warning: {path} is not an otools model_deployments version 1 registry; "
+              "refusing unmanaged fallback")
+        return done("invalid", [])
+    endpoints = []
+    invalid = False
+    for name, record in sorted(data["deployments"].items(), key=lambda item: str(item[0]).lower()):
+        endpoint = _normalize_deployment(name, record)
+        if endpoint is None:
+            invalid = True
+        else:
+            endpoints.append(endpoint)
+    bases = [_deployment_provider_base(endpoint["device"]) for endpoint in endpoints]
+    if len(bases) != len(set(bases)):
+        print(f"  warning: {path} contains device names that map to the same provider id; "
+              "refusing unmanaged fallback")
+        invalid = True
+    return done("invalid", []) if invalid else done("valid", endpoints)
 
 
 def caps_from_capabilities(recipe):
@@ -229,13 +334,11 @@ def discover_opencode_runtime_models(opencode_path=None, timeout=5.0):
         line = line.strip()
         if not line:
             continue
-        # Look for provider/model pattern (must have a known provider prefix)
-        # Pattern: provider/model where provider is in REMOTE_PROVIDERS or starts with dgx-
+        # Look for provider/model where provider is remote or omw-managed.
         parts = line.split("/")
         if len(parts) == 2:
             provider, model = parts[0].strip(), parts[1].strip()
-            # Only accept if provider is a known remote provider or dgx provider
-            if provider in REMOTE_PROVIDERS or provider.startswith("dgx-"):
+            if provider in REMOTE_PROVIDERS or _is_managed_provider(provider):
                 ref = f"{provider}/{model}"
                 if ref not in seen:
                     seen.add(ref)
@@ -267,7 +370,30 @@ def oc_build_opencode_providers(cfg):
 DEFAULT_CONTEXT = 200000              # used if endpoint doesn't report max_model_len
 DEFAULT_OUTPUT = 65536               # OpenCode requires limit.output
 API_KEY = "sglang"                    # dummy; vLLM/SGLang ignore it
-PROVIDER_PREFIX = "dgx-"             # all managed providers start with this
+PROVIDER_PREFIX = "dgx-"             # legacy unmanaged-discovery provider prefix
+DEPLOYMENT_PROVIDER_PREFIX = "otools-"
+MANAGED_PROVIDER_PREFIXES = (DEPLOYMENT_PROVIDER_PREFIX, PROVIDER_PREFIX)
+RETIRED_B70_PROVIDER = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Qwen3.8-27B @ B70",
+    "options": {"baseURL": "http://127.0.0.1:8000/v1", "apiKey": "vllm"},
+    "models": {
+        "qwen3.8-27b": {
+            "name": "Qwen3.8-27B",
+            "options": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "limit": {"context": 262144, "output": 131072},
+            "tool_call": True,
+            "temperature": True,
+            "reasoning": True,
+            "variants": {
+                "xhigh": {"chat_template_kwargs": {"reasoning_effort": "xhigh"}},
+                "medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+                "low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+                "no-think": {"chat_template_kwargs": {"enable_thinking": False}},
+            },
+        },
+    },
+}
 # Cloud providers OpenCode routes to directly. Lets a default_models.json preference tell a
 # real remote ref (openai/gpt-5.5) apart from a DGX served-model-id that merely contains a
 # slash (e.g. unsloth/qwen3-coder-next-fp8 -- an HF org/model id, NOT a provider ref).
@@ -280,7 +406,7 @@ def _authed_remote_providers():
     """Cloud providers the user has authenticated in OpenCode (auth.json).
 
     Native-auth providers never appear in the discovered/available model pool
-    (it only holds probed DGX endpoints + config-file providers), so without
+    (it only holds probed managed endpoints + config-file providers), so without
     this, a default_models remote pref like openai/gpt-5.6-sol is skipped on
     EVERY sync and the agent silently falls through to a local model -- seen
     live: agent-review repeatedly downgraded from its frontier reviewer model
@@ -318,6 +444,12 @@ def _authed_remote_providers():
 #     ~30-40 tokens; the extra headroom costs <=80 tokens worst case on a 32k budget.
 DEFAULT_REPETITION_DETECTION = {"min_pattern_size": 3, "max_pattern_size": 20, "min_count": 10}
 LEGACY_KEYS = {"dgx"}                 # also clean up the old single "dgx" provider
+
+
+def _is_managed_provider(value):
+    return str(value).startswith(MANAGED_PROVIDER_PREFIXES)
+
+
 # Agents emitted per recipe. We explicitly override OpenCode's built-in plan/build
 # (full defs, our sampling + permissions). Two tiers:
 #   VISIBLE (Tab, mode primary, provider-default prompt) -- direct-use agents.
@@ -492,8 +624,8 @@ def _resolve_model_ref_from_prefs(pref, available_models, remote_ok=frozenset())
     # Check if pref is already a full ref (contains / with a known provider)
     if "/" in pref:
         provider_part = pref.split("/", 1)[0]
-        # If it's a known remote provider or dgx provider, check exact match in available_models
-        if provider_part in REMOTE_PROVIDERS or provider_part.startswith("dgx-"):
+        # If it's a known remote or managed provider, require a matching available ref.
+        if provider_part in REMOTE_PROVIDERS or _is_managed_provider(provider_part):
             if pref in available_models:
                 return pref
             if provider_part in remote_ok:
@@ -1345,7 +1477,7 @@ def print_detection(detected):
 
 
 # ============================================================================
-# DGX endpoint probing
+# Managed and legacy endpoint probing
 # ============================================================================
 def host_label(host):
     """Short, stable label for a provider key (`dgx-<label>-<port>`).
@@ -1370,7 +1502,12 @@ def host_label(host):
 
 def probe(host, port, timeout):
     """Return list of {id, max_model_len} for a live endpoint, or None if dead."""
-    url = f"http://{host}:{port}/v1/models"
+    return probe_endpoint(f"http://{host}:{port}/v1", timeout)
+
+
+def probe_endpoint(base_url, timeout):
+    """Probe the exact OpenAI-compatible base URL from a deployment record."""
+    url = base_url.rstrip("/") + "/models"
     for attempt in range(PROBE_ATTEMPTS):
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
@@ -1402,7 +1539,7 @@ def looks_visual(model_id):
     return any(t in s for t in tokens)
 
 
-def probe_vision(host, port, model_id, timeout):
+def probe_vision(host, port, model_id, timeout, base_url=None):
     """Send the BLUE test image + 'what color?'.
 
     Returns (is_vision, answer, reason) where reason is a short human string
@@ -1416,7 +1553,8 @@ def probe_vision(host, port, model_id, timeout):
       * server error mentioning image-not-supported     -> (False, None, ...)
       * any other failure                               -> (False, None, ...)
     """
-    url = f"http://{host}:{port}/v1/chat/completions"
+    url = ((base_url.rstrip("/") + "/chat/completions") if base_url
+           else f"http://{host}:{port}/v1/chat/completions")
     payload = json.dumps({
         "model": model_id,
         "max_tokens": VISION_MAXTOKENS,
@@ -1479,6 +1617,11 @@ def _chat(host, port, model_id, extra_body, timeout, prompt):
     """POST a chat completion with extra top-level body fields.
     Returns (status_int_or_None, parsed_json_or_None, error_text)."""
     url = f"http://{host}:{port}/v1/chat/completions"
+    return _chat_url(url, model_id, extra_body, timeout, prompt)
+
+
+def _chat_url(url, model_id, extra_body, timeout, prompt):
+    """URL-based implementation shared by legacy and managed reasoning probes."""
     payload = {
         "model": model_id,
         "max_tokens": REASONING_MAXTOKENS,
@@ -1548,7 +1691,7 @@ def _finish_reason(j):
         return ""
 
 
-def probe_reasoning(host, port, model_id, timeout):
+def probe_reasoning(host, port, model_id, timeout, base_url=None):
     """Determine, against the LIVE endpoint, what thinking knobs it honors.
 
     Returns caps dict:
@@ -1561,9 +1704,15 @@ def probe_reasoning(host, port, model_id, timeout):
     caps = {"reasoning": False, "can_disable": False, "effort_ok": False,
             "graded": False, "reason": ""}
     prompt = "Compute 23 * 17. Think step by step, then give the final number."
+    if base_url:
+        chat_url = base_url.rstrip("/") + "/chat/completions"
+        chat = lambda extra: _chat_url(chat_url, model_id, extra, timeout, prompt)
+    else:
+        # Keep the legacy helper call shape stable for existing callers/tests.
+        chat = lambda extra: _chat(host, port, model_id, extra, timeout, prompt)
 
     # A) default request -> does it think at all?
-    _, j, err = _chat(host, port, model_id, {}, timeout, prompt)
+    _, j, err = chat({})
     if j is None:
         caps["reason"] = f"default request failed: {err[:160]}"
         return caps
@@ -1579,14 +1728,13 @@ def probe_reasoning(host, port, model_id, timeout):
     caps["reasoning"] = True
 
     # B) can we turn thinking OFF via chat_template_kwargs?
-    _, j_off, _ = _chat(host, port, model_id,
-                        {"chat_template_kwargs": {"enable_thinking": False}}, timeout, prompt)
+    _, j_off, _ = chat({"chat_template_kwargs": {"enable_thinking": False}})
     if j_off is not None and _reasoning_len(j_off) == 0:
         caps["can_disable"] = True
 
     # C) does reasoning_effort work, and do levels differ?
-    _, j_lo, _ = _chat(host, port, model_id, {"reasoning_effort": "low"}, timeout, prompt)
-    _, j_hi, _ = _chat(host, port, model_id, {"reasoning_effort": "high"}, timeout, prompt)
+    _, j_lo, _ = chat({"reasoning_effort": "low"})
+    _, j_hi, _ = chat({"reasoning_effort": "high"})
     if j_lo is not None and j_hi is not None:
         caps["effort_ok"] = True
         lo, hi = _reasoning_len(j_lo), _reasoning_len(j_hi)
@@ -1857,7 +2005,7 @@ def _apply_model_config_to_agent(agent_cfg, agent_name, model_ref, configs,
     provider = model_ref.split("/", 1)[0] if "/" in model_ref else ""
     agent_cfg["model"] = model_ref
 
-    if provider.startswith(PROVIDER_PREFIX):
+    if _is_managed_provider(provider):
         recipe = match_recipe(model_id, configs) or GENERIC_QWEN_RECIPE
         caps = (reasoning_caps or {}).get(model_ref) or caps_from_capabilities(
             match_recipe(model_id, configs) or {})
@@ -2148,7 +2296,7 @@ def oc_agent_sampling_plugin_js(per_model_sampling, default_model_id):
 // The vector is chosen by the CURRENT model (input.model.id) AND agent, so switching
 // an agent's model re-tunes it per that model's card. Thinking stays in agent options.
 
-const MANAGED_PREFIX = {json.dumps(PROVIDER_PREFIX)}
+const MANAGED_PREFIXES = {json.dumps(MANAGED_PROVIDER_PREFIXES)}
 const SCOPE_ALL = false
 const DEFAULT_MODEL = {json.dumps(default_model_id)}
 const AGENT_SAMPLING = {table}
@@ -2158,7 +2306,7 @@ function isManaged(input) {{
   const p = input && input.provider ? input.provider : {{}}
   const m = input && input.model ? input.model : {{}}
   const ids = [p.id, p.name, p.providerID, m.providerID, m.id].filter(Boolean)
-  return ids.some((x) => String(x).startsWith(MANAGED_PREFIX))
+  return ids.some((x) => MANAGED_PREFIXES.some((prefix) => String(x).startsWith(prefix)))
 }}
 
 export const DgxSampling = async () => {{
@@ -2192,25 +2340,53 @@ export const DgxSampling = async () => {{
 # ============================================================================
 # OpenCode configurator
 # ============================================================================
+def _deployment_provider_keys(endpoints):
+    """Stable device-based keys; strict registry loading rejects collisions."""
+    keys = [_deployment_provider_base(endpoint["device"]) for endpoint in endpoints]
+    if len(keys) != len(set(keys)):
+        raise ValueError("managed deployment device names map to duplicate provider ids")
+    return keys
+
+
 def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
-                       tool_call=True, recipes=None, verbose=True):
+                       tool_call=True, recipes=None, verbose=True, endpoints=None):
     """Discover endpoints; return (providers dict, flat refs list, reasoning_caps).
 
     Capabilities (reasoning / thinking-knob / vision) are DECLARED in the matched
-    per-model config (omodel-manager's configs/*.toml) -- no live probing here.
+    per-model config (omodel-manager's recursive configs/**/*.toml) -- no live probing here.
     reasoning_caps maps a model ref -> its synthesized caps dict, so the caller
     can build matching agents."""
     providers = {}
     refs = []
     reasoning_caps = {}
     available_models = {}
-    for host in hosts:
-        for port in ports:
-            found = probe(host, port, timeout)
+    if endpoints is not None:
+        candidates = []
+        for endpoint, key in zip(endpoints, _deployment_provider_keys(endpoints)):
+            candidates.append((endpoint["host"], endpoint["port"], endpoint["base_url"],
+                               key, endpoint))
+    else:
+        candidates = [
+            (host, port, f"http://{host}:{port}/v1",
+             f"{PROVIDER_PREFIX}{host_label(host)}-{port}", None)
+            for host in hosts for port in ports
+        ]
+    for host, port, base, key, endpoint in candidates:
+            found = (probe_endpoint(base, timeout) if endpoint is not None
+                     else probe(host, port, timeout))
             if not found:
                 continue
-            key = f"{PROVIDER_PREFIX}{host_label(host)}-{port}"
-            base = f"http://{host}:{port}/v1"
+            found_ids = {m["id"] for m in found}
+            recorded_id = endpoint.get("served_model") if endpoint else ""
+            exact_recipe = None
+            if endpoint and recorded_id and recorded_id in found_ids:
+                exact_recipe = _recipe_for_config(endpoint.get("model_config"), recipes)
+                if endpoint.get("model_config") and exact_recipe is None:
+                    print(f"  warning: {endpoint['device']} references missing model config "
+                          f"{endpoint['model_config']!r}; matching by served ID")
+            elif endpoint and recorded_id:
+                print(f"  warning: {endpoint['device']} responded but did not serve recorded model "
+                      f"{recorded_id!r}; using returned model(s): {', '.join(sorted(found_ids))}")
             model_entries = {}
             for m in found:
                 ctx = m["max_model_len"] or DEFAULT_CONTEXT
@@ -2219,7 +2395,8 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
                     "name": m["id"],
                     "limit": {"context": ctx, "output": out},
                 }
-                rec = match_recipe(m["id"], recipes) if recipes else None
+                rec = (exact_recipe if exact_recipe is not None and m["id"] == recorded_id
+                       else (match_recipe(m["id"], recipes) if recipes else None))
 
                 # ---- FIX #3: declare tool-call capability --------------------
                 # OpenCode does NOT send tool definitions to a custom
@@ -2268,17 +2445,19 @@ def oc_build_providers(hosts, ports, timeout, sampling, profiles=False,
                 model_entries[m["id"]] = entry
                 refs.append(f"{key}/{m['id']}")
                 # Track all available models (not just reasoning) for default model selection
-                available_models[f"{key}/{m['id']}"] = {}
+                available_models[f"{key}/{m['id']}"] = {"recipe": rec}
 
             providers[key] = {
                 "npm": "@ai-sdk/openai-compatible",
-                "name": f"DGX {host_label(host)}:{port}",
+                "name": (f"Otools {endpoint['kind']} {endpoint['device']}" if endpoint
+                         else f"DGX {host_label(host)}:{port}"),
                 "options": {"baseURL": base, "apiKey": API_KEY},
                 "models": model_entries,
             }
             if verbose:
                 ids = ", ".join(m["id"] for m in found)
-                print(f"  [up]   {host}:{port}  ->  {ids}")
+                target = endpoint["device"] if endpoint else f"{host}:{port}"
+                print(f"  [up]   {target} ({base})  ->  {ids}")
     return providers, refs, reasoning_caps, available_models
 
 
@@ -2332,7 +2511,7 @@ def oc_sampling_plugin_js(sampling):
 
 // Apply only to the providers this script manages. If your provider context
 // field differs, flip SCOPE_ALL to true (safe if ALL your providers are DGX).
-const MANAGED_PREFIX = {json.dumps(PROVIDER_PREFIX)}
+const MANAGED_PREFIXES = {json.dumps(MANAGED_PROVIDER_PREFIXES)}
 const SCOPE_ALL = false
 
 function isManaged(input) {{
@@ -2340,7 +2519,7 @@ function isManaged(input) {{
   const p = input && input.provider ? input.provider : {{}}
   const m = input && input.model ? input.model : {{}}
   const ids = [p.id, p.name, p.providerID, m.providerID, m.id].filter(Boolean)
-  return ids.some((x) => String(x).startsWith(MANAGED_PREFIX))
+  return ids.some((x) => MANAGED_PREFIXES.some((prefix) => String(x).startsWith(prefix)))
 }}
 
 export const DgxSampling = async () => {{
@@ -2585,35 +2764,51 @@ def oc_verify(args):
     configs. Writes nothing. Exit 0 = all match, 1 = mismatch(es), 2 = none found."""
     configs = load_configs(args.configs)
     found_any, mismatches = False, 0
-    for host in args._hosts:
-        for port in args._ports:
-            found = probe(host, port, args.timeout)
-            if not found:
+    endpoints = getattr(args, "_endpoints", None)
+    if endpoints is not None:
+        candidates = [(e["host"], e["port"], e) for e in endpoints]
+        print(f"Probing {len(endpoints)} managed deployment endpoint(s)")
+    else:
+        candidates = [(host, port, None) for host in args._hosts for port in args._ports]
+    for host, port, endpoint in candidates:
+        found = (probe_endpoint(endpoint["base_url"], args.timeout) if endpoint
+                 else probe(host, port, args.timeout))
+        if not found:
+            target = endpoint["device"] if endpoint else f"{host}:{port}"
+            print(f"\n{target}\n  [DOWN] endpoint did not return any models")
+            mismatches += 1
+            continue
+        found_any = True
+        for mm in found:
+            mid = mm["id"]
+            rec = (_recipe_for_config(endpoint.get("model_config"), configs)
+                   if endpoint and mid == endpoint.get("served_model") else None)
+            rec = rec or match_recipe(mid, configs)
+            target = endpoint["device"] if endpoint else f"{host}:{port}"
+            print(f"\n{target}  {mid}")
+            if not rec:
+                print("  [MISS] no config matches -- add one to configs/ or fix `match`")
+                mismatches += 1
                 continue
-            found_any = True
-            for mm in found:
-                mid = mm["id"]
-                rec = match_recipe(mid, configs)
-                print(f"\n{host}:{port}  {mid}")
-                if not rec:
-                    print("  [MISS] no config matches -- add one to configs/ or fix `match`")
-                    mismatches += 1
-                    continue
-                cap = rec.get("capabilities", {}) or {}
-                print(f"  config: {rec['_file']}")
-                # reasoning
-                dr = bool(cap.get("reasoning"))
-                pr = probe_reasoning(host, port, mid, REASONING_TIMEOUT)["reasoning"]
-                ok = dr == pr
-                mismatches += 0 if ok else 1
-                print(f"  {'[ok] ' if ok else '[DIFF]'} reasoning: declared={dr} probed={pr}")
-                # vision (probe regardless, to catch under-declared multimodal models)
-                dv = bool(cap.get("vision"))
-                pv, _, why = probe_vision(host, port, mid, VISION_TIMEOUT)
-                ok = dv == pv
-                mismatches += 0 if ok else 1
-                print(f"  {'[ok] ' if ok else '[DIFF]'} vision:    declared={dv} probed={pv}  [{why}]")
+            cap = rec.get("capabilities", {}) or {}
+            print(f"  config: {rec['_file']}")
+            # reasoning
+            dr = bool(cap.get("reasoning"))
+            base_url = endpoint.get("base_url") if endpoint else None
+            pr = probe_reasoning(host, port, mid, REASONING_TIMEOUT, base_url)["reasoning"]
+            ok = dr == pr
+            mismatches += 0 if ok else 1
+            print(f"  {'[ok] ' if ok else '[DIFF]'} reasoning: declared={dr} probed={pr}")
+            # vision (probe regardless, to catch under-declared multimodal models)
+            dv = bool(cap.get("vision"))
+            pv, _, why = probe_vision(host, port, mid, VISION_TIMEOUT, base_url)
+            ok = dv == pv
+            mismatches += 0 if ok else 1
+            print(f"  {'[ok] ' if ok else '[DIFF]'} vision:    declared={dv} probed={pv}  [{why}]")
     if not found_any:
+        if endpoints is not None and mismatches:
+            print(f"\n{mismatches} registered endpoint(s) unavailable.")
+            return 1
         print("No live endpoints found to verify.")
         return 2
     print(f"\n{'All declared capabilities match.' if not mismatches else f'{mismatches} mismatch(es) -- update the config(s) or the model.'}")
@@ -2714,7 +2909,7 @@ def oc_audit(args):
     # Managed provider models (registered endpoints) -- shown even if no agent uses them.
     prov = {}
     for pkey, pentry in providers.items():
-        if not str(pkey).startswith(PROVIDER_PREFIX):
+        if not _is_managed_provider(pkey):
             continue
         for mid, mentry in ((pentry or {}).get("models") or {}).items():
             prov["%s/%s" % (pkey, mid)] = mentry or {}
@@ -2750,7 +2945,7 @@ def oc_audit(args):
         served = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
         names = sorted(by_model.get(model_ref, []))
         print(f"\nModel: {served}   [{provider}]")
-        if not str(model_ref).startswith(PROVIDER_PREFIX):
+        if not _is_managed_provider(model_ref.split("/", 1)[0]):
             print(f"  external model (not omodel-manager-managed): "
                   f"{', '.join(names)}  [skipped]")
             continue
@@ -2856,7 +3051,8 @@ def _builtin_preset_vector(recipe, preset, output_limit=None):
     return vec
 
 
-def _resolve_builtin_model(requested, existing, default, refs, preset_role, configs):
+def _resolve_builtin_model(requested, existing, default, refs, preset_role, configs,
+                           available_models=None):
     """Resolve an explicit/default Build/Plan model against the live managed refs."""
     refs = list(refs)
 
@@ -2883,32 +3079,43 @@ def _resolve_builtin_model(requested, existing, default, refs, preset_role, conf
         if selected:
             return selected
     for ref in refs:
-        model_id = ref.split("/", 1)[1]
-        recipe = match_recipe(model_id, configs)
+        recipe = _recipe_for_model_ref(ref, configs, available_models)
         if (recipe or {}).get("presets", {}).get(preset_role):
             return ref
     return refs[0] if refs else None
+
+
+def _recipe_for_model_ref(model_ref, configs, available_models=None):
+    info = (available_models or {}).get(model_ref) or {}
+    if isinstance(info, dict) and info.get("recipe") is not None:
+        return info["recipe"]
+    model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+    return match_recipe(model_id, configs)
 
 
 def oc_builtin_sampling_plugin_js(per_model_sampling):
     """Apply TOML sampling by current DGX model and native Build/Plan agent."""
     table = json.dumps(per_model_sampling, indent=2)
     return f'''// AUTO-GENERATED by omodel-wire. Build/Plan presets from omodel-manager TOMLs.
-const MANAGED_PREFIX = {json.dumps(PROVIDER_PREFIX)}
+const MANAGED_PREFIXES = {json.dumps(MANAGED_PROVIDER_PREFIXES)}
 const SAMPLING = {table}
 
 function isManaged(input) {{
   const p = input && input.provider ? input.provider : {{}}
   const m = input && input.model ? input.model : {{}}
   return [p.id, p.name, p.providerID, m.providerID].filter(Boolean)
-    .some((value) => String(value).startsWith(MANAGED_PREFIX))
+    .some((value) => MANAGED_PREFIXES.some(
+      (prefix) => String(value).startsWith(prefix)))
 }}
 
 export const DgxSampling = async () => ({{
   "chat.params": async (input, output) => {{
     if (!isManaged(input)) return
     const model = input && input.model ? input.model : {{}}
-    const sampling = (SAMPLING[model.id] || {{}})[input.agent]
+    const provider = input && input.provider ? input.provider : {{}}
+    const providerID = model.providerID || provider.id || provider.providerID
+    const modelKey = providerID && model.id ? `${{providerID}}/${{model.id}}` : model.id
+    const sampling = (SAMPLING[modelKey] || SAMPLING[model.id] || {{}})[input.agent]
     if (!sampling) return
     output.temperature = "temperature" in sampling ? sampling.temperature : undefined
     output.topP = "topP" in sampling ? sampling.topP : undefined
@@ -2930,7 +3137,11 @@ export const DgxSampling = async () => ({{
 
 
 def oc_provider_sync(args):
-    """Sync DGX models plus TOML defaults for OpenCode's native Build/Plan agents."""
+    """Sync managed models plus TOML defaults for OpenCode's native Build/Plan agents."""
+    if getattr(args, "_deployment_registry_invalid", False):
+        print("ERROR: refusing sync because the manager deployment registry is invalid.",
+              file=sys.stderr)
+        return 2
     config_path = os.path.expanduser(args.config)
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
     sampling = {
@@ -2942,16 +3153,22 @@ def oc_provider_sync(args):
         "frequency_penalty": None,
     }
 
-    print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
-    providers, refs, _, _ = oc_build_providers(
+    endpoints = getattr(args, "_endpoints", None)
+    if endpoints is not None:
+        print(f"Probing {len(endpoints)} managed deployment endpoint(s)")
+    else:
+        print(f"Probing {len(args._hosts)} host(s) x {len(args._ports)} port(s) for OpenCode ...")
+    providers, refs, _, available_models = oc_build_providers(
         args._hosts, args._ports, args.timeout, sampling,
-        profiles=True, tool_call=not args.no_tool_call, recipes=configs)
+        profiles=True, tool_call=not args.no_tool_call, recipes=configs,
+        endpoints=endpoints)
 
     # Every live model gets a sufficient declared output limit for its reason/code
     # presets, clamped to that endpoint's actual context window.
-    for provider in providers.values():
+    for provider_key, provider in providers.items():
         for model_id, model in (provider.get("models") or {}).items():
-            recipe = match_recipe(model_id, configs)
+            recipe = _recipe_for_model_ref(
+                f"{provider_key}/{model_id}", configs, available_models)
             presets = (recipe or {}).get("presets") or {}
             requested = max((presets.get(role, {}).get("max_output", 0)
                              for role in ("plan", "build")), default=0)
@@ -2970,19 +3187,40 @@ def oc_provider_sync(args):
     cfg = oc_load_config(config_path)
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
     existing = cfg.get("provider") or {}
-    kept = {k: v for k, v in existing.items() if not oc_is_managed(k)}
-    removed = [k for k in existing if oc_is_managed(k)]
+    kept = {k: v for k, v in existing.items()
+            if not (oc_is_managed(k) or oc_is_retired_b70_provider(k, v))}
+    removed = [k for k, v in existing.items()
+               if oc_is_managed(k) or oc_is_retired_b70_provider(k, v)]
     kept.update(providers)
     cfg["provider"] = kept
 
     old_agents = cfg.get("agent") or {}
     agents = dict(old_agents)
+    refs_by_model = {}
+    for ref in refs:
+        _, _, model_id = ref.partition("/")
+        refs_by_model.setdefault(model_id, []).append(ref)
+    for agent_name, entry in list(agents.items()):
+        model_ref = entry.get("model") if isinstance(entry, dict) else None
+        provider, separator, model_id = model_ref.partition("/") if model_ref else ("", "", "")
+        replacements = refs_by_model.get(model_id, [])
+        retired_b70 = (separator and model_id == "qwen3.8-27b"
+                       and oc_is_retired_b70_provider(provider, existing.get(provider)))
+        if retired_b70:
+            replacements = [ref for ref in refs if ref.startswith("otools-b70/")]
+        if separator and provider.startswith(PROVIDER_PREFIX) and len(replacements) == 1:
+            agents[agent_name] = dict(entry, model=replacements[0])
+            print(f"  migrated {agent_name} model: {model_ref} -> {replacements[0]}")
+        elif retired_b70 and len(replacements) == 1:
+            agents[agent_name] = dict(entry, model=replacements[0])
+            print(f"  migrated {agent_name} model: {model_ref} -> {replacements[0]}")
     per_model_sampling = {}
 
     # Build a table for every live model, not only the two currently assigned.
     for provider_key, provider in providers.items():
         for model_id, model in (provider.get("models") or {}).items():
-            recipe = match_recipe(model_id, configs)
+            recipe = _recipe_for_model_ref(
+                f"{provider_key}/{model_id}", configs, available_models)
             if not recipe:
                 continue
             role_vectors = {}
@@ -2992,16 +3230,17 @@ def oc_provider_sync(args):
                     role_vectors[agent_name] = _builtin_preset_vector(
                         recipe, preset, model["limit"]["output"])
             if role_vectors:
-                per_model_sampling[model_id] = role_vectors
+                per_model_sampling[f"{provider_key}/{model_id}"] = role_vectors
 
     for agent_name, preset_role in BUILTIN_PRESET_ROLES.items():
         previous = old_agents.get(agent_name) or {}
+        current = agents.get(agent_name) or previous
         entry = {key: value for key, value in previous.items()
                  if key not in BUILTIN_OWNED_FIELDS}
         try:
             model_ref = _resolve_builtin_model(
-                getattr(args, f"{agent_name}_model", None), previous.get("model"),
-                cfg.get("model"), refs, preset_role, configs)
+                getattr(args, f"{agent_name}_model", None), current.get("model"),
+                cfg.get("model"), refs, preset_role, configs, available_models)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
@@ -3019,6 +3258,17 @@ def oc_provider_sync(args):
     live_refs = set(refs)
     for key in ("model", "small_model"):
         value = cfg.get(key)
+        provider, separator, model_id = value.partition("/") if isinstance(value, str) else ("", "", "")
+        if (separator and model_id == "qwen3.8-27b"
+                and oc_is_retired_b70_provider(provider, existing.get(provider))):
+            replacements = [ref for ref in refs if ref.startswith("otools-b70/")]
+            if len(replacements) == 1:
+                cfg[key] = replacements[0]
+                print(f"  migrated {key}: {value} -> {replacements[0]}")
+                continue
+            cfg.pop(key, None)
+            print(f"  removed stale {key}: {value}")
+            continue
         if isinstance(value, str) and oc_is_managed(value.split("/", 1)[0]):
             if value not in live_refs:
                 cfg.pop(key, None)
@@ -3039,7 +3289,7 @@ def oc_provider_sync(args):
     if output_max > 32768:
         output_note = _ensure_shell_env(
             "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", str(output_max),
-            getattr(args, "write_shell_env", False))
+            getattr(args, "write_shell_env", False) and not args.dry_run)
 
     print(f"\nDiscovered {len(refs)} model(s); removed {len(removed)} stale provider(s).")
     if refs:
@@ -3144,7 +3394,7 @@ def oc_sync(args, sampling, detected_installed):
     cfg["provider"] = kept
 
     # Collect all available models from multiple sources:
-    # 1. Local probes (DGX endpoints)
+    # 1. Local probes (managed or legacy endpoints)
     # 2. OpenCode runtime models (from `opencode models`)
     # 3. Existing config providers (fallback/back-compat)
     # 
@@ -3582,8 +3832,13 @@ def oc_load_config(path):
 
 def oc_is_managed(key):
     key = str(key)
-    return (key in LEGACY_KEYS or key.startswith(PROVIDER_PREFIX)
+    return (key in LEGACY_KEYS or _is_managed_provider(key)
             or re.fullmatch(r"dgx\d+", key) is not None)
+
+
+def oc_is_retired_b70_provider(key, provider):
+    """Match only the exact provider shape emitted by the retired B70 integration."""
+    return key == "b70-local" and provider == RETIRED_B70_PROVIDER
 
 
 # ============================================================================
@@ -3637,9 +3892,9 @@ WIRE_SETTINGS_FILE = os.path.expanduser("~/.config/otools/wire.json")
 # key -> (one-line description, built-in fallback)
 SETTINGS_KEYS = {
     "opencode_config": ("path to opencode.json", "~/.config/opencode/opencode.json"),
-    "configs_dir":     ("omodel-manager configs/ dir", None),
-    "hosts":           ("comma-separated host IPs to probe", None),
-    "ports":           ("comma-separated ports", ",".join(map(str, DEFAULT_PORTS))),
+    "configs_dir":     ("recursive omodel-manager configs/ dir", None),
+    "hosts":           ("legacy/unmanaged fallback host IPs", None),
+    "ports":           ("legacy/unmanaged fallback ports", ",".join(map(str, DEFAULT_PORTS))),
     "proxy_port":      ("proxy listen port (default: 9099)", 9099),
     "proxy_active":    ("is proxy currently active?", False),
 }
@@ -3660,13 +3915,8 @@ def load_settings():
             return {}
     except (OSError, json.JSONDecodeError):
         return {}
-    if any(k in d for k in RETIRED_SETTINGS):
-        for k in RETIRED_SETTINGS:
-            d.pop(k, None)
-        try:
-            save_settings(d)   # rewrite without the retired keys
-        except OSError:
-            pass
+    for k in RETIRED_SETTINGS:
+        d.pop(k, None)
     return d
 
 
@@ -3717,6 +3967,27 @@ def _resolve_hosts_ports(args):
     return args
 
 
+def _resolve_sync_discovery(args):
+    """Prefer manager deployment intent; use persisted host/port discovery if absent."""
+    explicit_legacy = bool(getattr(args, "hosts", None) or getattr(args, "ports", None))
+    status, endpoints = (("absent", []) if explicit_legacy
+                         else load_deployments(with_status=True))
+    args._deployment_registry_invalid = status == "invalid"
+    if endpoints:
+        args._endpoints = endpoints
+        # Preserve these attributes for existing internal callers that expect them.
+        args._hosts = []
+        args._ports = []
+    elif status == "invalid":
+        args._endpoints = []
+        args._hosts = []
+        args._ports = []
+    else:
+        args._endpoints = None
+        _resolve_hosts_ports(args)
+    return args
+
+
 # ============================================================================
 # Subcommands
 # ============================================================================
@@ -3728,17 +3999,20 @@ def cmd_home(args):
     managed = {k: v for k, v in providers.items() if oc_is_managed(k)}
     model_count = sum(len((v or {}).get("models") or {}) for v in managed.values())
     cdir = _configs_dir(_setting(args, "configs_dir"))
-    ntoml = len([f for f in os.listdir(cdir) if f.endswith(".toml")]) if os.path.isdir(cdir) else 0
+    ntoml = sum(len([f for f in files if f.endswith(".toml")])
+                for _, _, files in os.walk(cdir)) if os.path.isdir(cdir) else 0
     hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
+    deployments = load_deployments()
 
     print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
     print("Status:")
     cfg_note = "" if ntoml else "  [not found -- omw config --set configs_dir PATH]"
     print(f"  configs : {cdir}  ({ntoml} model config(s)){cfg_note}")
-    print(f"  hosts   : {hosts}")
-    print(f"  opencode: {cfg_path}  ({len(managed)} DGX provider(s), {model_count} model(s))")
+    print(f"  deploy  : {DEPLOYMENTS_FILE}  ({len(deployments)} managed endpoint(s))")
+    print(f"  fallback: {hosts}  (wire.json/shared-host unmanaged discovery)")
+    print(f"  opencode: {cfg_path}  ({len(managed)} managed provider(s), {model_count} model(s))")
     print(f"  settings: {WIRE_SETTINGS_FILE}{'' if os.path.exists(WIRE_SETTINGS_FILE) else '  (none yet)'}")
-    _suggest([("Discover and sync the current DGX models", "omw sync")],
+    _suggest([("Discover and sync the current managed deployments", "omw sync")],
              header="Suggested next step")
 
 
@@ -3795,7 +4069,7 @@ def cmd_audit(args):
 
 def cmd_verify(args):
     _resolve_io(args)
-    _resolve_hosts_ports(args)
+    _resolve_sync_discovery(args)
     sys.exit(oc_verify(args))
 
 
@@ -4038,9 +4312,9 @@ def copilot_merge_settings(settings, served_id=None):
 
 
 def copilot_env_files(base_url, served_id, api_key="dgx"):
-    """(sh, ps1) env snippets that point Copilot's single BYOK provider at the DGX endpoint.
+    """(sh, ps1) env snippets that point Copilot's single BYOK provider at the endpoint.
     The endpoint can't live in settings.json, so this is the one piece that must be env."""
-    sh = ("# otools -- Copilot BYOK provider for your DGX endpoint (auto-generated by `omw sync`).\n"
+    sh = ("# otools -- Copilot BYOK provider for your managed endpoint (auto-generated by `omw sync`).\n"
           "# The custom endpoint can't be stored in settings.json, so source this before running\n"
           "# `copilot`, or add it to your shell rc (~/.bashrc, ~/.zshrc).\n"
           'export COPILOT_PROVIDER_TYPE="openai"\n'
@@ -4073,7 +4347,7 @@ def _copilot_print_where_to_find(home, n):
 
 def _copilot_print_env_instructions(home, sh_path, ps1_path):
     win = home.startswith("/mnt/")   # WSL wrote to the Windows-side Copilot home
-    print("\nOne more step -- point Copilot at the DGX endpoint (it can't live in settings.json):")
+    print("\nOne more step -- point Copilot at the managed endpoint (it can't live in settings.json):")
     if win:
         # Copilot runs on Windows; give the Windows path for its shell.
         print(f"  PowerShell (Windows):    . {_win_path(ps1_path)}")
@@ -4160,9 +4434,9 @@ def copilot_sync(args, sampling, detected_installed):
 
 
 def cmd_sync(args):
-    """Discover DGX endpoints and sync only their provider/model entries."""
+    """Discover manager endpoints and sync only their provider/model entries."""
     _resolve_io(args)
-    _resolve_hosts_ports(args)
+    _resolve_sync_discovery(args)
     detected = detect_tools()
     print_detection(detected)
     tool = next((t for t in detected if t["sync"] == "opencode"), None)
@@ -4175,12 +4449,7 @@ def cmd_sync(args):
 
 
 def _add_provider_sync_args(p):
-    """Arguments for DGX provider and native Build/Plan sync."""
-    p.add_argument("--hosts", default=None,
-                   help="comma-separated host IPs to probe "
-                        "(default: wire.json hosts / shared ~/.config/otools/hosts / built-in)")
-    p.add_argument("--ports", default=None,
-                   help="comma-separated ports to probe on each host")
+    """Arguments for managed provider and native Build/Plan sync."""
     p.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
     p.add_argument("--no-tool-call", action="store_true",
                    help="don't declare tool_call on discovered models")
@@ -4194,7 +4463,7 @@ def _add_provider_sync_args(p):
                    help="persist OpenCode's output-token cap when live TOMLs require over 32k")
     p.add_argument("--dry-run", action="store_true", help="print result, do not write")
     p.add_argument("--allow-empty", action="store_true",
-                   help="remove managed DGX providers if nothing is currently served")
+                   help="remove managed providers if nothing is currently served")
 
 
 def _add_sync_args(p):
@@ -4288,7 +4557,8 @@ def _short_model(ref):
     """dgx-n1-8000/Qwen3.6-35B-A3B-NVFP4 -> Qwen3.6-35B-A3B-NVFP4 (keep provider for cloud)."""
     if not ref:
         return "-"
-    return ref.split("/", 1)[1] if ref.startswith(PROVIDER_PREFIX) and "/" in ref else ref
+    return ref.split("/", 1)[1] if "/" in ref and _is_managed_provider(
+        ref.split("/", 1)[0]) else ref
 
 
 def _model_id(ref):
@@ -4738,7 +5008,7 @@ def _managed_instances(cfg):
     with distinct provider keys -- which is how we tell them apart and refuse to guess."""
     return [(pk, mid)
             for pk, pv in (cfg.get("provider") or {}).items()
-            if str(pk).startswith(PROVIDER_PREFIX)
+            if _is_managed_provider(pk)
             for mid in (pv.get("models") or {})]
 
 
@@ -4807,7 +5077,7 @@ def _validate_ref(ref, cfg):
             return None
         return f"'{ref}' should look like provider/model-id"
     prov, mid = ref.split("/", 1)
-    if prov.startswith(PROVIDER_PREFIX):
+    if _is_managed_provider(prov):
         models = ((cfg.get("provider") or {}).get(prov) or {}).get("models") or {}
         if mid not in models:
             return f"'{ref}' isn't among the live providers (setting anyway; sync it to use it)"
@@ -5077,7 +5347,7 @@ def _build_parser():
                            help="omodel-manager configs dir (default: wire.json / $OMODEL_CONFIGS / sibling)")
 
     ps = sub.add_parser("sync", parents=[io_parent],
-                        help="sync live DGX providers and models into OpenCode")
+                        help="sync live manager deployments and models into OpenCode")
     _add_provider_sync_args(ps)
     ps.set_defaults(func=cmd_sync)
 
@@ -5210,7 +5480,7 @@ def _proxy_pid(P):
 def _providers_for_target(cfg, target):
     """Managed provider keys hosting model `target` (bare name ok); all dgx- if None."""
     providers = cfg.get("provider") or {}
-    managed = [k for k in providers if k.startswith(PROVIDER_PREFIX)]
+    managed = [k for k in providers if _is_managed_provider(k)]
     if not target:
         return managed
     mid, _ids = _resolve_live_model(target, cfg, {})

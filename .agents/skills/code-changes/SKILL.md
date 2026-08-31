@@ -11,14 +11,14 @@ Read this before editing `omodel-wire.py`. For how OpenCode itself consumes the 
 
 Top-to-bottom, the meaningful sections:
 
-- **Discovery defaults** — `DEFAULT_HOSTS` (fallback only), `DEFAULT_PORTS`, `HOST_LABELS`,
-  probe timeouts/limits, and `load_shared_hosts()` which reads the shared
-  `~/.config/otools/hosts` store (managed by omodel-manager) as the `--hosts` default so
-  both tools see the same fleet. Edit `DEFAULT_HOSTS`/`HOST_LABELS` only for the no-store
-  fallback / provider-key labels.
+- **Discovery defaults** — `DEPLOYMENTS_FILE` + `load_deployments()` consume the manager's
+  versioned card/node/cluster deployment registry and probe each exact `base_url`.
+  `DEFAULT_HOSTS`, `DEFAULT_PORTS`, `HOST_LABELS`, and `load_shared_hosts()` are only the
+  absent/empty-registry unmanaged fallback. Managed provider identity is device-based.
 - **Configs (consumed, not owned)** — `_configs_dir()` (resolves `--configs` /
   `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`), `load_configs()` (reads
-  `omodel-manager`'s `configs/*.toml` via `tomllib`), `caps_from_capabilities()`
+  `omodel-manager`'s recursive `configs/{card,node,cluster}/**/*.toml` via `tomllib`),
+  `caps_from_capabilities()`
   (synthesizes the probe-style caps dict from a config's DECLARED capabilities),
   `match_recipe()`. **omodel-manager owns and validates these configs**; this tool is
   an adapter. There is NO live probing on the sync path — capabilities are declared.
@@ -52,7 +52,8 @@ Top-to-bottom, the meaningful sections:
   enough for a trivial prompt to reach `</think>`.
 - **OpenCode config builders** — `oc_build_variants()`, `oc_build_agents()`,
   `oc_build_recipe_agents()` (recipe → per-role agents + synthesized `team`),
-  `oc_build_providers()`, the two `chat.params` plugin emitters
+  `oc_build_providers()` (legacy hosts+ports or normalized deployment endpoints), the
+  two `chat.params` plugin emitters
   (`oc_agent_sampling_plugin_js`, `oc_sampling_plugin_js`), and `oc_apply_web_search()`.
 - **Assembly** — `oc_sync()` is the heart: loads existing config, builds providers +
   agents, orders them (visible primaries → hidden subagents → disabled build/plan
