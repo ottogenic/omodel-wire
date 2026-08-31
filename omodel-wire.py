@@ -3163,6 +3163,15 @@ def oc_provider_sync(args):
         profiles=True, tool_call=not args.no_tool_call, recipes=configs,
         endpoints=endpoints)
 
+    if endpoints is not None:
+        expected = _deployment_provider_keys(endpoints)
+        unavailable = [endpoint["device"] for endpoint, key in zip(endpoints, expected)
+                       if key not in providers]
+        if unavailable:
+            print("ERROR: refusing sync because registered deployment endpoint(s) are "
+                  "unavailable: " + ", ".join(unavailable), file=sys.stderr)
+            return 2
+
     # Every live model gets a sufficient declared output limit for its reason/code
     # presets, clamped to that endpoint's actual context window.
     for provider_key, provider in providers.items():

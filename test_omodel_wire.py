@@ -851,6 +851,23 @@ class TestManagedDeployments(unittest.TestCase):
         customized["custom"] = True
         self.assertFalse(m.oc_is_retired_b70_provider("b70-local", customized))
 
+    def test_managed_sync_refuses_partial_registry_discovery(self):
+        live = self.endpoint("Live Node", "node", 8000)
+        down = self.endpoint("Down Node", "node", 8001)
+        responses = {live["base_url"]: [
+            {"id": live["served_model"], "max_model_len": 65536}],
+            down["base_url"]: None}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "opencode.json")
+            original = {"provider": {"keep": {"models": {"existing": {}}}}}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(original, f)
+            args = make_args(tmp, _hosts=[], _ports=[], _endpoints=[live, down])
+            with self.probes(responses), quiet():
+                self.assertEqual(m.oc_provider_sync(args), 2)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), original)
+
     def test_registry_loader_and_absent_registry_fallback(self):
         old_deployments = m.DEPLOYMENTS_FILE
         with tempfile.TemporaryDirectory() as tmp:
