@@ -22,10 +22,9 @@ task-specific lives in a **skill** (see the index at the bottom) that loads on d
   native Build/Plan fields `model`/`temperature`/`top_p`/`options`, and the generated
   `plugins/dgx-sampling.js`. Preserve all unrelated agents, agent fields, permissions,
   built-in providers, and user settings.
-- **Manager deployment contract.** Default discovery consumes version 1
-  `~/.config/otools/deployments.json` (override `OMODEL_MANAGER_DEPLOYMENTS`) and probes
-  only each record's exact `base_url`. Records are intent and may be stale; dead records
-  are ignored. `wire.json` hosts/ports remain only as the absent/empty-registry fallback.
+- **Discovery is controller-local and live.** `omw sync` probes this machine plus hosts registered by
+  `omodel-manager` in `~/.config/otools/hosts`, or explicit `wire.json`/CLI hosts and ports.
+  It must never depend on which machine launched a model or on `deployments.json`.
 - **No custom workflow config.** `tool_call` is declared on every discovered model and
   Build/Plan consume omodel-manager's code/reason presets. Never emit custom agents,
   prompts, skills, or state-machine plugins; those belong to omodel-pipeline.

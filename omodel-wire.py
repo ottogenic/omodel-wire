@@ -66,11 +66,10 @@ except (OSError, ImportError, AttributeError):
     loom_mod = None
 
 # ----------------------------------------------------------------------------
-# Endpoint discovery defaults -- placeholder examples only. Set your real hosts
-# via `omm install` / `~/.config/otools/hosts`; these are the no-store fallback.
-# (192.0.2.0/24 is the RFC 5737 documentation range -- replace with your own.)
+# Endpoint discovery defaults. The current machine is always considered unless
+# explicit hosts override it; `omm install` / `~/.config/otools/hosts` add the fleet.
 # ----------------------------------------------------------------------------
-DEFAULT_HOSTS = ["192.0.2.101", "192.0.2.102"]
+DEFAULT_HOSTS = ["127.0.0.1"]
 # DEFAULT_PORTS = [8000, 8001, 8002, 8888, 30000, 11434]  # 11434 = ollama
 DEFAULT_PORTS = [8000, 8001, 8002]
 HOST_LABELS = {                       # friendly short labels for provider keys
@@ -79,10 +78,8 @@ HOST_LABELS = {                       # friendly short labels for provider keys
     "192.0.2.103": "n3",
 }
 # Shared with omodel-manager: `omm install`/`ps` manage this file; omw reads it so
-# both tools see the same fleet. Absent/empty -> fall back to DEFAULT_HOSTS.
+# both tools see the same fleet. The current machine is added during discovery.
 HOSTS_FILE = os.path.expanduser("~/.config/otools/hosts")
-DEPLOYMENTS_FILE = os.path.expanduser(os.environ.get(
-    "OMODEL_MANAGER_DEPLOYMENTS", "~/.config/otools/deployments.json"))
 
 
 def load_shared_hosts():
@@ -195,87 +192,9 @@ def _recipe_for_config(model_config, recipes):
                  if r.get("_file") == wanted), None)
 
 
-def _normalize_deployment(name, record):
-    """Validate and normalize one manager deployment record, or return None."""
-    if not isinstance(record, dict):
-        print(f"  warning: deployment {name!r} is not an object; skipping")
-        return None
-    device = record.get("device")
-    base_url = record.get("base_url")
-    required = ("profile", "served_model", "model_config")
-    if (not isinstance(device, str) or not device.strip() or not isinstance(base_url, str)
-            or any(not isinstance(record.get(key), str) or not record[key].strip()
-                   for key in required)):
-        print(f"  warning: deployment {name!r} is missing required endpoint fields; skipping")
-        return None
-    try:
-        parsed = urllib.parse.urlsplit(base_url.strip())
-        host, port = parsed.hostname, parsed.port
-    except (TypeError, ValueError):
-        host, port, parsed = None, None, None
-    if parsed is None or parsed.scheme not in ("http", "https") or not host or port is None:
-        print(f"  warning: deployment {name!r} has an invalid HTTP(S) base_url with no host/port; skipping")
-        return None
-    kind = record.get("kind")
-    if kind not in ("card", "node", "cluster"):
-        print(f"  warning: deployment {name!r} has invalid kind {kind!r}; skipping")
-        return None
-    path = parsed.path.rstrip("/")
-    normalized_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
-    return {
-        "device": device.strip(),
-        "kind": kind,
-        "profile": record.get("profile") if isinstance(record.get("profile"), str) else "",
-        "served_model": (record.get("served_model")
-                         if isinstance(record.get("served_model"), str) else ""),
-        "model_config": (record.get("model_config")
-                         if isinstance(record.get("model_config"), str) else ""),
-        "base_url": normalized_url,
-        "host": host,
-        "port": port,
-    }
-
-
 def _deployment_provider_base(device):
     value = re.sub(r"[^a-z0-9]+", "-", device.lower()).strip("-")
     return DEPLOYMENT_PROVIDER_PREFIX + (value or "device")
-
-
-def load_deployments(path=None, with_status=False):
-    """Load v1 deployment intent and optionally report absent/valid/invalid status."""
-    def done(status, endpoints):
-        return (status, endpoints) if with_status else endpoints
-
-    path = os.path.expanduser(path or DEPLOYMENTS_FILE)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return done("absent", [])
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"  warning: could not load manager deployments from {path}: {exc}; "
-              "refusing unmanaged fallback")
-        return done("invalid", [])
-    if (not isinstance(data, dict) or data.get("$otools") != "model_deployments"
-            or type(data.get("version")) is not int or data.get("version") != 1
-            or not isinstance(data.get("deployments"), dict)):
-        print(f"  warning: {path} is not an otools model_deployments version 1 registry; "
-              "refusing unmanaged fallback")
-        return done("invalid", [])
-    endpoints = []
-    invalid = False
-    for name, record in sorted(data["deployments"].items(), key=lambda item: str(item[0]).lower()):
-        endpoint = _normalize_deployment(name, record)
-        if endpoint is None:
-            invalid = True
-        else:
-            endpoints.append(endpoint)
-    bases = [_deployment_provider_base(endpoint["device"]) for endpoint in endpoints]
-    if len(bases) != len(set(bases)):
-        print(f"  warning: {path} contains device names that map to the same provider id; "
-              "refusing unmanaged fallback")
-        invalid = True
-    return done("invalid", []) if invalid else done("valid", endpoints)
 
 
 def caps_from_capabilities(recipe):
@@ -1506,7 +1425,7 @@ def probe(host, port, timeout):
 
 
 def probe_endpoint(base_url, timeout):
-    """Probe the exact OpenAI-compatible base URL from a deployment record."""
+    """Probe an exact OpenAI-compatible base URL from an endpoint descriptor."""
     url = base_url.rstrip("/") + "/models"
     for attempt in range(PROBE_ATTEMPTS):
         try:
@@ -3138,10 +3057,6 @@ export const DgxSampling = async () => ({{
 
 def oc_provider_sync(args):
     """Sync managed models plus TOML defaults for OpenCode's native Build/Plan agents."""
-    if getattr(args, "_deployment_registry_invalid", False):
-        print("ERROR: refusing sync because the manager deployment registry is invalid.",
-              file=sys.stderr)
-        return 2
     config_path = os.path.expanduser(args.config)
     configs = load_configs(args.configs) if not args.no_recipes else {"recipes": []}
     sampling = {
@@ -3168,7 +3083,7 @@ def oc_provider_sync(args):
         unavailable = [endpoint["device"] for endpoint, key in zip(endpoints, expected)
                        if key not in providers]
         if unavailable:
-            print("ERROR: refusing sync because registered deployment endpoint(s) are "
+            print("ERROR: refusing sync because expected endpoint(s) are "
                   "unavailable: " + ", ".join(unavailable), file=sys.stderr)
             return 2
 
@@ -3967,9 +3882,10 @@ def _resolve_io(args):
 
 def _resolve_hosts_ports(args):
     """Fill args._hosts / args._ports from flag > wire.json > shared store/default."""
-    hosts = (getattr(args, "hosts", None)
-             or _setting(args, "hosts")
-             or ",".join(load_shared_hosts() or DEFAULT_HOSTS))
+    hosts = getattr(args, "hosts", None) or _setting(args, "hosts")
+    if not hosts:
+        discovered = DEFAULT_HOSTS + load_shared_hosts()
+        hosts = ",".join(dict.fromkeys(discovered))
     ports = getattr(args, "ports", None) or _setting(args, "ports")
     args._hosts = [h.strip() for h in hosts.split(",") if h.strip()]
     args._ports = [int(p) for p in ports.split(",") if p.strip()]
@@ -3977,23 +3893,9 @@ def _resolve_hosts_ports(args):
 
 
 def _resolve_sync_discovery(args):
-    """Prefer manager deployment intent; use persisted host/port discovery if absent."""
-    explicit_legacy = bool(getattr(args, "hosts", None) or getattr(args, "ports", None))
-    status, endpoints = (("absent", []) if explicit_legacy
-                         else load_deployments(with_status=True))
-    args._deployment_registry_invalid = status == "invalid"
-    if endpoints:
-        args._endpoints = endpoints
-        # Preserve these attributes for existing internal callers that expect them.
-        args._hosts = []
-        args._ports = []
-    elif status == "invalid":
-        args._endpoints = []
-        args._hosts = []
-        args._ports = []
-    else:
-        args._endpoints = None
-        _resolve_hosts_ports(args)
+    """Resolve live discovery independently from manager launch state."""
+    args._endpoints = None
+    _resolve_hosts_ports(args)
     return args
 
 
@@ -4010,15 +3912,13 @@ def cmd_home(args):
     cdir = _configs_dir(_setting(args, "configs_dir"))
     ntoml = sum(len([f for f in files if f.endswith(".toml")])
                 for _, _, files in os.walk(cdir)) if os.path.isdir(cdir) else 0
-    hosts = _setting(args, "hosts") or ",".join(load_shared_hosts() or DEFAULT_HOSTS)
-    deployments = load_deployments()
-
+    configured_hosts = _setting(args, "hosts")
+    hosts = configured_hosts or ",".join(dict.fromkeys(DEFAULT_HOSTS + load_shared_hosts()))
     print("omodel-wire -- wire local model endpoints into OpenCode (omw)\n")
     print("Status:")
     cfg_note = "" if ntoml else "  [not found -- omw config --set configs_dir PATH]"
     print(f"  configs : {cdir}  ({ntoml} model config(s)){cfg_note}")
-    print(f"  deploy  : {DEPLOYMENTS_FILE}  ({len(deployments)} managed endpoint(s))")
-    print(f"  fallback: {hosts}  (wire.json/shared-host unmanaged discovery)")
+    print(f"  discover: {hosts}  (wire.json/shared manager hosts)")
     print(f"  opencode: {cfg_path}  ({len(managed)} managed provider(s), {model_count} model(s))")
     print(f"  settings: {WIRE_SETTINGS_FILE}{'' if os.path.exists(WIRE_SETTINGS_FILE) else '  (none yet)'}")
     _suggest([("Discover and sync the current managed deployments", "omw sync")],
@@ -4459,6 +4359,10 @@ def cmd_sync(args):
 
 def _add_provider_sync_args(p):
     """Arguments for managed provider and native Build/Plan sync."""
+    p.add_argument("--hosts", default=None,
+                   help="comma-separated serving hosts (overrides wire.json/manager hosts)")
+    p.add_argument("--ports", default=None,
+                   help="comma-separated serving ports (overrides wire.json defaults)")
     p.add_argument("--timeout", type=float, default=PROBE_TIMEOUT)
     p.add_argument("--no-tool-call", action="store_true",
                    help="don't declare tool_call on discovered models")
@@ -5356,7 +5260,7 @@ def _build_parser():
                            help="omodel-manager configs dir (default: wire.json / $OMODEL_CONFIGS / sibling)")
 
     ps = sub.add_parser("sync", parents=[io_parent],
-                        help="sync live manager deployments and models into OpenCode")
+                        help="discover live models on registered hosts and sync them into OpenCode")
     _add_provider_sync_args(ps)
     ps.set_defaults(func=cmd_sync)
 

@@ -78,7 +78,8 @@ An agent is an object under the top-level `agent` block (or a markdown file in
   (NOT `reasoningEffort`) and **requires `temperature: 1.0`**. Non-managed (cloud) team
   models have their local `chat_template_kwargs` / `reasoning_effort` / `top_p` stripped
   automatically.
-- Managed providers use `otools-<device>`; old `dgx-*` providers remain recognized and
+- Live host discovery uses `dgx-<host>-<port>`; `otools-*` providers from the retired
+  deployment-intent discovery remain recognized and
   pruned during migration. The sampling plugin deliberately scopes to both prefixes.
 - Anthropic Pro/Max subscription OAuth was removed from OpenCode (ToS) — use an API key
   (`ANTHROPIC_API_KEY` / `/connect`).

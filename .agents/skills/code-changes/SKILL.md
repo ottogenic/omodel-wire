@@ -11,10 +11,10 @@ Read this before editing `omodel-wire.py`. For how OpenCode itself consumes the 
 
 Top-to-bottom, the meaningful sections:
 
-- **Discovery defaults** — `DEPLOYMENTS_FILE` + `load_deployments()` consume the manager's
-  versioned card/node/cluster deployment registry and probe each exact `base_url`.
-  `DEFAULT_HOSTS`, `DEFAULT_PORTS`, `HOST_LABELS`, and `load_shared_hosts()` are only the
-  absent/empty-registry unmanaged fallback. Managed provider identity is device-based.
+- **Discovery defaults** — `load_shared_hosts()` reads the controller's registered manager
+  hosts, while `wire.json`/CLI hosts and ports override them. `DEFAULT_HOSTS`,
+  `DEFAULT_PORTS`, and `HOST_LABELS` are the no-registration fallback. Discovery is live and
+  independent of manager launch state.
 - **Configs (consumed, not owned)** — `_configs_dir()` (resolves `--configs` /
   `$OMODEL_CONFIGS` / sibling `../omodel-manager/configs`), `load_configs()` (reads
   `omodel-manager`'s recursive `configs/{card,node,cluster}/**/*.toml` via `tomllib`),

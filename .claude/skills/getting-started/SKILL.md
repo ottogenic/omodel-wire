@@ -10,11 +10,11 @@ Two sibling tools, run in this order:
 | Tool | Alias | Job |
 | --- | --- | --- |
 | **omodel-manager** | `omm` | Launches and manages vLLM deployments on card, node, and cluster devices. |
-| **omodel-wire** | `omw` | Probes the manager's deployment registry and wires live models into **OpenCode**. |
+| **omodel-wire** | `omw` | Probes locally registered serving hosts and wires live models into **OpenCode**. |
 
 `omw` reads `omm`'s recursive `configs/card`, `configs/node`, and `configs/cluster`
-model configs plus `~/.config/otools/deployments.json` (override
-`OMODEL_MANAGER_DEPLOYMENTS`). Keep both repos checked out side by side.
+model configs plus the local controller's `~/.config/otools/hosts`. Keep both repos
+checked out side by side.
 
 ## How to drive this guide (for the AI assistant)
 
@@ -109,18 +109,16 @@ With at least one model live (step 3) and OpenCode installed, wire it up:
 omw sync         # probes your live endpoints, reads omm's configs, writes ~/.config/opencode/opencode.json
 ```
 
-`omw sync` probes each recorded deployment `base_url` exactly, ignores stale/dead
-records, and refreshes only managed `otools-*` providers plus native OpenCode Build/Plan
-model selections and their sampling plugin. Re-run it whenever deployments change.
-`--dry-run` previews the result without writing. Hosts and ports in `wire.json` are
-retained only for unmanaged fallback when the deployment registry is absent or valid-empty.
-An invalid registry fails closed instead of probing unrelated legacy endpoints.
+`omw sync` probes the hosts registered on this controller and refreshes only discovered
+providers plus native OpenCode Build/Plan model selections and their sampling plugin. Re-run
+it whenever deployments change. `--dry-run` previews the result without writing. Hosts and
+ports in `wire.json` or CLI flags override the shared manager host list.
 
 Confirm it worked (safe — run these and show output):
 
 ```bash
 omw verify       # optional slow live capability check against declarations
-opencode models  # confirm otools-<device>/<served-id> refs are present
+opencode models  # confirm dgx-<host>-<port>/<served-id> refs are present
 opencode         # launch OpenCode; native Build and Plan use the synced presets
 ```
 
@@ -129,14 +127,13 @@ opencode         # launch OpenCode; native Build and Plan use the synced presets
 ## 7. Select Build and Plan models
 
 ```bash
-opencode models       # includes otools-<device>/<served-id>
+opencode models       # includes dgx-<host>-<port>/<served-id>
 omw sync --dry-run    # shows the Build/Plan choices without writing
 ```
 
-Use `omw sync --build-model REF --plan-model REF` to select explicit device-qualified
+Use `omw sync --build-model REF --plan-model REF` to select explicit endpoint-qualified
 refs. Without those flags, sync preserves a still-live native selection or chooses a
-compatible live model. Legacy unmanaged discovery may still produce `dgx-*` refs during
-migration, but manager deployments use `otools-*`.
+compatible live model.
 
 ---
 

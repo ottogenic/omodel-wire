@@ -2,10 +2,10 @@
 
 Discover omodel-manager card, node, and cluster deployments and add them to OpenCode.
 
-`omodel-wire` is a Python 3.11+ standard-library CLI. It reads
-`~/.config/otools/deployments.json` from `omodel-manager`, probes each recorded
-`base_url`, and refreshes managed providers and native Build/Plan defaults in
-OpenCode's global config. Set `OMODEL_MANAGER_DEPLOYMENTS` to override the registry.
+`omodel-wire` is a Python 3.11+ standard-library CLI. It probes the hosts registered by
+`omodel-manager` in `~/.config/otools/hosts` (or explicit hosts from `wire.json`/CLI),
+then refreshes providers and native Build/Plan defaults in OpenCode's global config.
+Discovery is independent of which machine launched or stopped a model.
 
 It does not install custom agents, subagents, prompts, skills, permissions, MCP
 servers, web search, or workflow state. Those concerns belong in the separate
@@ -28,11 +28,9 @@ omw sync
 opencode
 ```
 
-Manager deployment records are launch intent and can be stale. Sync probes exactly
-the recorded endpoints and ignores records that do not respond; it never combines
-recorded hosts and ports into a cross-product. If the registry is missing or empty,
-the existing `wire.json` / shared `~/.config/otools/hosts` discovery remains as an
-unmanaged migration fallback.
+Sync probes this machine plus each registered host/port combination and includes only endpoints whose
+`/v1/models` responds. Register the same serving hosts on every controller where you want
+to run `omw sync`; no deployment-state file needs to be copied between machines.
 
 Persist legacy fallback discovery settings in `~/.config/otools/wire.json`:
 
@@ -46,7 +44,7 @@ omw config
 
 `omw sync`:
 
-- Adds one `otools-<device>` OpenCode provider per live managed deployment.
+- Adds one provider per live host/port endpoint.
 - Adds every model currently returned by that endpoint's `/v1/models` response.
 - Replaces stale `otools-*` providers and prunes old `dgx-*` / `dgx` / `dgxN` keys.
 - Maps native Build to each model's TOML `build` preset and native Plan to its
@@ -69,9 +67,7 @@ model with the required preset is used. If a live preset requires more than Open
 default 32k output cap, sync prints the required environment setting;
 `--write-shell-env` persists it.
 
-The deployment record's exact `model_config` is used for its recorded `served_model`.
-If identity is stale, sync warns and matches the models actually returned by the live
-endpoint instead.
+Each live served model is matched against the manager-owned TOML declarations by model ID.
 
 ## Commands
 

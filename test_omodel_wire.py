@@ -868,115 +868,25 @@ class TestManagedDeployments(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), original)
 
-    def test_registry_loader_and_absent_registry_fallback(self):
-        old_deployments = m.DEPLOYMENTS_FILE
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = os.path.join(tmp, "deployments.json")
-            record = self.endpoint("Node One", "node", 8000)
-            record = {k: record[k] for k in
-                      ("device", "kind", "profile", "served_model", "model_config", "base_url")}
-            with open(registry, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 1,
-                           "deployments": {"Node One": record}}, f)
-            m.DEPLOYMENTS_FILE = registry
-            try:
-                loaded = m.load_deployments()
-                self.assertEqual(loaded[0]["host"], "192.0.2.100")
-                self.assertEqual(loaded[0]["port"], 8000)
-                m.DEPLOYMENTS_FILE = os.path.join(tmp, "missing.json")
-                args = types.SimpleNamespace(hosts=None, ports=None,
-                                             _settings={"hosts": "198.51.100.7",
-                                                        "ports": "9000"})
-                m._resolve_sync_discovery(args)
-                self.assertIsNone(args._endpoints)
-                self.assertEqual(args._hosts, ["198.51.100.7"])
-                self.assertEqual(args._ports, [9000])
-            finally:
-                m.DEPLOYMENTS_FILE = old_deployments
+    def test_sync_discovery_uses_controller_local_registered_hosts(self):
+        args = types.SimpleNamespace(hosts=None, ports=None,
+                                     _settings={"hosts": None, "ports": "8000,8001"})
+        with mock.patch.object(m, "load_shared_hosts",
+                               return_value=["otto-home", "otto-lab"]):
+            m._resolve_sync_discovery(args)
+        self.assertIsNone(args._endpoints)
+        self.assertEqual(args._hosts, ["127.0.0.1", "otto-home", "otto-lab"])
+        self.assertEqual(args._ports, [8000, 8001])
 
-    def test_malformed_or_wrong_version_registry_is_ignored(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "deployments.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 2,
-                           "deployments": {}}, f)
-            with quiet():
-                self.assertEqual(m.load_deployments(path), [])
-
-    def test_invalid_registry_fails_closed_without_legacy_discovery(self):
-        old_deployments = m.DEPLOYMENTS_FILE
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "deployments.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 2,
-                           "deployments": {}}, f)
-            m.DEPLOYMENTS_FILE = path
-            args = types.SimpleNamespace(hosts=None, ports=None,
-                                         _settings={"hosts": "198.51.100.7",
-                                                    "ports": "9000"})
-            try:
-                with quiet():
-                    m._resolve_sync_discovery(args)
-                self.assertEqual(args._endpoints, [])
-                self.assertEqual(args._hosts, [])
-                self.assertEqual(args._ports, [])
-                self.assertTrue(args._deployment_registry_invalid)
-            finally:
-                m.DEPLOYMENTS_FILE = old_deployments
-
-    def test_registry_requires_exact_profile_and_model_config_fields(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "deployments.json")
-            record = self.endpoint("Node One", "node", 8000)
-            record["model_config"] = ""
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 1,
-                           "deployments": {"Node One": record}}, f)
-            with quiet():
-                status, endpoints = m.load_deployments(path, with_status=True)
-            self.assertEqual(status, "invalid")
-            self.assertEqual(endpoints, [])
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 1,
-                           "deployments": {"bad": {
-                               "device": "bad", "kind": "node",
-                               "base_url": "ssh://example.test:8000/v1"}}}, f)
-            with quiet():
-                self.assertEqual(m.load_deployments(path), [])
-
-    def test_invalid_registry_cannot_prune_with_allow_empty(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "opencode.json")
-            original = {"provider": {"otools-node": {"models": {"served": {}}}}}
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(original, f)
-            args = make_args(tmp, allow_empty=True, _hosts=[], _ports=[], _endpoints=[])
-            args._deployment_registry_invalid = True
-            with quiet():
-                self.assertEqual(m.oc_provider_sync(args), 2)
-            with open(path, encoding="utf-8") as f:
-                self.assertEqual(json.load(f), original)
-
-    def test_provider_id_collision_invalidates_registry(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "deployments.json")
-            first = self.endpoint("Rack/Node", "node", 8000)
-            second = self.endpoint("Rack-Node", "node", 8001)
-            fields = ("device", "kind", "profile", "served_model", "model_config", "base_url")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"$otools": "model_deployments", "version": 1,
-                           "deployments": {
-                               "one": {key: first[key] for key in fields},
-                               "two": {key: second[key] for key in fields},
-                           }}, f)
-            with quiet():
-                status, endpoints = m.load_deployments(path, with_status=True)
-            self.assertEqual(status, "invalid")
-            self.assertEqual(endpoints, [])
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("not json")
-            with quiet():
-                self.assertEqual(m.load_deployments(path), [])
+    def test_explicit_sync_hosts_override_registered_hosts(self):
+        args = types.SimpleNamespace(hosts="198.51.100.7", ports="9000",
+                                     _settings={"hosts": None, "ports": "8000"})
+        with mock.patch.object(m, "load_shared_hosts") as shared:
+            m._resolve_sync_discovery(args)
+        shared.assert_not_called()
+        self.assertIsNone(args._endpoints)
+        self.assertEqual(args._hosts, ["198.51.100.7"])
+        self.assertEqual(args._ports, [9000])
 
 
 # --------------------------------------------------------------------------- #
@@ -2078,14 +1988,14 @@ class TestProviderOnlySync(unittest.TestCase):
         self.assertNotIn("audit", commands)
         self.assertNotIn("loom", commands)
 
-    def test_sync_help_hides_legacy_hosts_and_ports_flags(self):
+    def test_sync_help_exposes_controller_specific_hosts_and_ports(self):
         parser = m._build_parser()
         command_action = next(
             action for action in parser._actions
             if isinstance(action, argparse._SubParsersAction))
         sync_help = command_action.choices["sync"].format_help()
-        self.assertNotIn("--hosts", sync_help)
-        self.assertNotIn("--ports", sync_help)
+        self.assertIn("--hosts", sync_help)
+        self.assertIn("--ports", sync_help)
 
 
 # --------------------------------------------------------------------------- #
