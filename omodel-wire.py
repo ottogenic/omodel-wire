@@ -3111,10 +3111,18 @@ def oc_provider_sync(args):
     cfg = oc_load_config(config_path)
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
     existing = cfg.get("provider") or {}
+    duplicate_endpoints = {
+        key for key, provider in existing.items()
+        if not oc_is_managed(key)
+        and not oc_is_retired_b70_provider(key, provider)
+        and oc_is_duplicate_managed_endpoint(provider, providers)
+    }
     kept = {k: v for k, v in existing.items()
-            if not (oc_is_managed(k) or oc_is_retired_b70_provider(k, v))}
+            if not (oc_is_managed(k) or oc_is_retired_b70_provider(k, v)
+                    or k in duplicate_endpoints)}
     removed = [k for k, v in existing.items()
-               if oc_is_managed(k) or oc_is_retired_b70_provider(k, v)]
+               if oc_is_managed(k) or oc_is_retired_b70_provider(k, v)
+               or k in duplicate_endpoints]
     kept.update(providers)
     cfg["provider"] = kept
 
@@ -3132,7 +3140,9 @@ def oc_provider_sync(args):
                        and oc_is_retired_b70_provider(provider, existing.get(provider)))
         if retired_b70:
             replacements = [ref for ref in refs if ref.startswith("otools-b70/")]
-        if separator and provider.startswith(PROVIDER_PREFIX) and len(replacements) == 1:
+        if (separator and (provider.startswith(PROVIDER_PREFIX)
+                           or provider in duplicate_endpoints)
+                and len(replacements) == 1):
             agents[agent_name] = dict(entry, model=replacements[0])
             print(f"  migrated {agent_name} model: {model_ref} -> {replacements[0]}")
         elif retired_b70 and len(replacements) == 1:
@@ -3183,6 +3193,15 @@ def oc_provider_sync(args):
     for key in ("model", "small_model"):
         value = cfg.get(key)
         provider, separator, model_id = value.partition("/") if isinstance(value, str) else ("", "", "")
+        replacements = refs_by_model.get(model_id, [])
+        if separator and provider in duplicate_endpoints:
+            if len(replacements) == 1:
+                cfg[key] = replacements[0]
+                print(f"  migrated {key}: {value} -> {replacements[0]}")
+            else:
+                cfg.pop(key, None)
+                print(f"  removed stale {key}: {value}")
+            continue
         if (separator and model_id == "qwen3.8-27b"
                 and oc_is_retired_b70_provider(provider, existing.get(provider))):
             replacements = [ref for ref in refs if ref.startswith("otools-b70/")]
@@ -3763,6 +3782,33 @@ def oc_is_managed(key):
 def oc_is_retired_b70_provider(key, provider):
     """Match only the exact provider shape emitted by the retired B70 integration."""
     return key == "b70-local" and provider == RETIRED_B70_PROVIDER
+
+
+def _provider_endpoint_identity(provider):
+    base_url = ((provider or {}).get("options") or {}).get("baseURL")
+    if not isinstance(base_url, str):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if not parsed.hostname:
+        return None
+    return parsed.hostname.casefold(), port, parsed.path.rstrip("/") or "/"
+
+
+def oc_is_duplicate_managed_endpoint(provider, managed_providers):
+    """Match a stale provider for the same endpoint/model, regardless of URL scheme."""
+    identity = _provider_endpoint_identity(provider)
+    model_ids = set((provider or {}).get("models") or {})
+    if not identity or not model_ids:
+        return False
+    for managed in managed_providers.values():
+        if (_provider_endpoint_identity(managed) == identity
+                and model_ids.intersection((managed or {}).get("models") or {})):
+            return True
+    return False
 
 
 # ============================================================================

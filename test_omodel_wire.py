@@ -809,6 +809,10 @@ class TestManagedDeployments(unittest.TestCase):
                     "provider": {
                         "dgx-stale-8000": {"models": {"old": {}}},
                         "b70-local": m.RETIRED_B70_PROVIDER,
+                        "otto-home": {
+                            "options": {"baseURL": card["base_url"].replace("http:", "https:")},
+                            "models": {"qwen3.8-27b-gptq-int4-b70": {}},
+                        },
                     },
                     "model": "b70-local/qwen3.8-27b",
                     "small_model": "b70-local/qwen3.8-27b",
@@ -817,6 +821,9 @@ class TestManagedDeployments(unittest.TestCase):
                         "build": {"model": "dgx-stale-8000/Qwen3.6-27B-NVFP4"},
                         "plan": {"model": "dgx-stale-8000/Qwen3.6-27B-NVFP4"},
                         "card-user": {"model": "b70-local/qwen3.8-27b"},
+                        "home-user": {
+                            "model": "otto-home/qwen3.8-27b-gptq-int4-b70",
+                        },
                     },
                 }, f)
             args = make_args(tmp, _hosts=[], _ports=[], _endpoints=[endpoint, card])
@@ -827,6 +834,7 @@ class TestManagedDeployments(unittest.TestCase):
                 cfg = json.load(f)
             self.assertNotIn("dgx-stale-8000", cfg["provider"])
             self.assertNotIn("b70-local", cfg["provider"])
+            self.assertNotIn("otto-home", cfg["provider"])
             self.assertIn("otools-node-one", cfg["provider"])
             self.assertIn("otools-b70", cfg["provider"])
             self.assertEqual(cfg["agent"]["custom"]["model"],
@@ -836,6 +844,8 @@ class TestManagedDeployments(unittest.TestCase):
             self.assertEqual(cfg["agent"]["plan"]["model"],
                              "otools-node-one/Qwen3.6-27B-NVFP4")
             self.assertEqual(cfg["agent"]["card-user"]["model"],
+                             "otools-b70/qwen3.8-27b-gptq-int4-b70")
+            self.assertEqual(cfg["agent"]["home-user"]["model"],
                              "otools-b70/qwen3.8-27b-gptq-int4-b70")
             self.assertEqual(cfg["model"], "otools-b70/qwen3.8-27b-gptq-int4-b70")
             self.assertEqual(cfg["small_model"],
